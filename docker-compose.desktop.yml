@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  golem:
+    environment:
+      - GOLEM_DESKTOP_MODE=true
+      - PLAYWRIGHT_HEADLESS=false
+      - GOLEM_DISPLAY=${GOLEM_DISPLAY:-:99}
+      - GOLEM_VNC_PORT=${GOLEM_VNC_PORT:-5900}
+      - GOLEM_NOVNC_PORT=${GOLEM_NOVNC_PORT:-6080}
+      - GOLEM_NOVNC_BIND=${GOLEM_NOVNC_BIND:-0.0.0.0}
+      - GOLEM_VNC_PASSWORD=${GOLEM_VNC_PASSWORD:-}
+    ports:
+      - "${GOLEM_NOVNC_PORT:-6080}:${GOLEM_NOVNC_PORT:-6080}"
+    shm_size: "1gb"

@@ -1,0 +1,105 @@
+{
+  "system": {
+    "boot": {
+      "starting": "🚀 Golem 正在啟動...",
+      "model_loaded": "🧠 模型已載入: {{model}}",
+      "skills_loaded": "📚 已載入 {{count}} 個技能",
+      "memory_ready": "🧠 記憶系統就緒 ({{driver}})",
+      "ready": "✅ Golem 已就緒！",
+      "config_error": "❌ 設定錯誤",
+      "no_token": "未設定任何 Bot Token (TELEGRAM_TOKEN 或 DISCORD_TOKEN)，至少需要一個",
+      "no_api_keys": "GEMINI_API_KEYS 為空，DOMDoctor 自修復功能不可用"
+    },
+    "shutdown": {
+      "initiated": "🔒 [{{signal}}] 正在優雅關閉...",
+      "telegram_stopped": "  ✅ Telegram Bot 已停止",
+      "discord_stopped": "  ✅ Discord Bot 已停止",
+      "brain_stopped": "  ✅ Brain 已關閉",
+      "error": "  ⚠️ 關閉錯誤: {{message}}",
+      "complete": "👋 Golem 已關閉，再見！"
+    }
+  },
+  "security": {
+    "blocked": "🚫 安全阻擋: {{command}}",
+    "danger": "🔴 危險指令",
+    "warning": "🟡 警告",
+    "approve": "✅ 批准",
+    "deny": "❌ 拒絕",
+    "audit_log": "📋 安全審計記錄"
+  },
+  "android": {
+    "no_device": "未連接 Android 裝置。請透過 USB 或 `adb connect <ip>:5555` 連接",
+    "adb_not_found": "找不到 ADB: {{error}}。請安裝 Android SDK Platform Tools",
+    "tapped": "已點擊 ({{x}}, {{y}})",
+    "swiped": "已滑動 ({{x1}},{{y1}}) → ({{x2}},{{y2}})",
+    "typed": "已輸入: \"{{text}}\"",
+    "launched": "已啟動: {{package}}",
+    "app_not_found": "找不到 App: {{package}}",
+    "screenshot_saved": "截圖已儲存至 {{path}}",
+    "blocked_command": "已封鎖: \"{{command}}\" 包含危險操作 \"{{reason}}\""
+  },
+  "dashboard": {
+    "title": "Golem v9.5",
+    "subtitle": "多智能體戰情室",
+    "nav": {
+      "tactical": "戰術控制台",
+      "agents": "Agent 會議室",
+      "office": "辦公室模式"
+    },
+    "metrics": {
+      "memory": "記憶體使用量",
+      "queue": "佇列負載",
+      "uptime": "系統運行時間",
+      "schedule": "下次排程"
+    },
+    "status": {
+      "environment": "環境",
+      "production": "生產環境",
+      "mode": "模式",
+      "multi_agent": "多智能體",
+      "backend": "後端",
+      "connected": "已連線",
+      "disconnected": "已斷線",
+      "reconnecting": "重新連線中"
+    },
+    "actions": {
+      "reload": "重新啟動 Golem",
+      "reloading": "正在重啟...",
+      "reload_warning": "注意：這將重啟整個後端進程，前端會短暫斷線。",
+      "reload_confirm": "確定要重新啟動 Golem 嗎？",
+      "reload_success": "系統正在重新啟動，請稍候...",
+      "reload_failed": "重新啟動失敗"
+    },
+    "logs": {
+      "title": "即時系統日誌",
+      "no_schedule": "無排程"
+    }
+  },
+  "doctor": {
+    "title": "Golem 啟動診斷",
+    "checking": "正在檢查...",
+    "pass": "通過",
+    "fail": "失敗",
+    "node_version": "Node.js 版本",
+    "bot_token": "Bot Token",
+    "api_keys": "API Keys",
+    "memory_dir": "記憶目錄可寫",
+    "port_available": "Dashboard 端口可用",
+    "chromium": "Chromium 瀏覽器",
+    "env_file": ".env 檔案"
+  },
+  "memory": {
+    "native_started": "🧠 系統原生核心已啟動",
+    "browser_mounting": "🧠 正在掛載神經海馬迴: {{path}}",
+    "browser_failed": "❌ 記憶啟動失敗: {{error}}",
+    "qmd_probing": "🔍 啟動引擎探測..."
+  },
+  "common": {
+    "error": "錯誤",
+    "success": "成功",
+    "cancel": "取消",
+    "confirm": "確認",
+    "loading": "載入中...",
+    "no_data": "無資料"
+  }
+}

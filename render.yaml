@@ -1,0 +1,28 @@
+# Render.com Blueprint — One-click deploy for Project-Golem
+# Deploy: https://render.com/deploy?repo=https://github.com/Arvincreator/project-golem
+#
+# Free tier: 750 hours/month, auto-sleep after 15min inactivity
+
+services:
+  - type: web
+    name: golem-core
+    runtime: docker
+    plan: free
+    healthCheckPath: /api/health
+    envVars:
+      - key: TELEGRAM_TOKEN
+        sync: false  # User must provide
+      - key: ADMIN_ID
+        sync: false
+      - key: GEMINI_API_KEYS
+        sync: false
+      - key: ENABLE_WEB_DASHBOARD
+        value: "true"
+      - key: DASHBOARD_PORT
+        value: "3000"
+      - key: NODE_ENV
+        value: "production"
+      - key: GOLEM_LOCALE
+        value: "zh-TW"
+      - key: GOLEM_BRAIN_MODE
+        value: "api"  # No Chromium on Render free tier

@@ -1,0 +1,105 @@
+{
+  "system": {
+    "boot": {
+      "starting": "🚀 Golem を起動中...",
+      "model_loaded": "🧠 モデル読み込み完了: {{model}}",
+      "skills_loaded": "📚 {{count}} 個のスキルを読み込みました",
+      "memory_ready": "🧠 メモリシステム準備完了 ({{driver}})",
+      "ready": "✅ Golem 準備完了！",
+      "config_error": "❌ 設定エラー",
+      "no_token": "Bot Token が設定されていません (TELEGRAM_TOKEN または DISCORD_TOKEN)。少なくとも1つ必要です。",
+      "no_api_keys": "GEMINI_API_KEYS が空です。DOMDoctor 自己修復機能は利用できません。"
+    },
+    "shutdown": {
+      "initiated": "🔒 [{{signal}}] グレースフルシャットダウン開始...",
+      "telegram_stopped": "  ✅ Telegram Bot 停止",
+      "discord_stopped": "  ✅ Discord Bot 停止",
+      "brain_stopped": "  ✅ Brain シャットダウン",
+      "error": "  ⚠️ シャットダウンエラー: {{message}}",
+      "complete": "👋 Golem がシャットダウンしました。さようなら！"
+    }
+  },
+  "security": {
+    "blocked": "🚫 セキュリティブロック: {{command}}",
+    "danger": "🔴 危険なコマンド",
+    "warning": "🟡 警告",
+    "approve": "✅ 承認",
+    "deny": "❌ 拒否",
+    "audit_log": "📋 セキュリティ監査ログ"
+  },
+  "android": {
+    "no_device": "Android デバイスが接続されていません。USB または `adb connect <ip>:5555` で接続してください",
+    "adb_not_found": "ADB が見つかりません: {{error}}。Android SDK Platform Tools をインストールしてください。",
+    "tapped": "({{x}}, {{y}}) をタップしました",
+    "swiped": "({{x1}},{{y1}}) から ({{x2}},{{y2}}) にスワイプしました",
+    "typed": "入力: \"{{text}}\"",
+    "launched": "起動: {{package}}",
+    "app_not_found": "アプリが見つかりません: {{package}}",
+    "screenshot_saved": "スクリーンショットを {{path}} に保存しました",
+    "blocked_command": "ブロック: \"{{command}}\" には危険な操作 \"{{reason}}\" が含まれています"
+  },
+  "dashboard": {
+    "title": "Golem v9.5",
+    "subtitle": "マルチエージェント作戦室",
+    "nav": {
+      "tactical": "戦術コンソール",
+      "agents": "エージェント会議室",
+      "office": "オフィスモード"
+    },
+    "metrics": {
+      "memory": "メモリ使用量",
+      "queue": "キュー負荷",
+      "uptime": "稼働時間",
+      "schedule": "次回スケジュール"
+    },
+    "status": {
+      "environment": "環境",
+      "production": "本番環境",
+      "mode": "モード",
+      "multi_agent": "マルチエージェント",
+      "backend": "バックエンド",
+      "connected": "接続済み",
+      "disconnected": "切断",
+      "reconnecting": "再接続中"
+    },
+    "actions": {
+      "reload": "Golem を再起動",
+      "reloading": "再起動中...",
+      "reload_warning": "注意：バックエンドプロセス全体が再起動されます。フロントエンドは一時的に切断されます。",
+      "reload_confirm": "Golem を再起動してもよろしいですか？",
+      "reload_success": "システムを再起動中です。しばらくお待ちください...",
+      "reload_failed": "再起動に失敗しました"
+    },
+    "logs": {
+      "title": "リアルタイムシステムログ",
+      "no_schedule": "スケジュールなし"
+    }
+  },
+  "doctor": {
+    "title": "Golem 起動診断",
+    "checking": "チェック中...",
+    "pass": "合格",
+    "fail": "不合格",
+    "node_version": "Node.js バージョン",
+    "bot_token": "Bot Token",
+    "api_keys": "API Keys",
+    "memory_dir": "メモリディレクトリ書き込み可",
+    "port_available": "ダッシュボードポート利用可",
+    "chromium": "Chromium ブラウザ",
+    "env_file": ".env ファイル"
+  },
+  "memory": {
+    "native_started": "🧠 システムネイティブメモリコア起動",
+    "browser_mounting": "🧠 ニューラル海馬をマウント中: {{path}}",
+    "browser_failed": "❌ メモリ初期化失敗: {{error}}",
+    "qmd_probing": "🔍 エンジン探索中..."
+  },
+  "common": {
+    "error": "エラー",
+    "success": "成功",
+    "cancel": "キャンセル",
+    "confirm": "確認",
+    "loading": "読み込み中...",
+    "no_data": "データなし"
+  }
+}

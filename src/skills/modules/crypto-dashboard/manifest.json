@@ -1,0 +1,23 @@
+{
+  "id": "crypto-dashboard",
+  "name": "Crypto Dashboard",
+  "description": "讀取並刷新 Dashboard 加密貨幣分析看板快照，協助分析幣對、技術指標與新聞脈絡。",
+  "type": "core",
+  "enabled": true,
+  "action": "crypto-dashboard",
+  "entry": "index.js",
+  "prompt": "skill.md",
+  "toolsets": ["assistant", "research", "safe", "autonomy"],
+  "triggers": [
+    "加密貨幣分析",
+    "幣市看板",
+    "crypto dashboard",
+    "cryptoboard",
+    "bitcoin",
+    "ethereum",
+    "btc-usdt",
+    "eth-usdc",
+    "market analysis"
+  ],
+  "version": "1.0.0"
+}

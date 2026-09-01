@@ -1,0 +1,105 @@
+{
+  "system": {
+    "boot": {
+      "starting": "🚀 Golem is starting...",
+      "model_loaded": "🧠 Model loaded: {{model}}",
+      "skills_loaded": "📚 Loaded {{count}} skills",
+      "memory_ready": "🧠 Memory system ready ({{driver}})",
+      "ready": "✅ Golem is ready!",
+      "config_error": "❌ Configuration error",
+      "no_token": "No Bot Token configured (TELEGRAM_TOKEN or DISCORD_TOKEN). At least one is required.",
+      "no_api_keys": "GEMINI_API_KEYS is empty. DOMDoctor self-repair will be unavailable."
+    },
+    "shutdown": {
+      "initiated": "🔒 [{{signal}}] Graceful shutdown initiated...",
+      "telegram_stopped": "  ✅ Telegram Bot stopped",
+      "discord_stopped": "  ✅ Discord Bot stopped",
+      "brain_stopped": "  ✅ Brain shut down",
+      "error": "  ⚠️ Shutdown error: {{message}}",
+      "complete": "👋 Golem has shut down. Goodbye!"
+    }
+  },
+  "security": {
+    "blocked": "🚫 Security blocked: {{command}}",
+    "danger": "🔴 Dangerous command",
+    "warning": "🟡 Warning",
+    "approve": "✅ Approve",
+    "deny": "❌ Deny",
+    "audit_log": "📋 Security audit log"
+  },
+  "android": {
+    "no_device": "No Android devices connected. Connect via USB or `adb connect <ip>:5555`",
+    "adb_not_found": "ADB not found: {{error}}. Install Android SDK Platform Tools.",
+    "tapped": "Tapped at ({{x}}, {{y}})",
+    "swiped": "Swiped ({{x1}},{{y1}}) to ({{x2}},{{y2}})",
+    "typed": "Typed: \"{{text}}\"",
+    "launched": "Launched: {{package}}",
+    "app_not_found": "App not found: {{package}}",
+    "screenshot_saved": "Screenshot saved to {{path}}",
+    "blocked_command": "BLOCKED: \"{{command}}\" contains dangerous operation \"{{reason}}\""
+  },
+  "dashboard": {
+    "title": "Golem v9.5",
+    "subtitle": "MultiAgent War Room",
+    "nav": {
+      "tactical": "Tactical Console",
+      "agents": "Agent Meeting Room",
+      "office": "Office Mode"
+    },
+    "metrics": {
+      "memory": "Memory Usage",
+      "queue": "Queue Load",
+      "uptime": "System Uptime",
+      "schedule": "Next Schedule"
+    },
+    "status": {
+      "environment": "Environment",
+      "production": "Production",
+      "mode": "Mode",
+      "multi_agent": "Multi-Agent",
+      "backend": "Backend",
+      "connected": "Connected",
+      "disconnected": "Disconnected",
+      "reconnecting": "Reconnecting"
+    },
+    "actions": {
+      "reload": "Restart Golem",
+      "reloading": "Restarting...",
+      "reload_warning": "Warning: This will restart the entire backend process. The frontend will briefly disconnect.",
+      "reload_confirm": "Are you sure you want to restart Golem?",
+      "reload_success": "System is restarting, please wait...",
+      "reload_failed": "Restart failed"
+    },
+    "logs": {
+      "title": "Live System Logs",
+      "no_schedule": "No schedule"
+    }
+  },
+  "doctor": {
+    "title": "Golem Startup Diagnostics",
+    "checking": "Checking...",
+    "pass": "PASS",
+    "fail": "FAIL",
+    "node_version": "Node.js Version",
+    "bot_token": "Bot Token",
+    "api_keys": "API Keys",
+    "memory_dir": "Memory Directory Writable",
+    "port_available": "Dashboard Port Available",
+    "chromium": "Chromium Browser",
+    "env_file": ".env File"
+  },
+  "memory": {
+    "native_started": "🧠 System native memory core started",
+    "browser_mounting": "🧠 Mounting neural hippocampus: {{path}}",
+    "browser_failed": "❌ Memory init failed: {{error}}",
+    "qmd_probing": "🔍 Probing engine..."
+  },
+  "common": {
+    "error": "Error",
+    "success": "Success",
+    "cancel": "Cancel",
+    "confirm": "Confirm",
+    "loading": "Loading...",
+    "no_data": "No data"
+  }
+}

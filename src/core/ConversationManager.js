@@ -1,0 +1,433 @@
+const { v4: uuidv4 } = require('uuid');
+const ConfigManager = require('../config');
+const ConfidenceTracker = require('../managers/ConfidenceTracker');
+const { getMemoryFirewallService } = require('../services/MemoryFirewallService');
+
+// ============================================================
+// 🚦 Conversation Manager (隊列與防抖系統 - 多用戶隔離版)
+// ============================================================
+class ConversationManager {
+    constructor(brain, neuroShunterClass, controller, options = {}) {
+        this.golemId = options.golemId || 'default';
+        this.brain = brain;
+        this.NeuroShunter = neuroShunterClass;
+        this.controller = controller;
+        this.queue = [];
+        this.isProcessing = false;
+        this.userBuffers = new Map();
+        this.lastUserTurnByChat = new Map();
+        this.silentMode = false;
+        this.observerMode = false;
+        this.interventionLevel = options.interventionLevel || 'CONSERVATIVE';
+        this.DEBOUNCE_MS = 1500;
+        this.autoTurnCount = 0; // 🎯 [v9.1.15] Track autonomous turns
+
+        // 初始化信心追蹤器
+        this.confidenceTracker = new ConfidenceTracker(this.brain.chatLogManager);
+        const localContextEnabled = typeof this.brain.isLocalContextEnabled !== 'function'
+            || this.brain.isLocalContextEnabled();
+        this.memoryFirewall = localContextEnabled ? getMemoryFirewallService() : null;
+
+        // 🔄 [Instance Pooling] 背景監控與定時重啟定時器
+        this.UPTIME_LIMIT_MS = 24 * 60 * 60 * 1000; // 24H
+        this._healthCheckInterval = localContextEnabled
+            ? setInterval(() => this._checkInstanceHealth(), 60 * 60 * 1000)
+            : null; // M365 POC only checks/reopens the browser on a user-initiated request.
+    }
+
+    getLastUserTurn(chatId) {
+        if (typeof this.brain.isLocalContextEnabled === 'function' && !this.brain.isLocalContextEnabled()) {
+            return null;
+        }
+        const key = String(chatId || '').trim();
+        if (!key) return null;
+        return this.lastUserTurnByChat.get(key) || null;
+    }
+
+    _getMemoryFirewall(localContextEnabled) {
+        if (!localContextEnabled) return null;
+        if (!this.memoryFirewall) this.memoryFirewall = getMemoryFirewallService();
+        return this.memoryFirewall;
+    }
+
+    destroy() {
+        for (const state of this.userBuffers.values()) {
+            if (state && state.timer) clearTimeout(state.timer);
+        }
+        this.userBuffers.clear();
+        this.lastUserTurnByChat.clear();
+        this.queue.length = 0;
+        if (this._healthCheckInterval) {
+            clearInterval(this._healthCheckInterval);
+            this._healthCheckInterval = null;
+        }
+    }
+
+    async _checkInstanceHealth() {
+        if (this.isProcessing || this.queue.length > 0) return; // 不要干擾進行中的對話
+        if (this.brain && this.brain.browserStartTime && (Date.now() - this.brain.browserStartTime > this.UPTIME_LIMIT_MS)) {
+            console.log(`🔄 [Instance Pooling] 大腦實體已達生命週期 (24小時)，目前系統閒置。開始背景重啟實體池...`);
+            this.isProcessing = true; // 鎖住隊列，防止新請求干擾
+            try {
+                await this.brain._ensureBrowserHealth(true);
+                console.log(`✅ [Instance Pooling] 閒置背景重啟完成！`);
+            } catch (e) {
+                console.warn(`⚠️ [Instance Pooling] 閒置背景重啟失敗:`, e.message);
+            } finally {
+                this.isProcessing = false;
+                this._processQueue(); // 重新觸發可能在鎖定期間累積的隊列
+            }
+        }
+    }
+
+    async enqueue(ctx, text, options = { isPriority: false, bypassDebounce: false, attachment: null }) {
+        const chatId = ctx.chatId;
+        const localContextEnabled = typeof this.brain.isLocalContextEnabled === 'function'
+            ? this.brain.isLocalContextEnabled()
+            : true;
+
+        // Safe mode holds only the active request. It does not retain extra queued prompts
+        // or create approval tasks that contain their text.
+        if (!localContextEnabled && (this.isProcessing || this.queue.length > 0 || this.userBuffers.size > 0)) {
+            if (ctx && typeof ctx.reply === 'function') {
+                await ctx.reply('⚠️ M365 Web POC 正在處理上一則訊息；安全模式不保存額外待處理內容，請稍後重新送出。');
+            }
+            return;
+        }
+
+        // 🚨 Highest Privilege: priority tasks bypass user buffers completely and inject straight into queue
+        if (options.bypassDebounce) {
+            console.log(localContextEnabled
+                ? `⚡ [Dialogue Queue] 高優先級請求繞過防抖機制 (${chatId}): "${text.substring(0, 15)}..."`
+                : `🛡️ [Dialogue Queue] M365 POC 高優先級純文字 (${chatId}, ${String(text || '').length} chars)`);
+
+            // 🎯 [v9.1.15] Reset or increment auto turn count
+            if (options.isSystemFeedback) {
+                this.autoTurnCount++;
+                console.log(`🔄 [Dialogue Queue] 自動模式回合數: ${this.autoTurnCount}/${ConfigManager.CONFIG.MAX_AUTO_TURNS || 5}`);
+            } else {
+                this.autoTurnCount = 0;
+            }
+
+            this._commitDirectly(ctx, text, options.isPriority, options.attachment, options);
+            return;
+        }
+
+        let userState = this.userBuffers.get(chatId) || { text: "", timer: null, ctx: ctx, attachments: [], options: {} };
+        userState.text = userState.text ? `${userState.text}\n${text}` : text;
+        userState.ctx = ctx;
+        if (options.attachment) {
+            userState.attachments = userState.attachments || [];
+            userState.attachments.push(options.attachment);
+        }
+        userState.options = { ...userState.options, ...options };
+
+        console.log(localContextEnabled
+            ? `⏳ [Dialogue Queue] 收到對話 (${chatId}): "${text.substring(0, 15)}..."${options.attachment ? ' 📎 含有附件' : ''}`
+            : `🛡️ [Dialogue Queue] M365 POC 收到純文字 (${chatId}, ${String(text || '').length} chars)`);
+        if (userState.timer) clearTimeout(userState.timer);
+        userState.timer = setTimeout(() => {
+            // 🎯 [v9.1.15] User messages coming through debounce also reset the counter
+            this.autoTurnCount = 0;
+            this._commitToQueue(chatId);
+        }, this.DEBOUNCE_MS);
+        this.userBuffers.set(chatId, userState);
+    }
+
+    _logQueueState(reason = 'update') {
+        console.log(`[QueueState] queue=${this.queue.length} processing=${this.isProcessing ? 1 : 0} reason=${reason}`);
+    }
+
+    _commitDirectly(ctx, text, isPriority, attachment = null, options = {}) {
+        // ✨ [v9.1 插隊系統：大腦層擴充]
+        // 如果不是特急件 (isPriority=false)，且隊列中已有任務 (長度 >= 1)，則觸發詢問
+        if (!isPriority && this.queue.length >= 1) {
+            const approvalId = uuidv4();
+
+            // 將對話任務暫存在 Controller 的 pendingTasks
+            this.controller.pendingTasks.set(approvalId, {
+                type: 'DIALOGUE_QUEUE_APPROVAL',
+                ctx,
+                text,
+                attachment,
+                options, // 🎯 [v9.1.13] 攜帶附加選項
+                timestamp: Date.now()
+            });
+
+            // 回傳 Telegram 行內鍵盤選項
+            ctx.reply(
+                `🚨 **大腦思考中**\n目前有 \`${this.queue.length}\` 則訊息正在等待處理，且 Golem 正在專心做其他事。\n\n請問這則新訊息是否要 **急件插隊**？`,
+                {
+                    parse_mode: 'Markdown',
+                    reply_markup: {
+                        inline_keyboard: [[
+                            { text: '⬆️ 急件插隊', callback_data: `DIAPRIORITY_${approvalId}` },
+                            { text: '⬇️ 正常排隊', callback_data: `DIAAPPEND_${approvalId}` }
+                        ]]
+                    }
+                }
+            ).then(msg => {
+                // 30 秒自動 Timeout 防呆 (預設為 Append)
+                setTimeout(async () => {
+                    const task = this.controller.pendingTasks.get(approvalId);
+                    if (task && task.type === 'DIALOGUE_QUEUE_APPROVAL') {
+                        this.controller.pendingTasks.delete(approvalId);
+                        console.log(`⏳ [Dialogue Queue] 互動超時，任務 ${approvalId} 自動排入隊尾。`);
+
+                        try {
+                            if (ctx.platform === 'telegram' && msg && msg.message_id) {
+                                await ctx.instance.editMessageText(
+                                    `🚨 **大腦思考中**\n目前對話佇列繁忙。\n\n*(預設) 已將此訊息自動排入對話隊尾。*`,
+                                    {
+                                        chat_id: ctx.chatId,
+                                        message_id: msg.message_id,
+                                        parse_mode: 'Markdown',
+                                        reply_markup: { inline_keyboard: [] }
+                                    }
+                                ).catch(() => { });
+                            }
+                        } catch (e) { console.warn("無法更新 Dialogue Timeout 訊息:", e.message); }
+
+                        // 超時後強制以一般優先級入隊
+                        this._actualCommit(ctx, text, false, attachment);
+                    }
+                }, 30000);
+            });
+            return;
+        }
+
+        // 正常入隊
+        this._actualCommit(ctx, text, isPriority, attachment, options);
+    }
+
+    _actualCommit(ctx, text, isPriority, attachment = null, options = {}) {
+        console.log(`📦 [Dialogue Queue] 加入隊列 (Direct) ${isPriority ? '[💥VIP 插隊中]' : ''} - 準備交由大腦處理`);
+        if (isPriority) {
+            this.queue.unshift({ ctx, text, attachment, options }); // Priority goes to the front of the line
+        } else {
+            this.queue.push({ ctx, text, attachment, options });
+        }
+        this._logQueueState(isPriority ? 'enqueue_priority' : 'enqueue_normal');
+        this._processQueue();
+    }
+
+    _commitToQueue(chatId) {
+        const userState = this.userBuffers.get(chatId);
+        if (!userState || !userState.text) return;
+        const fullText = userState.text;
+        const currentCtx = userState.ctx;
+        const attachment = userState.attachments && userState.attachments.length > 0 ? userState.attachments[0] : null; // 目前僅支援單張，取第一張
+        const options = userState.options || {};
+        this.userBuffers.delete(chatId);
+        this._commitDirectly(currentCtx, fullText, false, attachment, options);
+    }
+
+    async _processQueue() {
+        if (this.isProcessing || this.queue.length === 0) return;
+
+        // 🎯 [v9.1.15] Enforce Max Auto Turns limit
+        const maxTurns = ConfigManager.CONFIG.MAX_AUTO_TURNS || 5;
+        if (this.autoTurnCount >= maxTurns) {
+            const lastTask = this.queue[0];
+            if (lastTask && lastTask.options && lastTask.options.isSystemFeedback) {
+                console.warn(`🛑 [Dialogue Queue] 已達到自動模式回合上限 (${maxTurns})，停止自動循環。`);
+                this.queue.shift(); // Remove the system feedback task
+                await lastTask.ctx.reply(`⚠️ **自動執行已中止**\n已達到連續自動執行上限 (\`${maxTurns}\` 回合)。為了安全起見，請手動介入確認或重新下達指令。`, { parse_mode: 'Markdown' });
+                this.autoTurnCount = 0; // Reset for next user interaction
+                this._processQueue();
+                return;
+            }
+        }
+
+        this.isProcessing = true;
+        const task = this.queue.shift();
+        this._logQueueState('dequeue_start');
+
+        // 🧹 [Extra Arch 3] Memory Guard 記憶體上限監控
+        const heapObj = process.memoryUsage();
+        const heapRatio = heapObj.heapUsed / heapObj.heapTotal;
+        if (heapRatio > 0.8) {
+            const usedMB = Math.round(heapObj.heapUsed / 1024 / 1024);
+            const totalMB = Math.round(heapObj.heapTotal / 1024 / 1024);
+            console.warn(`⚠️ [Memory Guard] 堆疊記憶體使用率達 ${(heapRatio * 100).toFixed(1)}% (${usedMB}MB / ${totalMB}MB)，強制觸發系統回收...`);
+            if (global.gc) global.gc();
+        }
+
+        try {
+            console.log(`🚀 [Dialogue Queue:${this.golemId}] 從隊列取出，開始處理對話...`);
+            const isSystemFeedback = task.options && task.options.isSystemFeedback === true;
+            const localContextEnabled = typeof this.brain.isLocalContextEnabled === 'function'
+                ? this.brain.isLocalContextEnabled()
+                : true;
+            const memoryFirewall = this._getMemoryFirewall(localContextEnabled);
+            const logPreview = String(task.text || '').slice(0, isSystemFeedback ? 160 : 1000);
+            const truncatedMarker = String(task.text || '').length > logPreview.length ? '...' : '';
+            if (localContextEnabled) {
+                console.log(
+                    isSystemFeedback
+                        ? `🧩 [System->${this.golemId}] Observation (${String(task.text || '').length} chars): ${logPreview}${truncatedMarker}`
+                        : `🗣️ [User->${this.golemId}] 說: ${logPreview}${truncatedMarker}${task.attachment ? ' 📎 含有附件' : ''}`,
+                    { attachment: task.attachment }
+                );
+            } else {
+                console.log(`🛡️ [Dialogue Queue:${this.golemId}] M365 POC 收到 ${String(task.text || '').length} 字元純文字；內容不寫入本機預覽日誌。`);
+            }
+
+            // ✨ [Log] 只記錄真正的使用者輸入；工具/技能 Observation 是內部上下文，不顯示在使用者歷史中。
+            if (!isSystemFeedback) {
+                const chatKey = String(task.ctx && task.ctx.chatId ? task.ctx.chatId : '');
+                if (chatKey && localContextEnabled) {
+                    this.lastUserTurnByChat.set(chatKey, {
+                        text: task.text,
+                        attachment: task.attachment || null,
+                        at: Date.now()
+                    });
+                } else if (chatKey) {
+                    this.lastUserTurnByChat.delete(chatKey);
+                }
+                this.brain._appendChatLog({
+                    timestamp: Date.now(),
+                    sender: 'User', // 統一顯示為 User，也可由 ctx.userId 區分
+                    content: task.text,
+                    type: 'user',
+                    role: 'User',
+                    isSystem: false,
+                    attachment: task.attachment
+                });
+            }
+
+            await task.ctx.sendTyping();
+            const recalled = (isSystemFeedback || !localContextEnabled) ? [] : await this.brain.recall(task.text);
+            let memories = Array.isArray(recalled)
+                ? recalled.filter((item) => !(item && item.metadata && item.metadata.visible === false))
+                : [];
+            if (!isSystemFeedback && memoryFirewall && memoryFirewall.isEnabled()) {
+                const guarded = memoryFirewall.filterMemories(memories, { golemId: this.golemId });
+                memories = Array.isArray(guarded.memories) ? guarded.memories : memories;
+            }
+            let referenceContext = '';
+            if (!isSystemFeedback && localContextEnabled) {
+                try {
+                    const ReferenceFileService = require('../services/ReferenceFileService');
+                    referenceContext = ReferenceFileService.buildContext(task.text, { limit: 4, maxChunkChars: 1200 });
+                } catch (error) {
+                    console.warn(`[ReferenceFiles] 自動召回失敗: ${error.message}`);
+                }
+            }
+            let finalInput = task.text;
+            if (referenceContext) {
+                finalInput = `【相關參考文件】\n${referenceContext}\n---\n${finalInput}`;
+            }
+            if (memories.length > 0) {
+                finalInput = `【相關記憶】\n${memories.map(m => `• ${m.text}`).join('\n')}\n---\n${finalInput}`;
+            }
+            const isMentioned = task.ctx.isMentioned ? task.ctx.isMentioned(task.text) : false;
+            const isGroupReplyTrigger = task.options.groupReplyTriggered === true;
+            const effectiveTrigger = isMentioned || isGroupReplyTrigger;
+            const effectiveObserver = this.observerMode || task.options.forceObserver === true;
+
+            if (this.silentMode && !effectiveTrigger) {
+                console.log(`🤫 [Dialogue Queue:${this.golemId}] 完全靜默模式啟動中，且未被標記，跳過大腦處理。`);
+                this.isProcessing = false;
+                setTimeout(() => this._processQueue(), 500);
+                return;
+            }
+
+            const shouldSuppressReply = (effectiveObserver && !effectiveTrigger) || task.options.suppressReply === true;
+
+            if (shouldSuppressReply) {
+                console.log(`👁️ [Dialogue Queue:${this.golemId}] 觀察者模式監聽中 (背景同步上下文)...`);
+            }
+
+            if (effectiveTrigger && (this.silentMode || effectiveObserver)) {
+                console.log(`📢 [Dialogue Queue:${this.golemId}] 模式中偵測到標記，強制恢復回應。`);
+            }
+
+            const brainResponse = await this.brain.sendMessage(finalInput, false, {
+                isObserver: effectiveObserver,
+                interventionLevel: this.interventionLevel,
+                attachment: task.attachment,
+                isAdmin: task.ctx && task.ctx.isAdmin === true,
+                chatId: task.ctx && task.ctx.chatId,
+                platform: task.ctx && task.ctx.platform,
+                ...task.options // 🎯 [v9.1.13] 透傳來自隊列的自定義選項 (如 suppressReply)
+            });
+
+            if (task.ctx && typeof task.ctx.onTransportComplete === 'function') {
+                try {
+                    await task.ctx.onTransportComplete(brainResponse);
+                } catch (hookError) {
+                    console.error(`❌ [Dialogue Queue:${this.golemId}] M365 transport persistence hook failed:`, hookError);
+                    if (typeof task.ctx.onPersistenceError === 'function') {
+                        await task.ctx.onPersistenceError(hookError).catch(() => undefined);
+                    }
+                }
+            }
+
+            let { text: raw, attachments: responseAttachments, status: extractorStatus } = brainResponse;
+            if (!isSystemFeedback && memoryFirewall && memoryFirewall.isEnabled()) {
+                const inspected = memoryFirewall.inspectResponse(raw, { golemId: this.golemId });
+                if (inspected && inspected.blocked && typeof inspected.text === 'string') {
+                    raw = inspected.text;
+                }
+            }
+            if (brainResponse && typeof brainResponse === 'object') {
+                brainResponse.text = raw;
+                brainResponse.attachments = responseAttachments;
+            }
+
+            // ✨ [Metacognition] AUQ 信心評分與標記
+            const evaluation = localContextEnabled
+                ? this.confidenceTracker.evaluate(raw, extractorStatus, task.text)
+                : { score: 1, label: 'M365_POC_DISABLED', flags: [] };
+            if (evaluation.score < 0.5) {
+                raw += `\n\n🔶 *(系統提示: AI 信心指數 ${(evaluation.score * 100).toFixed(0)}% · ${evaluation.label})*`;
+            }
+            // 非同步寫入歷史紀錄
+            if (localContextEnabled) {
+                this.confidenceTracker.record({
+                    query: task.text,
+                    response: raw,
+                    score: evaluation.score,
+                    label: evaluation.label,
+                    flags: evaluation.flags,
+                    extractor_status: extractorStatus
+                }).catch(e => console.error("[ConfidenceTracker] Record error:", e));
+            }
+
+            await this.NeuroShunter.dispatch(task.ctx, brainResponse, this.brain, this.controller, {
+                suppressReply: shouldSuppressReply,
+                attachments: responseAttachments,
+                isSystemFeedback: task.options.isSystemFeedback === true,
+                allowActions: task.options.allowActions === true,
+                actionDepth: Number(task.options.actionDepth || 0),
+                maxActionDepth: Number(task.options.maxActionDepth || ConfigManager.CONFIG.MAX_AUTO_TURNS || 5)
+            });
+        } catch (e) {
+            console.error(`❌ [Dialogue Queue:${this.golemId}] 處理失敗:`, e);
+            if (task.ctx && typeof task.ctx.onTransportError === 'function') {
+                await task.ctx.onTransportError(e).catch((hookError) => {
+                    console.error(`❌ [Dialogue Queue:${this.golemId}] M365 transport error hook failed:`, hookError);
+                });
+            }
+            // ✅ [M-4 Fix] 對外只顯示友善錯誤，避免洩露路徑/Selector 等內部資訊
+            if (/^M365_|^BROWSER_PROFILE_IN_USE$/.test(String(e && e.code || ''))) {
+                await task.ctx.reply(`⚠️ ${e.message}`);
+            } else {
+                await task.ctx.reply(`⚠️ 系統暫時無法回應，請稍後再試。`);
+            }
+        } finally {
+            this.isProcessing = false;
+            this._logQueueState('process_done');
+            
+            // 🧹 [Memory Optimization] 強制執行 V8 垃圾回收，釋放回合變數
+            if (global.gc) {
+                global.gc();
+            }
+            
+            setTimeout(() => this._processQueue(), 500);
+        }
+    }
+}
+
+module.exports = ConversationManager;

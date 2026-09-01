@@ -1,0 +1,109 @@
+# ==========================================
+# 1. 安全性 (Security) - 絕對不能上傳
+# ==========================================
+.env
+.env.test
+.env.production
+.env.tmp
+.env.*
+*.env
+!.env.example
+!*.env.example
+# 防止 Google Session 或 Puppeteer Cookies 洩漏
+google-session.json
+*.cookie
+*.json.last
+
+# ==========================================
+# 2. Node.js 核心
+# ==========================================
+node_modules/
+.npm-cache/
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+# package-lock.json 應納入版本，以鎖定可重現的依賴版本。
+
+# ==========================================
+# 3. Golem v9.1 記憶體與資料庫 (Memory & DB)
+# ==========================================
+# Titan Chronos 的排程與隊列數據
+queue/
+*.db
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm
+
+# 向量記憶體與知識庫 (Local RAG)
+golem_memory/
+golem_memory.before-reincarnation-*/
+memory/knowledge/
+# 如果您希望保留預設記憶模板，可使用 !golem_memory/template/
+
+# Transformers.js 模型緩存 (避免上傳幾百 MB 的模型檔)
+.cache/
+models/
+ONNX/
+
+# ==========================================
+# 4. Puppeteer 瀏覽器暫存 (Browser Data)
+# ==========================================
+# Puppeteer 下載的 Chromium (如果裝在專案內)
+.local-chromium/
+.puppeteer/
+
+# 使用者資料夾 (含登入 Session，檔案巨大且敏感)
+user_data/
+profile/
+puppeteer_data/
+
+# ==========================================
+# 5. 執行日誌與除錯 (Logs & Debug)
+# ==========================================
+logs/
+*.log
+error.txt
+test_output*.txt
+combined.log
+coverage/
+.nyc_output/
+
+# 截圖與錄影 (Agent 執行失敗時的截圖)
+screenshots/
+videos/
+*.mp4
+
+# ==========================================
+# 6. 系統雜檔 (System Junk)
+# ==========================================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.swp
+temp/
+tmp/
+backups/
+golems.json
+moltbot_auth.json
+.golem.pid
+profiles
+data/temp_uploads
+data/dashboard/stock-symbol-directory.json
+data/dashboard/reference-files.json
+data/dashboard/reference-file-index.json
+data/dashboard/collab-calendar.json
+data/dashboard/memory-firewall.json
+data/dashboard/prompt-pool.json
+data/dashboard/google-oauth-token.json
+data/dashboard/stock-dashboard-snapshot.json
+data/rpg-memberships.json
+data/rpg-mobile-link-requests.json
+project-golem-m365-poc-validation-evidence-*/
+WFGY-3.0_Singularity.txt
+notebooklm_venv
+.gemini/
+.golem/
+skills.db
+web-dashboard/tsconfig.tsbuildinfo
