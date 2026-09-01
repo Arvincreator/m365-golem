@@ -112,6 +112,33 @@ describe('M365 workspace routes', () => {
             'VAT review',
         ]);
 
+        const secondConversationId = secondConversation.body.conversation.id;
+        const renamedConversation = await request(`/api/conversations/${secondConversationId}`, {
+            method: 'PATCH',
+            body: JSON.stringify({ title: 'Payroll evidence review' }),
+        });
+        expect(renamedConversation.response.status).toBe(200);
+        expect(renamedConversation.body.conversation).toEqual(expect.objectContaining({
+            id: secondConversationId,
+            title: 'Payroll evidence review',
+            status: 'active',
+        }));
+
+        const archivedConversation = await request(`/api/conversations/${secondConversationId}/archive`, {
+            method: 'POST',
+        });
+        expect(archivedConversation.response.status).toBe(200);
+        expect(archivedConversation.body.conversation.status).toBe('archived');
+
+        const activeConversations = await request(`/api/projects/${projectId}/conversations`);
+        expect(activeConversations.body.conversations.map((item) => item.id)).toEqual([
+            firstConversation.body.conversation.id,
+        ]);
+        const allConversations = await request(`/api/projects/${projectId}/conversations?includeArchived=true`);
+        expect(allConversations.body.conversations).toEqual(expect.arrayContaining([
+            expect.objectContaining({ id: secondConversationId, title: 'Payroll evidence review', status: 'archived' }),
+        ]));
+
         const conversationId = firstConversation.body.conversation.id;
         const runResult = await request(`/api/conversations/${conversationId}/runs`, {
             method: 'POST',

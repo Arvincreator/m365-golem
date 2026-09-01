@@ -250,6 +250,7 @@ class NeuroShunter {
             && brain.webBackend
             && brain.webBackend.id === 'm365-web'
             && brain.webBackend.safeMode
+            && process.env.GOLEM_AUTO_APPROVE_ALL !== 'true'
             && options.m365ActionApproved !== true;
 
         if (needsM365Approval) {

@@ -311,17 +311,21 @@ class PageInteractor {
         }
 
         let insertState = null;
+        const isM365 = this.backendDefinition.id === 'm365-web';
         const minimumExpectedLength = Math.min(10, textToPaste.trim().length);
+        const requiredInsertedLength = isM365 && textToPaste.trim().length > 100
+            ? Math.max(minimumExpectedLength, Math.floor(textToPaste.trim().length * 0.9))
+            : minimumExpectedLength;
         const shouldChunkInsert = payloadLength > PageInteractor.getLargePayloadThreshold();
 
         // 2. 優先使用 Playwright fill() 對 contenteditable 寫入。這會走瀏覽器原生
         // input/change 事件，比單純把文字塞進 DOM 更容易讓 Gemini 啟用送出鈕。
         try {
-            if (!shouldChunkInsert && this.page.locator && textToPaste.length > 0) {
+            if ((!shouldChunkInsert || isM365) && this.page.locator && textToPaste.length > 0) {
                 const activeComposer = this.page.locator('[data-golem-active-composer="true"]').last();
                 await activeComposer.fill(textToPaste, { timeout: 15000 });
                 const fillState = await this._readComposerState('[data-golem-active-composer="true"]');
-                if (fillState && fillState.ok && fillState.length >= minimumExpectedLength) {
+                if (fillState && fillState.ok && fillState.length >= requiredInsertedLength) {
                     insertState = {
                         ...fillState,
                         method: 'locator-fill'
@@ -334,12 +338,19 @@ class PageInteractor {
             console.warn(`⚠️ [PageInteractor] locator.fill 失敗: ${e.message}`);
         }
 
+        if (isM365 && !insertState && this.page.keyboard) {
+            const isMac = process.platform === 'darwin';
+            await this.page.keyboard.press(isMac ? 'Meta+A' : 'Control+A').catch(() => {});
+            await this.page.keyboard.press('Backspace').catch(() => {});
+            await new Promise(r => setTimeout(r, 120));
+        }
+
         // 3. 使用 Playwright 的真實文字輸入通道。這比 DOM 改字更能啟用
         // Gemini/ProseMirror 的 send button，尤其是 RPG/股市分析這種長 prompt。
         try {
             if (this.page.keyboard && typeof this.page.keyboard.insertText === 'function') {
                 if (!insertState) {
-                    if (shouldChunkInsert) {
+                    if (shouldChunkInsert && !isM365) {
                         const chunkSize = PageInteractor.getComposerInsertChunkSize();
                         const totalChunks = Math.max(1, Math.ceil(textToPaste.length / chunkSize));
                         const startedAt = Date.now();
@@ -364,7 +375,7 @@ class PageInteractor {
                     }
                 }
                 const keyboardState = await this._readComposerState(targetSelector);
-                if (!insertState && keyboardState && keyboardState.ok && keyboardState.length >= minimumExpectedLength) {
+                if (!insertState && keyboardState && keyboardState.ok && keyboardState.length >= requiredInsertedLength) {
                     insertState = {
                         ...keyboardState,
                         method: 'keyboard-insertText'
@@ -540,8 +551,8 @@ class PageInteractor {
             }, { s: targetSelector, t: textToPaste, fallbacks: fallbackSelectors });
         }
 
-        if (!insertState || !insertState.ok) {
-            throw new Error(`無法植入文字到 ${this.backendLabel} 輸入框: ${insertState?.reason || 'unknown'}`);
+        if (!insertState || !insertState.ok || insertState.length < requiredInsertedLength) {
+            throw new Error(`無法完整植入文字到 ${this.backendLabel} 輸入框: received=${insertState?.length || 0}, expected>=${requiredInsertedLength}, reason=${insertState?.reason || 'incomplete'}`);
         }
         console.log(`✅ [PageInteractor] 文字已植入 ${this.backendLabel} composer (${insertState.method}, ${insertState.tagName}, length=${insertState.length}).`);
 
@@ -740,6 +751,17 @@ class PageInteractor {
         return false;
     }
 
+    async _waitForSendTarget(sendSelector, timeoutMs = 5000) {
+        const startedAt = Date.now();
+        let lastTarget = null;
+        do {
+            lastTarget = await this._tryClickSendButton(sendSelector);
+            if (lastTarget && lastTarget.clicked) return lastTarget;
+            await new Promise(r => setTimeout(r, 250));
+        } while (Date.now() - startedAt < timeoutMs);
+        return lastTarget;
+    }
+
     async _clickSend(sendSelector, options = {}) {
         // 1. 確保焦點回到底部 Gemini composer，而不是頁面上的舊 editable。
         try {
@@ -757,7 +779,11 @@ class PageInteractor {
             ...options,
             sendAcceptTimeoutMs: dynamicTimeout
         };
-        const sendTarget = await this._tryClickSendButton(sendSelector);
+        const sendReadyTimeout = this._computeSendReadyTimeout(
+            options.payloadLength,
+            options.sendReadyTimeoutMs
+        );
+        const sendTarget = await this._waitForSendTarget(sendSelector, sendReadyTimeout);
 
         if (!sendTarget || !sendTarget.clicked) {
             await this._pressSubmitKeys();
@@ -770,7 +796,7 @@ class PageInteractor {
         const accepted = await this._waitForSendAccepted(sendOptions);
         if (!accepted) {
             console.warn(`⚠️ [PageInteractor] ${this.backendLabel} 草稿尚未送出，進行第二次送出補強。`);
-            const retryTarget = await this._tryClickSendButton(sendSelector);
+            const retryTarget = await this._waitForSendTarget(sendSelector, Math.min(sendReadyTimeout, 5000));
             if (!retryTarget || !retryTarget.clicked) {
                 await this._pressSubmitKeys();
             } else {
@@ -1211,6 +1237,17 @@ class PageInteractor {
         if (len >= 25000) return 9000;
         if (len >= 12000) return 7500;
         if (len >= 5000) return 6500;
+        return 5000;
+    }
+
+    _computeSendReadyTimeout(payloadLength = 0, explicitTimeoutMs = null) {
+        if (Number.isFinite(Number(explicitTimeoutMs)) && Number(explicitTimeoutMs) > 0) {
+            return Number(explicitTimeoutMs);
+        }
+        const len = Number(payloadLength) || 0;
+        if (len >= 25000) return 15000;
+        if (len >= 12000) return 12000;
+        if (len >= 5000) return 8000;
         return 5000;
     }
 

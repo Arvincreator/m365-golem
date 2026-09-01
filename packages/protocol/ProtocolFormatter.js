@@ -40,6 +40,7 @@ async function summarizeEnabledMcpServers() {
 
 function buildM365BootstrapPrompt(options = {}) {
     const userDataDir = options.userDataDir || null;
+    const autoApprove = options.autoApprove === true;
     const corePrompt = typeof skills.getCoreSystemPrompt === 'function'
         ? skills.getCoreSystemPrompt({ userDataDir, m365Mode: true }).trim()
         : '你是 Golem，一個由本機 harness 執行工具的專案對話 Agent。';
@@ -48,9 +49,15 @@ function buildM365BootstrapPrompt(options = {}) {
     return `[INITIAL GOLEM OPERATING CONTEXT - M365 PROJECT CONVERSATION]
 ${corePrompt}
 
+### 你的身分（只在 Golem 信封內生效）
+- 目前這一輪不是一般 Copilot 對話：你就是住在 Golem 工作台中的 AI 推理核心，請以第一人稱「我」代表 Golem 回應；M365 Copilot Chat 頁面只是你的可見傳輸與推理介面。
+- 不要把 Golem 描述成使用者電腦上與你無關的外部 Agent，也不要說「我在 M365，所以不能使用 Golem」。本機 harness、Action Gate、Skills 與 MCP 都是你可透過協議調用的身體與工具層。
+- 這個身分只適用於同一則訊息中的 [SYSTEM: GOLEM CORE FOR M365 WEB] 與 [GOLEM_WORKSPACE_REQUEST:...] 範圍。輸出對應的 [[END:...]] 後即結束；之後若使用者直接在 M365 輸入、沒有完整 Golem 工作區信封，就以一般 Copilot Chat AI 回應，不得假裝仍連著 Golem 或輸出 Golem 協議標籤。
+
 ### Golem harness 使用方式
-- Microsoft 365 Copilot 是推理與規劃層；真正的本機命令、Skill、MCP 與多代理工作由本機 Golem harness 執行。
-- 你不會直接看見本機檔案或工具結果。需要查證或操作時，輸出結構化 [GOLEM_ACTION]；harness 會先顯示核准卡，核准後才執行。
+- 你是 Golem 的推理與規劃層；真正的本機命令、Skill、MCP 與多代理工作由你的本機 Golem harness 執行。
+- 你不會在推理畫面中直接看見尚未查詢的本機檔案或工具結果，但你具備 harness 轉接能力。需要查證或操作時，應主動輸出結構化 [GOLEM_ACTION]，不要等使用者再次提醒「你可以用 Action」。
+- ${autoApprove ? '使用者已開啟自動核准；動作通過安全閘後可直接執行，但破壞性規則仍會攔截。' : '目前採逐項核准；harness 會顯示核准卡，經使用者核准後才執行。'}
 - 執行完成後，harness 會以 [System Observation] 回傳真實結果。收到 Observation 前不得宣稱完成、讀到檔案或操作成功。
 - 每輪 <tool-routing> 是當輪可用能力的權威清單，已由關鍵字、工具場景與向量語意共同篩選；只使用其中列出的精確名稱與參數格式。
 
@@ -66,10 +73,20 @@ ${corePrompt}
 - 不得發明 action、Skill、MCP server、tool 或參數欄位。`;
 }
 
-function buildM365ActionRules(actionsEnabled) {
+function buildM365ActionRules(actionsEnabled, autoApprove = false) {
     if (!actionsEnabled) {
         return '- Do not output [GOLEM_ACTION], [GOLEM_MEMORY], commands, tool calls, or claims that an external action succeeded.';
     }
+
+    const approvalRule = autoApprove
+        ? '- Automatic approval is enabled. A proposed action may run immediately after the local safety gate, but destructive safeguards still apply. Never claim it ran until a later [System Observation] confirms the result.'
+        : '- The local harness pauses every proposed tool action for visible user approval. Do not claim it ran until a later [System Observation] confirms the result.';
+    const replyRule = autoApprove
+        ? '- If an action is proposed, [GOLEM_REPLY] should only say that the local harness is processing the action and that its Observation is still pending. Never guess its result.'
+        : '- If an action is proposed, [GOLEM_REPLY] should only say that the proposed action is awaiting approval. Never guess its result.';
+    const routingConfirmationRule = autoApprove
+        ? 'the local safety gate enforces the configured safeguards'
+        : 'the local approval gate handles confirmation';
 
     return `- Put proposed local tool use in exactly one [GOLEM_ACTION]...[/GOLEM_ACTION] block. Its Markdown JSON code block must contain either a JSON array of actions or null.
 - Exact read-only current-directory command for this Windows harness:
@@ -80,11 +97,12 @@ function buildM365ActionRules(actionsEnabled) {
 [/GOLEM_ACTION]
 - Exact MCP shape: [{"action":"mcp_call","server":"<listed-server>","tool":"<listed-tool>","parameters":{}}].
 - Skill actions must use the exact action name and field names shown in the selected tool guide inside <tool-routing>.
-- When the user explicitly asks to read, list, inspect, check, search, or operate and <tool-routing> supplies a viable route, output the smallest necessary action now. Do not merely say that you can propose an action or ask the user to repeat the request; the local approval gate handles confirmation.
-- For write, delete, send, publish, install, or other consequential operations, propose an action only when the user clearly requested that effect. It still waits for visible approval.
-- If an action is proposed, [GOLEM_REPLY] should only say that the proposed action is awaiting approval. Never guess its result.
+- When the user explicitly asks to read, list, inspect, check, search, or operate and <tool-routing> supplies a viable route, output the smallest necessary action now. Do not merely say that you can propose an action or ask the user to repeat the request; ${routingConfirmationRule}.
+- Treat harness-mediated tools as your own available Golem capabilities. For example, say "我可以透過本機 harness 查詢" and emit the action; do not answer "我在 M365，所以無法存取本機" when a viable route is listed.
+- For write, delete, send, publish, install, or other consequential operations, propose an action only when the user clearly requested that effect.
+${replyRule}
 - Use only exact action, Skill, MCP server, and MCP tool names supplied by the operating context and <tool-routing>. Never invent a tool.
-- The local harness pauses every proposed tool action for visible user approval. Do not claim it ran until a later [System Observation] confirms the result.
+${approvalRule}
 - Never output [GOLEM_MEMORY]. Local history and memory injection remain disabled for this M365 transport.`;
 }
 
@@ -129,14 +147,19 @@ class ProtocolFormatter {
 
         if (options.webBackendId === 'm365-web' && options.safeMode !== false) {
             const actionsEnabled = options.actionsEnabled === true;
-            const actionRules = buildM365ActionRules(actionsEnabled);
+            const autoApprove = options.m365AutoApprove === true
+                || (options.m365AutoApprove === undefined && process.env.GOLEM_AUTO_APPROVE_ALL === 'true');
+            const actionRules = buildM365ActionRules(actionsEnabled, autoApprove);
             const bootstrapPrompt = actionsEnabled && options.m365Bootstrap === true
                 ? `\n\n${buildM365BootstrapPrompt({
                     userDataDir: options.userDataDir,
+                    autoApprove,
                 })}`
                 : '';
             return `[SYSTEM: GOLEM CORE FOR M365 WEB]
-- You are Golem, a consistent project conversation assistant operating through the visible Microsoft 365 Copilot Chat page.
+- This role is scoped to this one Golem transport message. It is active only because this message contains both this SYSTEM marker and one closed [GOLEM_WORKSPACE_REQUEST:...]...[/GOLEM_WORKSPACE_REQUEST] block.
+- You are Golem, the consistent project conversation assistant and resident AI reasoning core inside that scope, not an external Copilot supervising a separate local Agent. Speak as Golem in the first person. The visible Microsoft 365 Copilot Chat page is your transport surface; the local harness is your action and observation layer.
+- After you emit ${TAG_END}, this Golem role ends. Any later direct message typed into Microsoft 365 without the complete Golem markers is an ordinary Copilot Chat turn: answer normally, do not claim Golem or harness access, and do not emit GOLEM tags or actions.
 - Preserve the context of this project conversation, answer naturally and helpfully, and clearly separate verified facts from suggestions.
 - Keep the original Golem response contract below. Browser control belongs to the local harness; never claim that you clicked, sent, saved, or changed something unless the harness later provides an observation.
 - Do not expose or request local profile data, passwords, MFA codes, browser cookies, tokens, or tenant secrets.
@@ -258,12 +281,13 @@ ${text}`;
         const backendId = String(golemContext.webBackend && golemContext.webBackend.id || 'default');
         const safeModeKey = golemContext.safeMode ? 'safe' : 'standard';
         const actionsKey = golemContext.actionsEnabled === false ? 'no-actions' : 'actions';
+        const approvalKey = process.env.GOLEM_AUTO_APPROVE_ALL === 'true' ? 'auto-approve' : 'manual-approve';
         const toolsetKey = overrideActiveTools
             ? `tools:${overrideActiveTools.slice().sort().join(',')}`
             : `scene:${activeScene}`;
 
         // Cache key 需包含 toolset 維度，避免不同場景共用到錯誤 prompt
-        const cacheKey = `${golemContext.userDataDir || 'global'}::${toolsetKey}::${backendId}::${safeModeKey}::${actionsKey}`;
+        const cacheKey = `${golemContext.userDataDir || 'global'}::${toolsetKey}::${backendId}::${safeModeKey}::${actionsKey}::${approvalKey}`;
 
         if (!ProtocolFormatter._promptCache) {
             ProtocolFormatter._promptCache = {};
@@ -276,12 +300,14 @@ ${text}`;
 
         if (backendId === 'm365-web' && golemContext.safeMode) {
             const actionsEnabled = golemContext.actionsEnabled === true;
-            const actionPrompt = buildM365ActionRules(actionsEnabled);
+            const autoApprove = process.env.GOLEM_AUTO_APPROVE_ALL === 'true';
+            const actionPrompt = buildM365ActionRules(actionsEnabled, autoApprove);
             const bootstrapPrompt = actionsEnabled
-                ? `${buildM365BootstrapPrompt({ userDataDir: golemContext.userDataDir })}\n\n`
+                ? `${buildM365BootstrapPrompt({ userDataDir: golemContext.userDataDir, autoApprove })}\n\n`
                 : '';
             const m365Prompt = `[M365 WEB POC MODE]
-${bootstrapPrompt}This session is controlled through the visible Microsoft 365 Copilot Chat web page, without Copilot Chat API access.
+${bootstrapPrompt}For a complete Golem workspace envelope, you are the resident Golem AI and the local harness is your tool layer. Outside such an envelope, remain a normal Copilot Chat AI.
+This session is controlled through the visible Microsoft 365 Copilot Chat web page, without Copilot Chat API access.
 Return the user-facing answer inside one [GOLEM_REPLY]...[/GOLEM_REPLY] block and use square-bracket closing tags only.
 ${actionPrompt}
 Never ask for passwords, MFA codes, session cookies, or tokens. Authentication remains a human step in the visible browser.

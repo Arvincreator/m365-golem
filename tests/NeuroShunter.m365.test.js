@@ -10,8 +10,17 @@ const SkillHandler = require('../src/core/action_handlers/SkillHandler');
 const CommandHandler = require('../src/core/action_handlers/CommandHandler');
 
 describe('NeuroShunter M365 safety gates', () => {
+    let previousAutoApprove;
+
     beforeEach(() => {
         jest.clearAllMocks();
+        previousAutoApprove = process.env.GOLEM_AUTO_APPROVE_ALL;
+        process.env.GOLEM_AUTO_APPROVE_ALL = 'false';
+    });
+
+    afterEach(() => {
+        if (previousAutoApprove === undefined) delete process.env.GOLEM_AUTO_APPROVE_ALL;
+        else process.env.GOLEM_AUTO_APPROVE_ALL = previousAutoApprove;
     });
 
     test('blocks model actions and memory writes when backend gates are closed', async () => {
@@ -185,5 +194,34 @@ describe('NeuroShunter M365 safety gates', () => {
 
         expect(controller.pendingTasks.size).toBe(0);
         expect(SkillHandler.execute).toHaveBeenCalledTimes(1);
+    });
+
+    test('lets an M365 action continue through the existing safety gate when the user enabled auto approval', async () => {
+        process.env.GOLEM_AUTO_APPROVE_ALL = 'true';
+        const ctx = {
+            reply: jest.fn().mockResolvedValue(),
+            shouldMentionSender: false,
+            platform: 'web',
+        };
+        const brain = {
+            webBackend: { id: 'm365-web', safeMode: true },
+            memorize: jest.fn().mockResolvedValue(),
+            _appendChatLog: jest.fn(),
+            areActionsEnabled: jest.fn(() => true),
+            isLocalContextEnabled: jest.fn(() => false),
+        };
+        const controller = { pendingTasks: new Map() };
+        SkillHandler.execute.mockResolvedValue(true);
+        ResponseParser.parse.mockReturnValue({
+            memory: null,
+            reply: '',
+            actions: [{ action: 'mcp_call', server: 'demo', tool: 'read', parameters: {} }],
+        });
+
+        await NeuroShunter.dispatch(ctx, 'raw', brain, controller);
+
+        expect(controller.pendingTasks.size).toBe(0);
+        expect(SkillHandler.execute).toHaveBeenCalledTimes(1);
+        expect(ctx.reply).not.toHaveBeenCalledWith(expect.stringContaining('待你在右側'), expect.anything());
     });
 });

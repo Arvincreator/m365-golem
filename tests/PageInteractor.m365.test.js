@@ -62,6 +62,106 @@ describe('PageInteractor M365 safety behavior', () => {
         expect(keyboardFallback).not.toHaveBeenCalled();
     });
 
+    test('waits for a delayed M365 send button before falling back to Enter', async () => {
+        const page = { mouse: { click: jest.fn() } };
+        const interactor = new PageInteractor(page, {}, definition);
+        jest.spyOn(interactor, '_focusBestComposer').mockResolvedValue(null);
+        jest.spyOn(interactor, '_tryClickSendButton')
+            .mockResolvedValueOnce({ clicked: false, reason: 'send-button-not-ready' })
+            .mockResolvedValueOnce({
+                clicked: true,
+                score: 150,
+                label: 'Send message',
+                x: 10,
+                y: 10,
+            });
+        jest.spyOn(interactor, '_performSendClick').mockResolvedValue();
+        jest.spyOn(interactor, '_waitForSendAccepted').mockResolvedValue(true);
+        jest.spyOn(interactor, '_inspectComposerDraftState').mockResolvedValue({
+            hasDraft: false,
+            hasStartTag: false,
+            length: 0,
+        });
+        jest.spyOn(interactor, '_moveWindowToBottom').mockResolvedValue();
+        const keyboardFallback = jest.spyOn(interactor, '_pressSubmitKeys').mockResolvedValue();
+
+        await expect(interactor._clickSend('button[aria-label="Send"]', {
+            payloadLength: 15000,
+            sendReadyTimeoutMs: 1000,
+            startTag: '[[BEGIN:test]]',
+        })).resolves.toBeUndefined();
+
+        expect(interactor._tryClickSendButton).toHaveBeenCalledTimes(2);
+        expect(interactor._performSendClick).toHaveBeenCalledTimes(1);
+        expect(keyboardFallback).not.toHaveBeenCalled();
+    });
+
+    test('atomically fills a long M365 envelope instead of splitting it across SPA rerenders', async () => {
+        const payload = 'x'.repeat(15006);
+        const fill = jest.fn().mockResolvedValue();
+        const keyboard = {
+            down: jest.fn().mockResolvedValue(),
+            up: jest.fn().mockResolvedValue(),
+            press: jest.fn().mockResolvedValue(),
+            insertText: jest.fn().mockResolvedValue(),
+            type: jest.fn().mockResolvedValue(),
+        };
+        const page = {
+            $: jest.fn().mockResolvedValue({}),
+            locator: jest.fn().mockReturnValue({ last: () => ({ fill }) }),
+            keyboard,
+            mouse: { click: jest.fn().mockResolvedValue() },
+        };
+        const interactor = new PageInteractor(page, {}, definition);
+        jest.spyOn(interactor, '_focusBestComposer').mockResolvedValue({ ok: true, x: 10, y: 10 });
+        jest.spyOn(interactor, '_readComposerState').mockResolvedValue({
+            ok: true,
+            tagName: 'SPAN',
+            length: payload.length,
+        });
+
+        await expect(interactor._typeInput(definition.selectors.input, payload)).resolves.toBeUndefined();
+
+        expect(fill).toHaveBeenCalledWith(payload, { timeout: 15000 });
+        expect(keyboard.insertText).not.toHaveBeenCalled();
+    });
+
+    test('rejects a truncated M365 envelope before attempting to send it', async () => {
+        const payload = 'x'.repeat(15006);
+        const fill = jest.fn().mockResolvedValue();
+        const keyboard = {
+            down: jest.fn().mockResolvedValue(),
+            up: jest.fn().mockResolvedValue(),
+            press: jest.fn().mockResolvedValue(),
+            insertText: jest.fn().mockResolvedValue(),
+            type: jest.fn().mockResolvedValue(),
+        };
+        const page = {
+            $: jest.fn().mockResolvedValue({}),
+            locator: jest.fn().mockReturnValue({ last: () => ({ fill }) }),
+            keyboard,
+            mouse: { click: jest.fn().mockResolvedValue() },
+            evaluate: jest.fn().mockResolvedValue({
+                ok: true,
+                method: 'exec-command',
+                tagName: 'SPAN',
+                length: 47,
+            }),
+        };
+        const interactor = new PageInteractor(page, {}, definition);
+        jest.spyOn(interactor, '_focusBestComposer').mockResolvedValue({ ok: true, x: 10, y: 10 });
+        jest.spyOn(interactor, '_readComposerState').mockResolvedValue({
+            ok: true,
+            tagName: 'SPAN',
+            length: 47,
+        });
+
+        await expect(interactor._typeInput(definition.selectors.input, payload))
+            .rejects.toThrow('無法完整植入文字');
+
+        expect(fill).toHaveBeenCalledWith(payload, { timeout: 15000 });
+    });
+
     test('still requires reconciliation after the original send reinforcement cannot clear the M365 draft', async () => {
         const page = { mouse: { click: jest.fn() } };
         const interactor = new PageInteractor(page, {}, definition);

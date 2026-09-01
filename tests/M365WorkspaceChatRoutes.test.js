@@ -13,6 +13,15 @@ const mockActivate = jest.fn();
 const mockCaptureBinding = jest.fn();
 const mockMarkReconcile = jest.fn();
 const mockHandleDashboardMessage = jest.fn();
+const mockReferenceFileService = {
+    list: jest.fn(),
+    read: jest.fn(),
+};
+const mockMcpManager = {
+    _loaded: true,
+    load: jest.fn(),
+    getServers: jest.fn(),
+};
 
 jest.mock('../src/services/M365WorkspaceService', () => ({
     isM365WorkspaceEnabled: jest.fn(() => true),
@@ -40,6 +49,11 @@ jest.mock('../src/services/M365WorkspaceService', () => ({
 
 jest.mock('../index.js', () => ({
     handleDashboardMessage: (...args) => mockHandleDashboardMessage(...args),
+}));
+
+jest.mock('../src/services/ReferenceFileService', () => mockReferenceFileService);
+jest.mock('../src/mcp/MCPManager', () => ({
+    getInstance: () => mockMcpManager,
 }));
 
 const ConfigManager = require('../src/config');
@@ -118,6 +132,9 @@ describe('workspace-aware M365 chat route', () => {
             remoteConversationUrl: 'https://m365.cloud.microsoft/chat/conversation/remote-1',
         });
         mockMarkReconcile.mockResolvedValue();
+        mockReferenceFileService.list.mockReturnValue([]);
+        mockReferenceFileService.read.mockReturnValue(null);
+        mockMcpManager.getServers.mockReturnValue([]);
     });
 
     async function postChat(body) {
@@ -141,6 +158,8 @@ describe('workspace-aware M365 chat route', () => {
         mockHandleDashboardMessage.mockImplementation(async (ctx) => {
             expect(ctx.textOverride).toContain('[PROJECT_CONTEXT version="1"]');
             expect(ctx.textOverride).toContain('[GOLEM_WORKSPACE_REQUEST:');
+            expect(ctx.textOverride).toContain('[TURN_RESPONSE_MODE]');
+            expect(ctx.textOverride).toContain('[/GOLEM_WORKSPACE_REQUEST]');
             await ctx.onTransportComplete({ text: 'M365 answer' });
             await ctx.reply('M365 answer');
         });
@@ -179,6 +198,80 @@ describe('workspace-aware M365 chat route', () => {
             conversationId: 'conversation-1',
             transient: false,
         }));
+    });
+
+    test('adds only explicitly selected file text, MCP servers, and response mode to the Golem workspace envelope', async () => {
+        mockReferenceFileService.list.mockReturnValue([{
+            id: 'ref-1',
+            name: 'brief.md',
+            path: 'C:\\safe\\brief.md',
+            enabled: true,
+            status: 'ready',
+        }]);
+        mockReferenceFileService.read.mockReturnValue({
+            id: 'ref-1',
+            name: 'brief.md',
+            path: 'C:\\safe\\brief.md',
+            text: 'Selected local reference facts.',
+        });
+        mockMcpManager.getServers.mockReturnValue([{
+            name: 'demo-mcp',
+            description: 'Read-only demo tools',
+            enabled: true,
+            connected: true,
+        }]);
+        mockHandleDashboardMessage.mockImplementation(async (ctx) => {
+            expect(ctx.textOverride).toContain('[TURN_RESPONSE_MODE]');
+            expect(ctx.textOverride).toContain('Think through the request carefully');
+            expect(ctx.textOverride).toContain('[USER_SELECTED_MCP_SERVERS]');
+            expect(ctx.textOverride).toContain('demo-mcp: Read-only demo tools');
+            expect(ctx.textOverride).toContain('[USER_SELECTED_REFERENCE_FILES]');
+            expect(ctx.textOverride).toContain('Selected local reference facts.');
+            expect(ctx.textOverride).toContain('[/GOLEM_WORKSPACE_REQUEST]');
+            await ctx.onTransportComplete({ text: 'M365 answer' });
+            await ctx.reply('M365 answer');
+        });
+
+        const result = await postChat({
+            golemId: 'golem_A',
+            projectId: 'project-1',
+            conversationId: 'conversation-1',
+            message: 'Use my selected context.',
+            responseMode: 'thoughtful',
+            selectedMcpServers: ['demo-mcp'],
+            referenceFileIds: ['ref-1'],
+        });
+
+        expect(result.response.status).toBe(200);
+        await waitFor(() => serverContext.m365DispatchLease === null);
+        expect(mockStore.addMessage).toHaveBeenNthCalledWith(1, 'conversation-1', expect.objectContaining({
+            content: 'Use my selected context.',
+        }));
+        expect(mockReferenceFileService.read).toHaveBeenCalledWith('ref-1', expect.objectContaining({ maxChars: 6000 }));
+    });
+
+    test('refuses to send an indexed environment file into Microsoft 365 context', async () => {
+        mockReferenceFileService.list.mockReturnValue([{
+            id: 'ref-env',
+            name: '.env',
+            path: 'C:\\safe\\.env',
+            enabled: true,
+            status: 'ready',
+        }]);
+
+        const result = await postChat({
+            golemId: 'golem_A',
+            projectId: 'project-1',
+            conversationId: 'conversation-1',
+            message: 'Use this file.',
+            referenceFileIds: ['ref-env'],
+        });
+
+        expect(result.response.status).toBe(400);
+        expect(result.body.error).toBe('M365_REFERENCE_FILE_SENSITIVE');
+        expect(mockReferenceFileService.read).not.toHaveBeenCalled();
+        expect(mockStore.addMessage).not.toHaveBeenCalled();
+        expect(mockActivate).not.toHaveBeenCalled();
     });
 
     test('marks an uncertain browser send ambiguous and blocks the conversation for reconciliation', async () => {

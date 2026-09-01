@@ -5,9 +5,11 @@ import {
     AlertTriangle,
     Bot,
     CheckCircle2,
+    ChevronDown,
     ChevronRight,
     CirclePause,
     ExternalLink,
+    FileText,
     FolderKanban,
     ListChecks,
     Loader2,
@@ -28,6 +30,13 @@ import { apiUrl } from "@/lib/api";
 import { socket } from "@/lib/socket";
 import { cn } from "@/lib/utils";
 import { useM365WorkspaceSelection } from "@/components/M365WorkspaceContext";
+import {
+    Dialog,
+    DialogContent,
+    DialogDescription,
+    DialogHeader,
+    DialogTitle,
+} from "@/components/ui/dialog";
 import {
     formatLocalDate,
     getBindingLabel,
@@ -55,6 +64,25 @@ type PendingLocalAction = {
     expiresAt: number;
 };
 
+type ResponseMode = "auto" | "quick" | "thoughtful";
+type ApprovalMode = "manual" | "auto";
+type ComposerPicker = "files" | "mcp" | null;
+
+type ReferenceFileOption = {
+    id: string;
+    name: string;
+    path: string;
+    enabled?: boolean;
+    status: "pending" | "ready" | "failed";
+};
+
+type McpServerOption = {
+    name: string;
+    description?: string;
+    enabled: boolean;
+    connected?: boolean;
+};
+
 function errorMessage(error: unknown): string {
     return error instanceof Error && error.message ? error.message : "目前無法完成，請稍後再試。";
 }
@@ -72,6 +100,28 @@ function isRunTerminal(run: M365Run): boolean {
     return ["FAILED", "CANCELED", "COMPLETED"].includes(run.status);
 }
 
+function isCollapsibleActionMessage(message: M365Message): boolean {
+    if (message.role === "user") return false;
+    return /M365 工作台已暫停一項工具動作|\[GOLEM_ACTION\]|"action"\s*:\s*"(?:command|mcp_call|multi_agent)"/i.test(message.content);
+}
+
+function CollapsibleActionMessage({ content }: { content: string }) {
+    return (
+        <details className="group min-w-[min(68vw,420px)]">
+            <summary className="flex cursor-pointer list-none items-center justify-between gap-3 rounded-xl px-1 py-0.5 text-sm font-medium marker:content-none">
+                <span className="flex min-w-0 items-center gap-2">
+                    <ShieldCheck className="h-4 w-4 shrink-0 text-amber-500" />
+                    <span className="truncate">工具動作等待核准</span>
+                </span>
+                <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
+            </summary>
+            <div className="prose prose-sm mt-3 max-w-none break-words border-t border-border/70 pt-3 text-foreground dark:prose-invert prose-p:my-2 prose-pre:max-h-64 prose-pre:overflow-auto">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+            </div>
+        </details>
+    );
+}
+
 export default function M365ChatPage() {
     const {
         hydrated,
@@ -86,6 +136,17 @@ export default function M365ChatPage() {
     const [toolActionsEnabled, setToolActionsEnabled] = useState(true);
     const [decidingActionId, setDecidingActionId] = useState("");
     const [input, setInput] = useState("");
+    const [responseMode, setResponseMode] = useState<ResponseMode>("auto");
+    const [approvalMode, setApprovalMode] = useState<ApprovalMode>("manual");
+    const [savingApprovalMode, setSavingApprovalMode] = useState(false);
+    const [composerMenuOpen, setComposerMenuOpen] = useState(false);
+    const [composerPicker, setComposerPicker] = useState<ComposerPicker>(null);
+    const [composerResourcesLoading, setComposerResourcesLoading] = useState(true);
+    const [composerResourceError, setComposerResourceError] = useState("");
+    const [referenceFiles, setReferenceFiles] = useState<ReferenceFileOption[]>([]);
+    const [mcpServers, setMcpServers] = useState<McpServerOption[]>([]);
+    const [selectedReferenceFileIds, setSelectedReferenceFileIds] = useState<string[]>([]);
+    const [selectedMcpServerNames, setSelectedMcpServerNames] = useState<string[]>([]);
     const [loading, setLoading] = useState(true);
     const [sending, setSending] = useState(false);
     const [activating, setActivating] = useState(false);
@@ -114,10 +175,6 @@ export default function M365ChatPage() {
     const pendingApproval = useMemo(
         () => runDetail?.approvals.find((approval) => approval.status === "pending") || null,
         [runDetail]
-    );
-    const latestAssistantMessage = useMemo(
-        () => messages.slice().reverse().find((message) => message.role === "assistant") || null,
-        [messages]
     );
 
     const loadMessages = useCallback(async () => {
@@ -196,6 +253,55 @@ export default function M365ChatPage() {
     }, [activeConversationId, activeProjectId, hydrated, loadContext]);
 
     useEffect(() => {
+        let mounted = true;
+        const savedMode = window.localStorage.getItem("m365-golem-response-mode");
+        if (["auto", "quick", "thoughtful"].includes(String(savedMode))) {
+            setResponseMode(savedMode as ResponseMode);
+        }
+
+        setComposerResourcesLoading(true);
+        Promise.allSettled([
+            apiGet<{ files?: ReferenceFileOption[] }>(apiUrl("/api/reference-files"), undefined, { retries: 0 }),
+            apiGet<{ servers?: McpServerOption[] }>(apiUrl("/api/mcp/servers"), undefined, { retries: 0 }),
+            apiGet<{ approvalMode?: ApprovalMode }>(apiUrl("/api/chat/preferences"), undefined, { retries: 0 }),
+        ]).then((results) => {
+            if (!mounted) return;
+            const [fileResult, mcpResult, preferenceResult] = results;
+            if (fileResult.status === "fulfilled") {
+                setReferenceFiles((fileResult.value.files || []).filter((file) => (
+                    file.enabled !== false
+                    && file.status === "ready"
+                    && !/(^|[\\/])\.env(?:\.|$)/i.test(file.path)
+                )));
+            }
+            if (mcpResult.status === "fulfilled") {
+                setMcpServers((mcpResult.value.servers || []).filter((server) => server.enabled !== false));
+            }
+            if (preferenceResult.status === "fulfilled" && ["manual", "auto"].includes(String(preferenceResult.value.approvalMode))) {
+                setApprovalMode(preferenceResult.value.approvalMode as ApprovalMode);
+            }
+            if (results.some((result) => result.status === "rejected")) {
+                setComposerResourceError("部分工具清單暫時無法載入；一般文字對話仍可使用。");
+            }
+        }).finally(() => {
+            if (mounted) setComposerResourcesLoading(false);
+        });
+
+        return () => { mounted = false; };
+    }, []);
+
+    useEffect(() => {
+        const handleWorkspaceUpdate = (event: Event) => {
+            const detail = (event as CustomEvent<{ conversationId?: string }>).detail;
+            if (detail?.conversationId && detail.conversationId !== activeConversationId) return;
+            setError("");
+            loadContext().catch((requestError) => setError(errorMessage(requestError)));
+        };
+        window.addEventListener("m365-workspace-updated", handleWorkspaceUpdate);
+        return () => window.removeEventListener("m365-workspace-updated", handleWorkspaceUpdate);
+    }, [activeConversationId, loadContext]);
+
+    useEffect(() => {
         const handleLog = (payload: SocketLog) => {
             if (payload?.conversationId !== activeConversationId) return;
             loadMessages().catch(() => undefined);
@@ -249,6 +355,55 @@ export default function M365ChatPage() {
         scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
     }, [messages]);
 
+    const toggleReferenceFile = (id: string) => {
+        setComposerResourceError("");
+        setSelectedReferenceFileIds((current) => {
+            if (current.includes(id)) return current.filter((item) => item !== id);
+            if (current.length >= 3) {
+                setComposerResourceError("每次最多選擇 3 個參考檔案。");
+                return current;
+            }
+            return [...current, id];
+        });
+    };
+
+    const toggleMcpServer = (name: string) => {
+        setComposerResourceError("");
+        setSelectedMcpServerNames((current) => {
+            if (current.includes(name)) return current.filter((item) => item !== name);
+            if (current.length >= 3) {
+                setComposerResourceError("每次最多選擇 3 個 MCP 工具來源。");
+                return current;
+            }
+            return [...current, name];
+        });
+    };
+
+    const changeResponseMode = (mode: ResponseMode) => {
+        setResponseMode(mode);
+        window.localStorage.setItem("m365-golem-response-mode", mode);
+    };
+
+    const changeApprovalMode = async (mode: ApprovalMode) => {
+        if (mode === approvalMode || savingApprovalMode) return;
+        if (mode === "auto" && !window.confirm(
+            "自動核准會讓新提出的工具動作通過安全閘後直接執行，可能修改本機檔案或外部系統。破壞性規則仍會攔截。確定開啟嗎？"
+        )) return;
+
+        setSavingApprovalMode(true);
+        setError("");
+        try {
+            const result = await apiPost<{ approvalMode: ApprovalMode }>(apiUrl("/api/chat/preferences"), { approvalMode: mode });
+            setApprovalMode(result.approvalMode);
+            setNotice(mode === "auto" ? "已開啟自動核准；工具仍須通過本機安全閘。" : "已切回逐項核准工具動作。");
+            await loadPendingLocalActions().catch(() => undefined);
+        } catch (requestError) {
+            setError(errorMessage(requestError));
+        } finally {
+            setSavingApprovalMode(false);
+        }
+    };
+
     const sendMessage = async (event: FormEvent) => {
         event.preventDefault();
         const text = input.trim();
@@ -266,8 +421,14 @@ export default function M365ChatPage() {
                 projectId: project.id,
                 conversationId: conversation.id,
                 message: text,
+                responseMode,
+                selectedMcpServers: selectedMcpServerNames,
+                referenceFileIds: selectedReferenceFileIds,
             });
             setInput("");
+            setSelectedReferenceFileIds([]);
+            setSelectedMcpServerNames([]);
+            setComposerMenuOpen(false);
             pendingStartedAt.current = Date.now();
             setPendingRequestId(data.requestId);
             await loadMessages();
@@ -409,11 +570,10 @@ export default function M365ChatPage() {
             <div className="flex flex-1 items-center justify-center p-6">
                 <div className="enterprise-card max-w-md rounded-2xl border border-border p-8 text-center">
                     <MessageSquarePlus className="mx-auto h-10 w-10 text-primary" />
-                    <h2 className="mt-4 text-xl font-semibold">先選擇一個專案對話</h2>
-                    <p className="mt-2 text-sm leading-6 text-muted-foreground">對話會綁定獨立的 M365 Copilot 網頁對話，避免不同客戶的內容混在一起。</p>
-                    <a href="/dashboard/projects" className="mt-5 inline-flex items-center gap-2 rounded-xl bg-primary px-4 py-2.5 text-sm font-medium text-primary-foreground">
-                        <FolderKanban className="h-4 w-4" />前往專案
-                    </a>
+                    <h2 className="mt-4 text-xl font-semibold">從左側選擇一個專案對話</h2>
+                    <p className="mt-2 text-sm leading-6 text-muted-foreground">
+                        展開既有專案並選擇對話，或使用專案旁的「＋」建立新對話；專案清單就是唯一管理入口。
+                    </p>
                 </div>
             </div>
         );
@@ -426,7 +586,7 @@ export default function M365ChatPage() {
                     <div className="flex flex-col justify-between gap-3 md:flex-row md:items-center">
                         <div className="min-w-0">
                             <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
-                                <a href="/dashboard/projects" className="truncate hover:text-primary">{project.name}</a>
+                                <span className="truncate">{project.name}</span>
                                 <ChevronRight className="h-3.5 w-3.5 shrink-0" />
                                 <span className="truncate">{conversation.title}</span>
                             </div>
@@ -458,7 +618,7 @@ export default function M365ChatPage() {
                                 onClick={() => setShowRuns((value) => !value)}
                                 className="inline-flex h-9 items-center gap-2 rounded-xl bg-primary px-3 text-xs font-medium text-primary-foreground"
                             >
-                                <ListChecks className="h-3.5 w-3.5" />輸出與來源
+                                <ListChecks className="h-3.5 w-3.5" />來源與執行
                             </button>
                         </div>
                     </div>
@@ -526,9 +686,13 @@ export default function M365ChatPage() {
                                                 : "rounded-tl-none border-border bg-secondary/50 text-foreground/90",
                                             isWarning && "border-amber-500/35 bg-amber-500/10"
                                         )}>
-                                            <div className="prose prose-sm max-w-none break-words text-foreground dark:prose-invert prose-p:my-2 prose-pre:overflow-x-auto">
-                                                <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
-                                            </div>
+                                            {isCollapsibleActionMessage(message) ? (
+                                                <CollapsibleActionMessage content={message.content} />
+                                            ) : (
+                                                <div className="prose prose-sm max-w-none break-words text-foreground dark:prose-invert prose-p:my-2 prose-pre:overflow-x-auto">
+                                                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+                                                </div>
+                                            )}
                                         </div>
                                         <div className={cn("mt-1 flex items-center gap-2 text-[10px] text-muted-foreground", isUser && "justify-end")}>
                                             <span className={cn(isWarning && "text-amber-700 dark:text-amber-300")}>{deliveryLabel(message)}</span>
@@ -551,7 +715,7 @@ export default function M365ChatPage() {
 
                 <form onSubmit={sendMessage} className="border-t border-border bg-card/50 p-3">
                     <div className="mx-auto max-w-4xl">
-                        <div className="relative flex items-end gap-2">
+                        <div className="rounded-2xl border border-border bg-secondary/35 p-2 shadow-sm transition focus-within:border-primary/45 focus-within:ring-1 focus-within:ring-primary/30">
                             <textarea
                                 ref={composerRef}
                                 value={input}
@@ -565,21 +729,145 @@ export default function M365ChatPage() {
                                 rows={1}
                                 maxLength={100000}
                                 disabled={sending || conversation.bindingState === "reconcile_required"}
-                                className="max-h-32 min-h-[44px] flex-1 resize-none rounded-lg border border-border bg-secondary/50 px-4 py-3 pr-12 text-sm text-foreground outline-none transition-all placeholder:text-muted-foreground/50 focus:border-primary/50 focus:ring-1 focus:ring-primary/50 disabled:cursor-not-allowed"
+                                className="max-h-32 min-h-[42px] w-full resize-none bg-transparent px-2 py-2 text-sm text-foreground outline-none placeholder:text-muted-foreground/50 disabled:cursor-not-allowed"
                                 placeholder={conversation.bindingState === "reconcile_required" ? "請先完成人工核對" : "傳送訊息給此專案的 M365 Copilot 對話…"}
                             />
-                            <button
-                                type="submit"
-                                disabled={!input.trim() || sending || conversation.bindingState === "reconcile_required"}
-                                className="absolute bottom-1.5 right-1.5 flex h-8 w-8 items-center justify-center rounded-md text-cyan-500 transition-all hover:bg-cyan-900/10 hover:text-cyan-400 disabled:cursor-not-allowed disabled:text-muted-foreground/40"
-                                aria-label="傳送"
-                            >
-                                {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
-                            </button>
+
+                            {(selectedReferenceFileIds.length > 0 || selectedMcpServerNames.length > 0) && (
+                                <div className="mb-2 flex flex-wrap gap-1.5 px-1">
+                                    {selectedReferenceFileIds.map((id) => {
+                                        const file = referenceFiles.find((item) => item.id === id);
+                                        return (
+                                            <button key={id} type="button" onClick={() => toggleReferenceFile(id)} className="inline-flex max-w-48 items-center gap-1 rounded-lg border border-border bg-background px-2 py-1 text-[11px] hover:bg-accent" title="移除參考檔案">
+                                                <FileText className="h-3 w-3 shrink-0 text-primary" />
+                                                <span className="truncate">{file?.name || id}</span>
+                                                <X className="h-3 w-3 shrink-0 text-muted-foreground" />
+                                            </button>
+                                        );
+                                    })}
+                                    {selectedMcpServerNames.map((name) => (
+                                        <button key={name} type="button" onClick={() => toggleMcpServer(name)} className="inline-flex max-w-48 items-center gap-1 rounded-lg border border-primary/25 bg-primary/5 px-2 py-1 text-[11px] hover:bg-primary/10" title="移除 MCP 工具來源">
+                                            <ListChecks className="h-3 w-3 shrink-0 text-primary" />
+                                            <span className="truncate">{name}</span>
+                                            <X className="h-3 w-3 shrink-0 text-muted-foreground" />
+                                        </button>
+                                    ))}
+                                </div>
+                            )}
+
+                            <div className="flex flex-wrap items-center gap-1.5 border-t border-border/60 pt-2">
+                                <div className="relative">
+                                    <button
+                                        type="button"
+                                        onClick={() => setComposerMenuOpen((open) => !open)}
+                                        className="flex h-8 w-8 items-center justify-center rounded-lg text-muted-foreground hover:bg-accent hover:text-foreground"
+                                        aria-label="加入檔案或 MCP 工具"
+                                        aria-expanded={composerMenuOpen}
+                                    >
+                                        <Plus className="h-4 w-4" />
+                                    </button>
+                                    {composerMenuOpen && (
+                                        <div className="absolute bottom-10 left-0 z-40 w-56 rounded-xl border border-border bg-popover p-1.5 text-popover-foreground shadow-xl">
+                                            <button type="button" onClick={() => { setComposerPicker("files"); setComposerMenuOpen(false); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs hover:bg-accent">
+                                                <FileText className="h-4 w-4 text-primary" />選擇參考檔案
+                                            </button>
+                                            <button type="button" onClick={() => { setComposerPicker("mcp"); setComposerMenuOpen(false); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs hover:bg-accent">
+                                                <ListChecks className="h-4 w-4 text-primary" />選擇 MCP 工具
+                                            </button>
+                                            <a href="/dashboard/reference-files" className="mt-1 block border-t border-border px-3 py-2 text-[11px] text-muted-foreground hover:text-foreground">管理參考檔案…</a>
+                                        </div>
+                                    )}
+                                </div>
+
+                                <select
+                                    aria-label="回應模式"
+                                    value={responseMode}
+                                    onChange={(event) => changeResponseMode(event.target.value as ResponseMode)}
+                                    className="h-8 rounded-lg border border-transparent bg-transparent px-2 text-[11px] font-medium text-muted-foreground outline-none hover:bg-accent focus:border-primary/40"
+                                >
+                                    <option value="auto">自動回應</option>
+                                    <option value="quick">快速回應</option>
+                                    <option value="thoughtful">自動思考</option>
+                                </select>
+
+                                <select
+                                    aria-label="工具核准模式"
+                                    value={approvalMode}
+                                    disabled={savingApprovalMode}
+                                    onChange={(event) => void changeApprovalMode(event.target.value as ApprovalMode)}
+                                    className={cn(
+                                        "h-8 rounded-lg border border-transparent bg-transparent px-2 text-[11px] font-medium outline-none hover:bg-accent focus:border-primary/40 disabled:opacity-50",
+                                        approvalMode === "auto" ? "text-amber-600 dark:text-amber-300" : "text-muted-foreground"
+                                    )}
+                                >
+                                    <option value="manual">逐項核准</option>
+                                    <option value="auto">自動核准</option>
+                                </select>
+
+                                <div className="ml-auto">
+                                    <button
+                                        type="submit"
+                                        disabled={!input.trim() || sending || conversation.bindingState === "reconcile_required"}
+                                        className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground/40"
+                                        aria-label="傳送"
+                                    >
+                                        {sending ? <Loader2 className="h-4 w-4 animate-spin" /> : <Send className="h-4 w-4" />}
+                                    </button>
+                                </div>
+                            </div>
                         </div>
-                        <p className="mt-2 text-center text-[11px] text-muted-foreground">M365 純文字傳輸 · 本機工具需可見核准 · 不使用 Copilot Chat API · 重要判斷須由專業人員覆核</p>
+                        {composerResourceError && <p className="mt-1.5 text-center text-[11px] text-amber-700 dark:text-amber-300">{composerResourceError}</p>}
+                        <p className="mt-2 text-center text-[11px] text-muted-foreground">
+                            M365 純文字傳輸 · {approvalMode === "auto" ? "工具經安全閘後自動執行" : "本機工具需可見核准"} · 不使用 Copilot Chat API · 重要判斷須由專業人員覆核
+                        </p>
                     </div>
                 </form>
+
+                <Dialog open={composerPicker !== null} onOpenChange={(open) => !open && setComposerPicker(null)}>
+                    <DialogContent className="sm:max-w-xl">
+                        <DialogHeader>
+                            <DialogTitle>{composerPicker === "files" ? "選擇參考檔案" : "選擇 MCP 工具"}</DialogTitle>
+                            <DialogDescription>
+                                {composerPicker === "files"
+                                    ? "只會把勾選檔案的已索引文字送進這一輪 M365 提示，不會上傳原始檔。請勿選擇密碼、Token 或其他機密資料。"
+                                    : "選取本輪優先路由的 MCP 來源；實際呼叫仍須符合工具規格、Action Gate 與目前核准模式。"}
+                            </DialogDescription>
+                        </DialogHeader>
+                        <div className="custom-scrollbar max-h-[52vh] space-y-2 overflow-y-auto py-1">
+                            {composerResourcesLoading ? (
+                                <div className="flex items-center justify-center gap-2 py-8 text-sm text-muted-foreground"><Loader2 className="h-4 w-4 animate-spin" />載入工具清單…</div>
+                            ) : composerPicker === "files" ? (
+                                referenceFiles.length > 0 ? referenceFiles.map((file) => (
+                                    <label key={file.id} className="flex cursor-pointer items-start gap-3 rounded-xl border border-border p-3 hover:bg-accent/60">
+                                        <input type="checkbox" checked={selectedReferenceFileIds.includes(file.id)} onChange={() => toggleReferenceFile(file.id)} className="mt-1 accent-cyan-500" />
+                                        <span className="min-w-0">
+                                            <span className="block truncate text-sm font-medium">{file.name}</span>
+                                            <span className="mt-1 block truncate text-xs text-muted-foreground">{file.path}</span>
+                                        </span>
+                                    </label>
+                                )) : <p className="rounded-xl border border-dashed border-border p-6 text-center text-sm text-muted-foreground">尚無可用且已索引的參考檔案。</p>
+                            ) : (
+                                mcpServers.length > 0 ? mcpServers.map((server) => (
+                                    <label key={server.name} className="flex cursor-pointer items-start gap-3 rounded-xl border border-border p-3 hover:bg-accent/60">
+                                        <input type="checkbox" checked={selectedMcpServerNames.includes(server.name)} onChange={() => toggleMcpServer(server.name)} className="mt-1 accent-cyan-500" />
+                                        <span className="min-w-0 flex-1">
+                                            <span className="flex items-center gap-2 text-sm font-medium">
+                                                <span className="truncate">{server.name}</span>
+                                                <span className={cn("h-2 w-2 shrink-0 rounded-full", server.connected ? "bg-emerald-500" : "bg-amber-500")} />
+                                            </span>
+                                            <span className="mt-1 block text-xs leading-5 text-muted-foreground">{server.description || "尚未提供用途說明"}</span>
+                                        </span>
+                                    </label>
+                                )) : <p className="rounded-xl border border-dashed border-border p-6 text-center text-sm text-muted-foreground">尚無已啟用的 MCP Server。</p>
+                            )}
+                        </div>
+                        {composerResourceError && <p className="text-xs text-amber-700 dark:text-amber-300">{composerResourceError}</p>}
+                        <div className="flex items-center justify-between gap-3 border-t border-border pt-3">
+                            <span className="text-xs text-muted-foreground">最多選擇 3 項</span>
+                            <button type="button" onClick={() => setComposerPicker(null)} className="rounded-lg bg-primary px-4 py-2 text-xs font-medium text-primary-foreground">完成</button>
+                        </div>
+                    </DialogContent>
+                </Dialog>
                 </div>
             </section>
 
@@ -588,14 +876,14 @@ export default function M365ChatPage() {
                     <div className="flex items-start justify-between gap-3">
                         <div>
                             <p className="text-xs font-semibold uppercase tracking-[0.12em] text-primary">Workspace</p>
-                            <h3 className="mt-1 font-semibold">輸出、來源與執行</h3>
-                            <p className="mt-1 text-xs leading-5 text-muted-foreground">像 Codex 一樣，把對話、專案脈絡、工具與執行狀態放在同一工作區。</p>
+                            <h3 className="mt-1 font-semibold">來源與執行</h3>
+                            <p className="mt-1 text-xs leading-5 text-muted-foreground">把專案脈絡、工具核准與多步驟工作放在同一工作區。</p>
                         </div>
                         <div className="flex gap-1.5">
                             <button type="button" onClick={() => setShowRunForm((value) => !value)} className="flex h-9 w-9 items-center justify-center rounded-xl bg-primary text-primary-foreground" aria-label="新增工作">
                                 <Plus className="h-4 w-4" />
                             </button>
-                            <button type="button" onClick={() => setShowRuns(false)} className="flex h-9 w-9 items-center justify-center rounded-xl border border-border text-muted-foreground hover:bg-accent" aria-label="關閉輸出與來源面板">
+                            <button type="button" onClick={() => setShowRuns(false)} className="flex h-9 w-9 items-center justify-center rounded-xl border border-border text-muted-foreground hover:bg-accent" aria-label="關閉來源與執行面板">
                                 <X className="h-4 w-4" />
                             </button>
                         </div>
@@ -660,41 +948,15 @@ export default function M365ChatPage() {
                         </section>
 
                         <section className="rounded-2xl border border-border bg-card p-4">
-                            <div className="flex items-center justify-between gap-3">
-                                <h4 className="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">輸出內容</h4>
-                                <span className="text-[10px] text-muted-foreground">{messages.length} 則記錄</span>
-                            </div>
-                            {latestAssistantMessage ? (
-                                <div className="mt-3">
-                                    <div className="flex items-center gap-2 text-xs font-medium">
-                                        <Bot className="h-3.5 w-3.5 text-primary" />
-                                        最新 M365 回覆
-                                    </div>
-                                    <p className="mt-2 line-clamp-5 whitespace-pre-wrap text-xs leading-5 text-muted-foreground">
-                                        {latestAssistantMessage.content}
-                                    </p>
-                                </div>
-                            ) : (
-                                <p className="mt-3 text-xs leading-5 text-muted-foreground">尚無輸出；第一次送出前只會建立本機對話，不會自動傳送到 M365。</p>
-                            )}
-                            {currentRun && (
-                                <div className="mt-3 flex items-center justify-between border-t border-border pt-3 text-xs">
-                                    <span className="text-muted-foreground">目前工作</span>
-                                    <span className="rounded-full bg-secondary px-2 py-1 font-medium">{getRunStatusLabel(currentRun.status)}</span>
-                                </div>
-                            )}
-                        </section>
-
-                        <section className="rounded-2xl border border-border bg-card p-4">
                             <h4 className="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">來源</h4>
                             <div className="mt-3 space-y-2 text-xs">
-                                <a href="/dashboard/projects" className="flex items-start gap-2 rounded-lg p-2 hover:bg-accent">
+                                <div className="flex items-start gap-2 rounded-lg p-2">
                                     <FolderKanban className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
                                     <span className="min-w-0">
                                         <span className="block truncate font-medium">{project.name}</span>
                                         <span className="block text-[10px] text-muted-foreground">專案脈絡 v{project.contextVersion}</span>
                                     </span>
-                                </a>
+                                </div>
                                 {conversation.remoteConversationUrl ? (
                                     <a href={conversation.remoteConversationUrl} target="_blank" rel="noreferrer" className="flex items-start gap-2 rounded-lg p-2 hover:bg-accent">
                                         <ExternalLink className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
