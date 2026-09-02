@@ -4,8 +4,8 @@
   "private": true,
   "scripts": {
     "generate-manifest": "node scripts/generate-manifest.mjs",
-    "build": "npm run generate-manifest && node scripts/build.mjs",
-    "clean": "rimraf dist *.tsbuildinfo"
+    "build": "tsc -b ../../packages/sharepoint --force && npm run generate-manifest && node scripts/build.mjs",
+    "clean": "rimraf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {
     "@m365-bridge/protocol": "^0.1.0",

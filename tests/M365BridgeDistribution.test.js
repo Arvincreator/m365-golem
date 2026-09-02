@@ -31,6 +31,9 @@ describe('built-in M365 Session Bridge distribution', () => {
         const bridgePackage = JSON.parse(read('integrations/m365-session-bridge/package.json'));
         expect(bridgePackage.private).toBe(true);
         expect(bridgePackage.workspaces).toEqual(['apps/*', 'packages/*']);
+
+        const edgePackage = JSON.parse(read('integrations/m365-session-bridge/apps/edge-extension/package.json'));
+        expect(edgePackage.scripts.build).toContain('tsc -b ../../packages/sharepoint --force');
     });
 
     test('ships a tenant-neutral deny-first default policy', () => {
@@ -75,6 +78,8 @@ describe('built-in M365 Session Bridge distribution', () => {
         expect(packageJson.scripts['unix:setup']).toBeUndefined();
         expect(read('Start-M365-POC.bat')).toContain('integrations\\m365-session-bridge\\apps\\mcp-server\\dist\\index.js');
         expect(read('Install-M365-Golem.bat')).toContain('install-m365-golem.ps1');
+        expect(read('00-安裝前請先閱讀.txt')).toContain('Get-ChildItem -Recurse -File | Unblock-File');
+        expect(read('README.md')).toContain('先對 ZIP 按右鍵 → 內容 → 解除封鎖');
         expect(read('jest.config.cjs')).toContain('<rootDir>/integrations/m365-session-bridge/');
 
         const runtime = read('apps/runtime/index.js');

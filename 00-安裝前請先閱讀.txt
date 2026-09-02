@@ -1,0 +1,26 @@
+M365 Golem — Windows 安裝前請先閱讀
+
+如果本專案是使用 GitHub 的「Download ZIP」下載，Windows 可能會把 ZIP
+標記為來自網際網路，並在解壓縮後封鎖其中的 .bat / .ps1 安裝腳本。
+
+建議安裝方式：
+
+1. 尚未解壓縮時，對 m365-golem-main.zip 按滑鼠右鍵。
+2. 選擇「內容」。
+3. 在「一般」頁面底部勾選「解除封鎖」，再按「套用」。
+4. 重新解壓縮 ZIP。
+5. 雙擊 Install-M365-Golem.bat。
+
+如果已經解壓縮：
+
+1. 在 m365-golem-main 資料夾空白處按滑鼠右鍵，選擇「在終端中開啟」。
+2. 執行以下 PowerShell 指令：
+
+   Get-ChildItem -Recurse -File | Unblock-File
+
+3. 再雙擊 Install-M365-Golem.bat。
+
+只應對你親自從下列官方專案下載且確認來源正確的檔案解除封鎖：
+https://github.com/Arvincreator/m365-golem
+
+不需要也不建議關閉 Windows Smart App Control 或 Microsoft Defender。

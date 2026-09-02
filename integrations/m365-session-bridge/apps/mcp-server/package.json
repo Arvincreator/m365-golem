@@ -9,7 +9,7 @@
   "scripts": {
     "build": "tsc -b",
     "test": "node --test dist/*.test.js",
-    "clean": "rimraf dist *.tsbuildinfo"
+    "clean": "rimraf dist tsconfig.tsbuildinfo"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.5.0",

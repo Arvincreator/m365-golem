@@ -27,16 +27,24 @@ Chat API，也不要求把 Microsoft 帳密、MFA、Cookie 或 Token 交給 Gole
 
 ## 全新下載後安裝
 
-1. 從 GitHub 下載並解壓縮，或 clone 本倉庫。
-2. 雙擊 `Install-M365-Golem.bat`。
-3. 安裝器會以鎖版依賴建置 Golem、Dashboard 與內建 Session Bridge。
-4. 依安裝畫面提示，在 Edge 開啟 `edge://extensions`：
+1. 從 GitHub 下載 ZIP 後，**先對 ZIP 按右鍵 → 內容 → 解除封鎖 → 套用**，
+   再解壓縮；使用 `git clone` 則不需要這個步驟。這是 Windows 對網際網路
+   下載腳本的安全標記，不需要關閉 Smart App Control。
+2. 若已經解壓縮才遇到封鎖，請在專案資料夾開啟 PowerShell，執行：
+
+   ```powershell
+   Get-ChildItem -Recurse -File | Unblock-File
+   ```
+
+3. 雙擊 `Install-M365-Golem.bat`。
+4. 安裝器會以鎖版依賴建置 Golem、Dashboard 與內建 Session Bridge。
+5. 依安裝畫面提示，在 Edge 開啟 `edge://extensions`：
    - 開啟「開發人員模式」；
    - 點「載入解壓縮」；
    - 選擇
      `integrations\m365-session-bridge\apps\edge-extension\dist`。
-5. 雙擊 `Start-Golem.bat`。
-6. 在自動開啟的可見 Edge 視窗自行完成登入與 MFA，再從本機工作台開始對話。
+6. 雙擊 `Start-Golem.bat`。
+7. 在自動開啟的可見 Edge 視窗自行完成登入與 MFA，再從本機工作台開始對話。
 
 也可以在 PowerShell 執行：
 
