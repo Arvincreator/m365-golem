@@ -22,6 +22,7 @@ describe('M365 workspace routes', () => {
             'M365_RUNNER_ENABLED',
             'M365_DATA_ENCRYPTION_KEY',
             'M365_WORKSPACE_DB_PATH',
+            'M365_PROJECTS_ROOT',
         ]) {
             previousEnv[key] = process.env[key];
         }
@@ -31,6 +32,7 @@ describe('M365 workspace routes', () => {
         process.env.M365_RUNNER_ENABLED = 'true';
         process.env.M365_DATA_ENCRYPTION_KEY = Buffer.alloc(32, 3).toString('base64');
         process.env.M365_WORKSPACE_DB_PATH = path.join(tempDir, 'workspace.sqlite');
+        process.env.M365_PROJECTS_ROOT = path.join(tempDir, 'projects');
 
         serverContext = { m365DispatchLease: null };
         const app = express();
@@ -94,6 +96,30 @@ describe('M365 workspace routes', () => {
         });
         expect(projectResult.response.status).toBe(201);
         const projectId = projectResult.body.project.id;
+        expect(projectResult.body.workspace).toEqual(expect.objectContaining({
+            projectId,
+            rootPath: path.join(tempDir, 'projects', projectId),
+            agentsPath: path.join(tempDir, 'projects', projectId, 'AGENTS.md'),
+            agentsTruncated: false,
+        }));
+        expect(fs.existsSync(path.join(tempDir, 'projects', projectId, 'references'))).toBe(true);
+        expect(fs.existsSync(path.join(tempDir, 'projects', projectId, 'outputs'))).toBe(true);
+
+        const workspaceResult = await request(`/api/projects/${projectId}/workspace`);
+        expect(workspaceResult.response.status).toBe(200);
+        expect(workspaceResult.body.workspace.agentsContent).toContain('cannot bypass Golem safety rules');
+
+        const originalContextVersion = projectResult.body.project.contextVersion;
+        const agentsContent = '# 專案規則\n\n- 產出需標示依據與待人工確認事項。\n';
+        const agentsResult = await request(`/api/projects/${projectId}/agents`, {
+            method: 'PUT',
+            body: JSON.stringify({ content: agentsContent }),
+        });
+        expect(agentsResult.response.status).toBe(200);
+        expect(agentsResult.body.workspace.agentsContent).toBe(agentsContent);
+        expect(agentsResult.body.project.contextVersion).toBe(originalContextVersion + 1);
+        expect(fs.readFileSync(path.join(tempDir, 'projects', projectId, 'AGENTS.md'), 'utf8')).toBe(agentsContent);
+        expect(fs.readFileSync(process.env.M365_WORKSPACE_DB_PATH)).not.toContain(agentsContent);
 
         const firstConversation = await request(`/api/projects/${projectId}/conversations`, {
             method: 'POST',

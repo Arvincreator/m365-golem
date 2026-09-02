@@ -4,6 +4,7 @@ const MultiAgentHandler = require('../../src/core/action_handlers/MultiAgentHand
 const SkillHandler = require('../../src/core/action_handlers/SkillHandler');
 const CommandHandler = require('../../src/core/action_handlers/CommandHandler');
 const ActionExecutionGate = require('../../src/managers/ActionExecutionGate');
+const { toolsetManager } = require('../../src/managers/ToolsetManager');
 const { CONFIG } = require('../../src/config');
 const skillManager = require('../../src/managers/SkillManager');
 const COMMAND_DEFS = require('../../src/config/commands');
@@ -267,6 +268,9 @@ class NeuroShunter {
                         allowActions: options.allowActions === true,
                         actionDepth: Number(options.actionDepth || 0),
                         maxActionDepth: Number(options.maxActionDepth || CONFIG.MAX_AUTO_TURNS || 5),
+                        preferredSkillIds: Array.isArray(options.preferredSkillIds) ? options.preferredSkillIds : [],
+                        preferredSkillActions: Array.isArray(options.preferredSkillActions) ? options.preferredSkillActions : [],
+                        preferredMcpServers: Array.isArray(options.preferredMcpServers) ? options.preferredMcpServers : [],
                     },
                 });
                 const compactActions = JSON.stringify(parsed.actions, null, 2).slice(0, 6000);
@@ -457,11 +461,16 @@ class NeuroShunter {
             console.log(`[GOLEM_ACTION] (${shouldSuppressReply ? 'Silent' : 'Normal'})\n${JSON.stringify(parsed.actions, null, 2)}`);
             const normalActions = [];
             const rejectedActions = [];
+            const turnActiveTools = [
+                ...toolsetManager.getActiveTools(),
+                ...(Array.isArray(options.preferredSkillIds) ? options.preferredSkillIds : []),
+                ...(Array.isArray(options.preferredSkillActions) ? options.preferredSkillActions : []),
+            ];
 
             for (const originalAct of parsed.actions) {
                 let act = originalAct;
 
-                if (!ActionExecutionGate.validate(act).ok) {
+                if (!ActionExecutionGate.validate(act, { activeTools: turnActiveTools }).ok) {
                     const slashRecovery = this._tryRecoverSlashAction(act);
                     if (slashRecovery && slashRecovery.action) {
                         console.log(slashRecovery.note);
@@ -469,7 +478,7 @@ class NeuroShunter {
                     }
                 }
 
-                const gate = ActionExecutionGate.validate(act);
+                const gate = ActionExecutionGate.validate(act, { activeTools: turnActiveTools });
                 if (!gate.ok) {
                     rejectedActions.push({ action: act, error: gate.error, code: gate.code });
                     continue;

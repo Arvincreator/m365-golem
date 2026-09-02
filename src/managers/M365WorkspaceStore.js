@@ -548,6 +548,21 @@ class M365WorkspaceStore {
         }));
     }
 
+    async bumpProjectContextVersion(projectId) {
+        return this._enqueue(async () => {
+            const current = await this._get('SELECT * FROM projects WHERE id = ?', [projectId]);
+            if (!current) throw workspaceError('M365_PROJECT_NOT_FOUND', 'Project not found.');
+            if (current.status === 'archived') {
+                throw workspaceError('M365_PROJECT_ARCHIVED', 'Archived projects cannot be edited.');
+            }
+            await this._run(
+                'UPDATE projects SET context_version = context_version + 1, updated_at = ? WHERE id = ?',
+                [this._now(), projectId]
+            );
+            return this._decodeProject(await this._get('SELECT * FROM projects WHERE id = ?', [projectId]));
+        });
+    }
+
     async archiveProject(projectId) {
         return this._enqueue(async () => this._transaction(async () => {
             const project = await this._get('SELECT * FROM projects WHERE id = ?', [projectId]);

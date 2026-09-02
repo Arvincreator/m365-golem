@@ -90,6 +90,7 @@ moltbot_auth.json
 .golem.pid
 profiles
 data/temp_uploads
+data/m365-projects/
 data/dashboard/stock-symbol-directory.json
 data/dashboard/reference-files.json
 data/dashboard/reference-file-index.json

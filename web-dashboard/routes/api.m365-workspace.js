@@ -4,6 +4,7 @@ const express = require('express');
 const {
     acquireM365DispatchLease,
     activateM365Conversation,
+    getM365ProjectWorkspaceService,
     getM365WorkspaceStore,
     isM365RunnerEnabled,
     isM365WorkspaceEnabled,
@@ -83,7 +84,8 @@ module.exports = function registerM365WorkspaceRoutes(server) {
                 description: req.body.description,
                 instructions: req.body.instructions,
             });
-            return res.status(201).json({ success: true, project });
+            const workspace = getM365ProjectWorkspaceService(server).ensureProject(project.id);
+            return res.status(201).json({ success: true, project, workspace });
         } catch (error) {
             return sendError(res, error);
         }
@@ -104,6 +106,32 @@ module.exports = function registerM365WorkspaceRoutes(server) {
             const store = await getM365WorkspaceStore(server);
             const project = await store.updateProject(req.params.projectId, req.body || {});
             return res.json({ success: true, project });
+        } catch (error) {
+            return sendError(res, error);
+        }
+    });
+
+    router.get('/api/projects/:projectId/workspace', async (req, res) => {
+        try {
+            const store = await getM365WorkspaceStore(server);
+            const project = await store.getProject(req.params.projectId);
+            const workspace = getM365ProjectWorkspaceService(server).ensureProject(project.id);
+            return res.json({ success: true, workspace });
+        } catch (error) {
+            return sendError(res, error);
+        }
+    });
+
+    router.put('/api/projects/:projectId/agents', async (req, res) => {
+        try {
+            const store = await getM365WorkspaceStore(server);
+            const project = await store.getProject(req.params.projectId);
+            const workspace = getM365ProjectWorkspaceService(server).writeAgents(
+                project.id,
+                req.body && req.body.content
+            );
+            const updatedProject = await store.bumpProjectContextVersion(project.id);
+            return res.json({ success: true, project: updatedProject, workspace });
         } catch (error) {
             return sendError(res, error);
         }

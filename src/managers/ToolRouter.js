@@ -183,6 +183,9 @@ class ToolRouter {
         const maxSkills = Number(options.maxSkills || 5);
         const maxMcpTools = Number(options.maxMcpTools || 6);
         const activeTools = new Set(this.activeTools || toolsetManager.getActiveTools());
+        const preferredSkillIds = new Set((options.preferredSkillIds || []).map(normalizeText));
+        const preferredSkillActions = new Set((options.preferredSkillActions || []).map(normalizeText));
+        const preferredMcpServers = new Set((options.preferredMcpServers || []).map(normalizeText));
         const requestClass = this.policy.classifyRequest(query);
         const vectorBoostIds = options.vectorBoostIds instanceof Set ? options.vectorBoostIds : new Set();
 
@@ -199,7 +202,10 @@ class ToolRouter {
                     action: pkg.action || pkg.id,
                     triggers: manifest.triggers || [],
                     hasRuntime: fs.existsSync(pkg.indexPath),
-                    allowed: activeTools.has(pkg.id) || activeTools.has(pkg.action),
+                    preferred: preferredSkillIds.has(normalizeText(pkg.id)) || preferredSkillActions.has(normalizeText(pkg.action)),
+                    allowed: activeTools.has(pkg.id) || activeTools.has(pkg.action)
+                        || preferredSkillIds.has(normalizeText(pkg.id))
+                        || preferredSkillActions.has(normalizeText(pkg.action)),
                     semanticBoost: false,
                     content,
                     score: 0,
@@ -209,6 +215,10 @@ class ToolRouter {
         for (const candidate of skillCandidates) {
             candidate.score = scoreCandidate(query, candidate);
             if (candidate.allowed) candidate.score += 2;
+            if (candidate.preferred) {
+                candidate.semanticBoost = true;
+                candidate.score += 100;
+            }
             // 向量語意 boost：命中向量搜尋結果的技能額外加分
             if (vectorBoostIds.has(candidate.id) || vectorBoostIds.has(candidate.action)) {
                 candidate.semanticBoost = true;
@@ -235,9 +245,14 @@ class ToolRouter {
                     example: catalogTool?.example || MCPToolCatalog.buildActionExample(server.name, tool.name, tool.inputSchema || tool.schema || {}),
                     content: `${server.name} ${serverDesc} ${tool.name} ${tool.description || ''}`,
                     semanticBoost: false,
+                    preferred: preferredMcpServers.has(normalizeText(server.name)),
                     score: 0,
                 };
                 candidate.score = scoreCandidate(query, candidate);
+                if (candidate.preferred) {
+                    candidate.semanticBoost = true;
+                    candidate.score += 100;
+                }
                 mcpTools.push(candidate);
             }
         }

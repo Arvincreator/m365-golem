@@ -2,6 +2,10 @@ jest.mock('../src/utils/ResponseParser');
 jest.mock('../src/core/action_handlers/MultiAgentHandler');
 jest.mock('../src/core/action_handlers/SkillHandler');
 jest.mock('../src/core/action_handlers/CommandHandler');
+jest.mock('../src/managers/SkillManager', () => ({
+    getSkill: jest.fn(() => null),
+    listSkills: jest.fn(() => []),
+}));
 
 const { NeuroShunter } = require('../packages/protocol');
 const ResponseParser = require('../src/utils/ResponseParser');
@@ -194,6 +198,43 @@ describe('NeuroShunter M365 safety gates', () => {
 
         expect(controller.pendingTasks.size).toBe(0);
         expect(SkillHandler.execute).toHaveBeenCalledTimes(1);
+    });
+
+    test('lets an explicitly selected installed Skill pass the per-turn toolset gate after approval', async () => {
+        const ctx = {
+            reply: jest.fn().mockResolvedValue(),
+            shouldMentionSender: false,
+            platform: 'web',
+        };
+        const brain = {
+            webBackend: { id: 'm365-web', safeMode: true },
+            memorize: jest.fn().mockResolvedValue(),
+            _appendChatLog: jest.fn(),
+            areActionsEnabled: jest.fn(() => true),
+            isLocalContextEnabled: jest.fn(() => false),
+        };
+        const controller = { pendingTasks: new Map() };
+        SkillHandler.execute.mockResolvedValue(true);
+        ResponseParser.parse.mockReturnValue({
+            memory: null,
+            reply: '',
+            actions: [{ action: 'reference-files', args: { operation: 'list' } }],
+        });
+
+        await NeuroShunter.dispatch(ctx, 'raw', brain, controller, {
+            m365ActionApproved: true,
+            preferredSkillIds: ['reference-files'],
+            preferredSkillActions: ['reference-files'],
+        });
+
+        expect(SkillHandler.execute).toHaveBeenCalledWith(
+            ctx,
+            expect.objectContaining({ action: 'reference-files' }),
+            brain,
+            controller,
+            expect.any(Object)
+        );
+        expect(CommandHandler.execute).not.toHaveBeenCalled();
     });
 
     test('lets an M365 action continue through the existing safety gate when the user enabled auto approval', async () => {

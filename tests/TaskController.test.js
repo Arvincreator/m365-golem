@@ -50,6 +50,23 @@ describe('TaskController', () => {
         expect(ctx.reply).not.toHaveBeenCalled();
     });
 
+    test('runs native M365 commands in the assigned project workspace', async () => {
+        const controller = new TaskController({ golemId: 'test-golem' });
+        const ctx = {
+            reply: jest.fn().mockResolvedValue(undefined),
+            workspaceRoot: 'C:\\local\\m365-projects\\project-1',
+        };
+
+        await controller.runSequence(ctx, [
+            { action: 'command', parameter: 'pwd' },
+        ]);
+
+        expect(controller.internalExecutor.run).toHaveBeenCalledWith('pwd', {
+            cwd: 'C:\\local\\m365-projects\\project-1',
+        });
+        controller.destroy();
+    });
+
     test('runSequence should still require approval for complex command', async () => {
         const controller = new TaskController({ golemId: 'test-golem' });
         const ctx = { reply: jest.fn().mockResolvedValue(undefined) };
@@ -70,7 +87,12 @@ describe('TaskController', () => {
 
     test('runSequence should assemble sys_admin through package runtime path', async () => {
         const controller = new TaskController({ golemId: 'test-golem' });
-        const ctx = { reply: jest.fn().mockResolvedValue(undefined) };
+        controller.security.assess = jest.fn(() => ({ level: 'SAFE', reason: '' }));
+        controller.security.evaluateCommandLevel = jest.fn(() => 0);
+        const ctx = {
+            reply: jest.fn().mockResolvedValue(undefined),
+            workspaceRoot: 'C:\\local\\m365-projects\\project-1',
+        };
 
         const result = await controller.runSequence(ctx, [
             { action: 'sys_admin', parameters: { command: 'echo hello' } }
@@ -79,8 +101,12 @@ describe('TaskController', () => {
         controller.destroy();
 
         expect(result).toContain('[Step 1 Success]');
-        expect(result).toContain('src/skills/modules/sys-admin/index.js');
-        expect(result).not.toContain('src/skills/core/sys-admin.js');
+        expect(result).toMatch(/src[\\/]skills[\\/]modules[\\/]sys-admin[\\/]index\.js/);
+        expect(result).not.toMatch(/src[\\/]skills[\\/]core[\\/]sys-admin\.js/);
+        expect(controller.internalExecutor.run).toHaveBeenCalledWith(
+            expect.stringMatching(/src[\\/]skills[\\/]modules[\\/]sys-admin[\\/]index\.js/),
+            {}
+        );
     });
 
     test('runSequence should preserve complex sys_admin payload for approval', async () => {
@@ -94,11 +120,8 @@ describe('TaskController', () => {
         controller.destroy();
 
         expect(result).toBeNull();
-        expect(ctx.reply).toHaveBeenCalledWith(
-            expect.stringContaining('src/skills/modules/sys-admin/index.js'),
-            expect.any(Object)
-        );
+        expect(ctx.reply).toHaveBeenCalledWith(expect.stringMatching(/src[\\/]skills[\\/]modules[\\/]sys-admin[\\/]index\.js/), expect.any(Object));
         expect(ctx.reply.mock.calls[0][0]).toContain('node|zombie');
-        expect(ctx.reply.mock.calls[0][0]).not.toContain('src/skills/core/sys-admin.js');
+        expect(ctx.reply.mock.calls[0][0]).not.toMatch(/src[\\/]skills[\\/]core[\\/]sys-admin\.js/);
     });
 });

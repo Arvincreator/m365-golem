@@ -20,6 +20,15 @@ export type M365Project = {
     updatedAt: string;
 };
 
+export type M365ProjectWorkspace = {
+    projectId: string;
+    rootPath: string;
+    agentsPath: string;
+    agentsContent: string;
+    agentsTruncated: boolean;
+    updatedAt: string;
+};
+
 export type M365Conversation = {
     id: string;
     projectId: string;

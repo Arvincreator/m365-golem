@@ -25,7 +25,7 @@ import {
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { apiGet, apiPost } from "@/lib/api-client";
+import { apiGet, apiPost, apiPut } from "@/lib/api-client";
 import { apiUrl } from "@/lib/api";
 import { socket } from "@/lib/socket";
 import { cn } from "@/lib/utils";
@@ -44,6 +44,7 @@ import {
     type M365Conversation,
     type M365Message,
     type M365Project,
+    type M365ProjectWorkspace,
     type M365Run,
     type M365RunDetail,
 } from "@/lib/m365-workspace";
@@ -66,7 +67,7 @@ type PendingLocalAction = {
 
 type ResponseMode = "auto" | "quick" | "thoughtful";
 type ApprovalMode = "manual" | "auto";
-type ComposerPicker = "files" | "mcp" | null;
+type ComposerPicker = "files" | "mcp" | "skills" | null;
 
 type ReferenceFileOption = {
     id: string;
@@ -81,6 +82,13 @@ type McpServerOption = {
     description?: string;
     enabled: boolean;
     connected?: boolean;
+};
+
+type SkillOption = {
+    id: string;
+    name: string;
+    description?: string;
+    action: string;
 };
 
 function errorMessage(error: unknown): string {
@@ -129,6 +137,7 @@ export default function M365ChatPage() {
         activeConversationId,
     } = useM365WorkspaceSelection();
     const [project, setProject] = useState<M365Project | null>(null);
+    const [projectWorkspace, setProjectWorkspace] = useState<M365ProjectWorkspace | null>(null);
     const [conversation, setConversation] = useState<M365Conversation | null>(null);
     const [messages, setMessages] = useState<M365Message[]>([]);
     const [runs, setRuns] = useState<M365Run[]>([]);
@@ -145,8 +154,13 @@ export default function M365ChatPage() {
     const [composerResourceError, setComposerResourceError] = useState("");
     const [referenceFiles, setReferenceFiles] = useState<ReferenceFileOption[]>([]);
     const [mcpServers, setMcpServers] = useState<McpServerOption[]>([]);
+    const [skills, setSkills] = useState<SkillOption[]>([]);
     const [selectedReferenceFileIds, setSelectedReferenceFileIds] = useState<string[]>([]);
     const [selectedMcpServerNames, setSelectedMcpServerNames] = useState<string[]>([]);
+    const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
+    const [showAgentsEditor, setShowAgentsEditor] = useState(false);
+    const [agentsDraft, setAgentsDraft] = useState("");
+    const [savingAgents, setSavingAgents] = useState(false);
     const [loading, setLoading] = useState(true);
     const [sending, setSending] = useState(false);
     const [activating, setActivating] = useState(false);
@@ -227,14 +241,16 @@ export default function M365ChatPage() {
 
     const loadContext = useCallback(async () => {
         if (!activeProjectId || !activeConversationId) return;
-        const [projectData, conversationData] = await Promise.all([
+        const [projectData, conversationData, workspaceData] = await Promise.all([
             apiGet<{ project: M365Project }>(apiUrl(`/api/projects/${encodeURIComponent(activeProjectId)}`)),
             apiGet<{ conversation: M365Conversation }>(apiUrl(`/api/conversations/${encodeURIComponent(activeConversationId)}`)),
+            apiGet<{ workspace: M365ProjectWorkspace }>(apiUrl(`/api/projects/${encodeURIComponent(activeProjectId)}/workspace`)),
         ]);
         if (conversationData.conversation.projectId !== projectData.project.id) {
             throw new Error("目前選取的對話不屬於這個專案，請回到專案頁重新選擇。");
         }
         setProject(projectData.project);
+        setProjectWorkspace(workspaceData.workspace);
         setConversation(conversationData.conversation);
         await Promise.all([loadMessages(), loadRuns(), loadPendingLocalActions()]);
     }, [activeConversationId, activeProjectId, loadMessages, loadPendingLocalActions, loadRuns]);
@@ -263,10 +279,11 @@ export default function M365ChatPage() {
         Promise.allSettled([
             apiGet<{ files?: ReferenceFileOption[] }>(apiUrl("/api/reference-files"), undefined, { retries: 0 }),
             apiGet<{ servers?: McpServerOption[] }>(apiUrl("/api/mcp/servers"), undefined, { retries: 0 }),
+            apiGet<{ skills?: SkillOption[] }>(apiUrl("/api/chat/skill-options"), undefined, { retries: 0 }),
             apiGet<{ approvalMode?: ApprovalMode }>(apiUrl("/api/chat/preferences"), undefined, { retries: 0 }),
         ]).then((results) => {
             if (!mounted) return;
-            const [fileResult, mcpResult, preferenceResult] = results;
+            const [fileResult, mcpResult, skillResult, preferenceResult] = results;
             if (fileResult.status === "fulfilled") {
                 setReferenceFiles((fileResult.value.files || []).filter((file) => (
                     file.enabled !== false
@@ -276,6 +293,9 @@ export default function M365ChatPage() {
             }
             if (mcpResult.status === "fulfilled") {
                 setMcpServers((mcpResult.value.servers || []).filter((server) => server.enabled !== false));
+            }
+            if (skillResult.status === "fulfilled") {
+                setSkills(skillResult.value.skills || []);
             }
             if (preferenceResult.status === "fulfilled" && ["manual", "auto"].includes(String(preferenceResult.value.approvalMode))) {
                 setApprovalMode(preferenceResult.value.approvalMode as ApprovalMode);
@@ -379,6 +399,38 @@ export default function M365ChatPage() {
         });
     };
 
+    const toggleSkill = (id: string) => {
+        setComposerResourceError("");
+        setSelectedSkillIds((current) => {
+            if (current.includes(id)) return current.filter((item) => item !== id);
+            if (current.length >= 3) {
+                setComposerResourceError("每次最多選擇 3 個 Skills。");
+                return current;
+            }
+            return [...current, id];
+        });
+    };
+
+    const saveProjectAgents = async () => {
+        if (!project || savingAgents) return;
+        setSavingAgents(true);
+        setError("");
+        try {
+            const result = await apiPut<{ project: M365Project; workspace: M365ProjectWorkspace }>(
+                apiUrl(`/api/projects/${encodeURIComponent(project.id)}/agents`),
+                { content: agentsDraft }
+            );
+            setProject(result.project);
+            setProjectWorkspace(result.workspace);
+            setShowAgentsEditor(false);
+            setNotice("AGENTS.md 已儲存；下次需要同步專案脈絡時會載入最新版。");
+        } catch (requestError) {
+            setError(errorMessage(requestError));
+        } finally {
+            setSavingAgents(false);
+        }
+    };
+
     const changeResponseMode = (mode: ResponseMode) => {
         setResponseMode(mode);
         window.localStorage.setItem("m365-golem-response-mode", mode);
@@ -423,11 +475,13 @@ export default function M365ChatPage() {
                 message: text,
                 responseMode,
                 selectedMcpServers: selectedMcpServerNames,
+                selectedSkillIds,
                 referenceFileIds: selectedReferenceFileIds,
             });
             setInput("");
             setSelectedReferenceFileIds([]);
             setSelectedMcpServerNames([]);
+            setSelectedSkillIds([]);
             setComposerMenuOpen(false);
             pendingStartedAt.current = Date.now();
             setPendingRequestId(data.requestId);
@@ -733,7 +787,7 @@ export default function M365ChatPage() {
                                 placeholder={conversation.bindingState === "reconcile_required" ? "請先完成人工核對" : "傳送訊息給此專案的 M365 Copilot 對話…"}
                             />
 
-                            {(selectedReferenceFileIds.length > 0 || selectedMcpServerNames.length > 0) && (
+                            {(selectedReferenceFileIds.length > 0 || selectedMcpServerNames.length > 0 || selectedSkillIds.length > 0) && (
                                 <div className="mb-2 flex flex-wrap gap-1.5 px-1">
                                     {selectedReferenceFileIds.map((id) => {
                                         const file = referenceFiles.find((item) => item.id === id);
@@ -752,6 +806,16 @@ export default function M365ChatPage() {
                                             <X className="h-3 w-3 shrink-0 text-muted-foreground" />
                                         </button>
                                     ))}
+                                    {selectedSkillIds.map((id) => {
+                                        const skill = skills.find((item) => item.id === id);
+                                        return (
+                                            <button key={id} type="button" onClick={() => toggleSkill(id)} className="inline-flex max-w-48 items-center gap-1 rounded-lg border border-emerald-500/25 bg-emerald-500/5 px-2 py-1 text-[11px] hover:bg-emerald-500/10" title="移除 Skill">
+                                                <ShieldCheck className="h-3 w-3 shrink-0 text-emerald-500" />
+                                                <span className="truncate">{skill?.name || id}</span>
+                                                <X className="h-3 w-3 shrink-0 text-muted-foreground" />
+                                            </button>
+                                        );
+                                    })}
                                 </div>
                             )}
 
@@ -773,6 +837,9 @@ export default function M365ChatPage() {
                                             </button>
                                             <button type="button" onClick={() => { setComposerPicker("mcp"); setComposerMenuOpen(false); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs hover:bg-accent">
                                                 <ListChecks className="h-4 w-4 text-primary" />選擇 MCP 工具
+                                            </button>
+                                            <button type="button" onClick={() => { setComposerPicker("skills"); setComposerMenuOpen(false); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs hover:bg-accent">
+                                                <ShieldCheck className="h-4 w-4 text-emerald-500" />選擇 Skills
                                             </button>
                                             <a href="/dashboard/reference-files" className="mt-1 block border-t border-border px-3 py-2 text-[11px] text-muted-foreground hover:text-foreground">管理參考檔案…</a>
                                         </div>
@@ -826,11 +893,13 @@ export default function M365ChatPage() {
                 <Dialog open={composerPicker !== null} onOpenChange={(open) => !open && setComposerPicker(null)}>
                     <DialogContent className="sm:max-w-xl">
                         <DialogHeader>
-                            <DialogTitle>{composerPicker === "files" ? "選擇參考檔案" : "選擇 MCP 工具"}</DialogTitle>
+                            <DialogTitle>{composerPicker === "files" ? "選擇參考檔案" : composerPicker === "mcp" ? "選擇 MCP 工具" : "選擇 Skills"}</DialogTitle>
                             <DialogDescription>
                                 {composerPicker === "files"
                                     ? "只會把勾選檔案的已索引文字送進這一輪 M365 提示，不會上傳原始檔。請勿選擇密碼、Token 或其他機密資料。"
-                                    : "選取本輪優先路由的 MCP 來源；實際呼叫仍須符合工具規格、Action Gate 與目前核准模式。"}
+                                    : composerPicker === "mcp"
+                                        ? "選取本輪優先路由的 MCP 來源；實際呼叫仍須符合工具規格、Action Gate 與目前核准模式。"
+                                        : "選取本輪優先使用的已安裝 Skill；系統會載入它的使用規格，但仍須通過 Action Gate 與目前核准模式。"}
                             </DialogDescription>
                         </DialogHeader>
                         <div className="custom-scrollbar max-h-[52vh] space-y-2 overflow-y-auto py-1">
@@ -846,7 +915,7 @@ export default function M365ChatPage() {
                                         </span>
                                     </label>
                                 )) : <p className="rounded-xl border border-dashed border-border p-6 text-center text-sm text-muted-foreground">尚無可用且已索引的參考檔案。</p>
-                            ) : (
+                            ) : composerPicker === "mcp" ? (
                                 mcpServers.length > 0 ? mcpServers.map((server) => (
                                     <label key={server.name} className="flex cursor-pointer items-start gap-3 rounded-xl border border-border p-3 hover:bg-accent/60">
                                         <input type="checkbox" checked={selectedMcpServerNames.includes(server.name)} onChange={() => toggleMcpServer(server.name)} className="mt-1 accent-cyan-500" />
@@ -859,6 +928,16 @@ export default function M365ChatPage() {
                                         </span>
                                     </label>
                                 )) : <p className="rounded-xl border border-dashed border-border p-6 text-center text-sm text-muted-foreground">尚無已啟用的 MCP Server。</p>
+                            ) : (
+                                skills.length > 0 ? skills.map((skill) => (
+                                    <label key={skill.id} className="flex cursor-pointer items-start gap-3 rounded-xl border border-border p-3 hover:bg-accent/60">
+                                        <input type="checkbox" checked={selectedSkillIds.includes(skill.id)} onChange={() => toggleSkill(skill.id)} className="mt-1 accent-emerald-500" />
+                                        <span className="min-w-0 flex-1">
+                                            <span className="block truncate text-sm font-medium">{skill.name}</span>
+                                            <span className="mt-1 block text-xs leading-5 text-muted-foreground">{skill.description || `Action: ${skill.action}`}</span>
+                                        </span>
+                                    </label>
+                                )) : <p className="rounded-xl border border-dashed border-border p-6 text-center text-sm text-muted-foreground">尚無已啟用且可執行的 Skills。</p>
                             )}
                         </div>
                         {composerResourceError && <p className="text-xs text-amber-700 dark:text-amber-300">{composerResourceError}</p>}
@@ -974,6 +1053,22 @@ export default function M365ChatPage() {
                                 <a href="/dashboard/reference-files" className="flex items-center gap-2 rounded-lg p-2 hover:bg-accent">
                                     <FolderKanban className="h-3.5 w-3.5 text-primary" />參考檔案管理
                                 </a>
+                                {projectWorkspace && (
+                                    <button
+                                        type="button"
+                                        onClick={() => {
+                                            setAgentsDraft(projectWorkspace.agentsContent);
+                                            setShowAgentsEditor(true);
+                                        }}
+                                        className="flex w-full items-start gap-2 rounded-lg p-2 text-left hover:bg-accent"
+                                    >
+                                        <FileText className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
+                                        <span className="min-w-0">
+                                            <span className="block font-medium">AGENTS.md</span>
+                                            <span className="block truncate text-[10px] text-muted-foreground" title={projectWorkspace.rootPath}>{projectWorkspace.rootPath}</span>
+                                        </span>
+                                    </button>
+                                )}
                             </div>
                         </section>
 
@@ -1112,6 +1207,36 @@ export default function M365ChatPage() {
                     </div>
                 </aside>
             )}
+
+            <Dialog open={showAgentsEditor} onOpenChange={setShowAgentsEditor}>
+                <DialogContent className="sm:max-w-2xl">
+                    <DialogHeader>
+                        <DialogTitle>專案 AGENTS.md</DialogTitle>
+                        <DialogDescription>
+                            這是本機明文專案規則，會在需要同步專案脈絡時傳給 M365。請勿放入密碼、Token、Cookie 或私鑰；它不能繞過 Action Gate、核准或資料邊界。
+                        </DialogDescription>
+                    </DialogHeader>
+                    <div className="space-y-2">
+                        <p className="truncate text-xs text-muted-foreground" title={projectWorkspace?.agentsPath}>{projectWorkspace?.agentsPath}</p>
+                        <textarea
+                            value={agentsDraft}
+                            onChange={(event) => setAgentsDraft(event.target.value)}
+                            rows={18}
+                            maxLength={12000}
+                            className="custom-scrollbar w-full resize-y rounded-xl border border-input bg-background px-3 py-2 font-mono text-xs leading-5 outline-none focus:ring-2 focus:ring-ring"
+                        />
+                        <div className="flex items-center justify-between gap-3">
+                            <span className="text-xs text-muted-foreground">{agentsDraft.length.toLocaleString()}/12,000 字</span>
+                            <div className="flex gap-2">
+                                <button type="button" onClick={() => setShowAgentsEditor(false)} className="rounded-lg border border-border px-4 py-2 text-xs">取消</button>
+                                <button type="button" disabled={savingAgents} onClick={() => void saveProjectAgents()} className="rounded-lg bg-primary px-4 py-2 text-xs font-medium text-primary-foreground disabled:opacity-50">
+                                    {savingAgents ? "儲存中…" : "儲存 AGENTS.md"}
+                                </button>
+                            </div>
+                        </div>
+                    </div>
+                </DialogContent>
+            </Dialog>
         </div>
     );
 }

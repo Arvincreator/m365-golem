@@ -350,6 +350,9 @@ class ConversationManager {
                 isAdmin: task.ctx && task.ctx.isAdmin === true,
                 chatId: task.ctx && task.ctx.chatId,
                 platform: task.ctx && task.ctx.platform,
+                preferredSkillIds: task.ctx && Array.isArray(task.ctx.preferredSkillIds) ? task.ctx.preferredSkillIds : [],
+                preferredSkillActions: task.ctx && Array.isArray(task.ctx.preferredSkillActions) ? task.ctx.preferredSkillActions : [],
+                preferredMcpServers: task.ctx && Array.isArray(task.ctx.preferredMcpServers) ? task.ctx.preferredMcpServers : [],
                 ...task.options // 🎯 [v9.1.13] 透傳來自隊列的自定義選項 (如 suppressReply)
             });
 
@@ -401,7 +404,10 @@ class ConversationManager {
                 isSystemFeedback: task.options.isSystemFeedback === true,
                 allowActions: task.options.allowActions === true,
                 actionDepth: Number(task.options.actionDepth || 0),
-                maxActionDepth: Number(task.options.maxActionDepth || ConfigManager.CONFIG.MAX_AUTO_TURNS || 5)
+                maxActionDepth: Number(task.options.maxActionDepth || ConfigManager.CONFIG.MAX_AUTO_TURNS || 5),
+                preferredSkillIds: task.ctx && Array.isArray(task.ctx.preferredSkillIds) ? task.ctx.preferredSkillIds : [],
+                preferredSkillActions: task.ctx && Array.isArray(task.ctx.preferredSkillActions) ? task.ctx.preferredSkillActions : [],
+                preferredMcpServers: task.ctx && Array.isArray(task.ctx.preferredMcpServers) ? task.ctx.preferredMcpServers : []
             });
         } catch (e) {
             console.error(`❌ [Dialogue Queue:${this.golemId}] 處理失敗:`, e);

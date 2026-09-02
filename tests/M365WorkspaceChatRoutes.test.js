@@ -13,6 +13,12 @@ const mockActivate = jest.fn();
 const mockCaptureBinding = jest.fn();
 const mockMarkReconcile = jest.fn();
 const mockHandleDashboardMessage = jest.fn();
+const mockProjectWorkspaceService = {
+    ensureProject: jest.fn(),
+};
+const mockSkillPackageRegistry = {
+    listSkillPackages: jest.fn(),
+};
 const mockReferenceFileService = {
     list: jest.fn(),
     read: jest.fn(),
@@ -26,6 +32,7 @@ const mockMcpManager = {
 jest.mock('../src/services/M365WorkspaceService', () => ({
     isM365WorkspaceEnabled: jest.fn(() => true),
     getM365WorkspaceStore: jest.fn(async () => mockStore),
+    getM365ProjectWorkspaceService: jest.fn(() => mockProjectWorkspaceService),
     activateM365Conversation: (...args) => mockActivate(...args),
     captureM365ConversationBinding: (...args) => mockCaptureBinding(...args),
     markConversationReconcileRequired: (...args) => mockMarkReconcile(...args),
@@ -52,6 +59,7 @@ jest.mock('../index.js', () => ({
 }));
 
 jest.mock('../src/services/ReferenceFileService', () => mockReferenceFileService);
+jest.mock('../src/managers/SkillPackageRegistry', () => mockSkillPackageRegistry);
 jest.mock('../src/mcp/MCPManager', () => ({
     getInstance: () => mockMcpManager,
 }));
@@ -135,6 +143,15 @@ describe('workspace-aware M365 chat route', () => {
         mockReferenceFileService.list.mockReturnValue([]);
         mockReferenceFileService.read.mockReturnValue(null);
         mockMcpManager.getServers.mockReturnValue([]);
+        mockProjectWorkspaceService.ensureProject.mockReturnValue({
+            projectId: 'project-1',
+            rootPath: 'C:\\local\\m365-projects\\project-1',
+            agentsPath: 'C:\\local\\m365-projects\\project-1\\AGENTS.md',
+            agentsContent: '# Project rules\n\n- Keep a visible evidence trail.',
+            agentsTruncated: false,
+            updatedAt: '2026-09-01T00:00:00.000Z',
+        });
+        mockSkillPackageRegistry.listSkillPackages.mockReturnValue([]);
     });
 
     async function postChat(body) {
@@ -157,9 +174,12 @@ describe('workspace-aware M365 chat route', () => {
     test('persists the user before dispatch, binds the remote chat, and persists the response', async () => {
         mockHandleDashboardMessage.mockImplementation(async (ctx) => {
             expect(ctx.textOverride).toContain('[PROJECT_CONTEXT version="1"]');
+            expect(ctx.textOverride).toContain('[PROJECT_AGENTS]');
+            expect(ctx.textOverride).toContain('Keep a visible evidence trail.');
             expect(ctx.textOverride).toContain('[GOLEM_WORKSPACE_REQUEST:');
             expect(ctx.textOverride).toContain('[TURN_RESPONSE_MODE]');
             expect(ctx.textOverride).toContain('[/GOLEM_WORKSPACE_REQUEST]');
+            expect(ctx.workspaceRoot).toBe('C:\\local\\m365-projects\\project-1');
             await ctx.onTransportComplete({ text: 'M365 answer' });
             await ctx.reply('M365 answer');
         });
@@ -200,7 +220,38 @@ describe('workspace-aware M365 chat route', () => {
         }));
     });
 
-    test('adds only explicitly selected file text, MCP servers, and response mode to the Golem workspace envelope', async () => {
+    test('loads AGENTS.md on every turn even when encrypted project context is already current', async () => {
+        mockStore.getConversation.mockResolvedValue({
+            id: 'conversation-1',
+            projectId: 'project-1',
+            status: 'active',
+            bindingState: 'bound',
+            projectContextVersion: 1,
+            remoteConversationId: 'remote-1',
+            remoteConversationUrl: 'https://m365.cloud.microsoft/chat/conversation/remote-1',
+        });
+        mockHandleDashboardMessage.mockImplementation(async (ctx) => {
+            expect(ctx.textOverride).not.toContain('[PROJECT_CONTEXT version="1"]');
+            expect(ctx.textOverride).toContain('[PROJECT_AGENTS]');
+            expect(ctx.textOverride).toContain('Keep a visible evidence trail.');
+            expect(ctx.textOverride).toContain('[LOCAL_PROJECT_WORKSPACE]');
+            await ctx.onTransportComplete({ text: 'M365 answer' });
+            await ctx.reply('M365 answer');
+        });
+
+        const result = await postChat({
+            golemId: 'golem_A',
+            projectId: 'project-1',
+            conversationId: 'conversation-1',
+            message: 'Continue this project.',
+        });
+
+        expect(result.response.status).toBe(200);
+        await waitFor(() => serverContext.m365DispatchLease === null);
+        expect(mockStore.acknowledgeConversationProjectContext).not.toHaveBeenCalled();
+    });
+
+    test('adds only explicitly selected file text, MCP servers, Skills, and response mode to the Golem workspace envelope', async () => {
         mockReferenceFileService.list.mockReturnValue([{
             id: 'ref-1',
             name: 'brief.md',
@@ -220,14 +271,27 @@ describe('workspace-aware M365 chat route', () => {
             enabled: true,
             connected: true,
         }]);
+        mockSkillPackageRegistry.listSkillPackages.mockReturnValue([{
+            id: 'reference-files',
+            name: 'Reference files',
+            description: 'Inspect selected project references',
+            action: 'reference-files',
+            enabled: true,
+            indexPath: __filename,
+        }]);
         mockHandleDashboardMessage.mockImplementation(async (ctx) => {
             expect(ctx.textOverride).toContain('[TURN_RESPONSE_MODE]');
             expect(ctx.textOverride).toContain('Think through the request carefully');
             expect(ctx.textOverride).toContain('[USER_SELECTED_MCP_SERVERS]');
             expect(ctx.textOverride).toContain('demo-mcp: Read-only demo tools');
+            expect(ctx.textOverride).toContain('[USER_SELECTED_SKILLS]');
+            expect(ctx.textOverride).toContain('reference-files (action: reference-files)');
             expect(ctx.textOverride).toContain('[USER_SELECTED_REFERENCE_FILES]');
             expect(ctx.textOverride).toContain('Selected local reference facts.');
             expect(ctx.textOverride).toContain('[/GOLEM_WORKSPACE_REQUEST]');
+            expect(ctx.preferredMcpServers).toEqual(['demo-mcp']);
+            expect(ctx.preferredSkillIds).toEqual(['reference-files']);
+            expect(ctx.preferredSkillActions).toEqual(['reference-files']);
             await ctx.onTransportComplete({ text: 'M365 answer' });
             await ctx.reply('M365 answer');
         });
@@ -239,6 +303,7 @@ describe('workspace-aware M365 chat route', () => {
             message: 'Use my selected context.',
             responseMode: 'thoughtful',
             selectedMcpServers: ['demo-mcp'],
+            selectedSkillIds: ['reference-files'],
             referenceFileIds: ['ref-1'],
         });
 

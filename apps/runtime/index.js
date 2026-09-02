@@ -1306,7 +1306,14 @@ async function handleUnifiedCallback(ctx, actionData) {
 
             await ctx.reply('✅ 已核准工具動作，正在交給原版 Golem Action Gate 執行。');
             const approvedPayload = `[GOLEM_ACTION]\n\`\`\`json\n${JSON.stringify(proposedActions, null, 2)}\n\`\`\`\n[/GOLEM_ACTION]`;
-            await NeuroShunter.dispatch(ctx, approvedPayload, brain, controller, {
+            const actionContext = {
+                ...ctx,
+                workspaceRoot: task.ctx && task.ctx.workspaceRoot ? task.ctx.workspaceRoot : ctx.workspaceRoot,
+                preferredMcpServers: task.ctx && Array.isArray(task.ctx.preferredMcpServers) ? task.ctx.preferredMcpServers : [],
+                preferredSkillIds: task.ctx && Array.isArray(task.ctx.preferredSkillIds) ? task.ctx.preferredSkillIds : [],
+                preferredSkillActions: task.ctx && Array.isArray(task.ctx.preferredSkillActions) ? task.ctx.preferredSkillActions : [],
+            };
+            await NeuroShunter.dispatch(actionContext, approvedPayload, brain, controller, {
                 ...(task.dispatchOptions || {}),
                 m365ActionApproved: true,
             });
@@ -1398,7 +1405,15 @@ async function handleUnifiedCallback(ctx, actionData) {
                 let execResult = "";
                 let finalOutput = "";
                 try {
-                    const { stdout, stderr } = await execPromise(cmd, { timeout: 45000, maxBuffer: 1024 * 1024 * 10 });
+                    const isNativeApprovedCommand = !approvedStep.action || approvedStep.action === 'command';
+                    const approvedWorkspaceRoot = isNativeApprovedCommand
+                        ? (task.ctx && task.ctx.workspaceRoot ? task.ctx.workspaceRoot : ctx.workspaceRoot)
+                        : undefined;
+                    const { stdout, stderr } = await execPromise(cmd, {
+                        timeout: 45000,
+                        maxBuffer: 1024 * 1024 * 10,
+                        ...(approvedWorkspaceRoot ? { cwd: approvedWorkspaceRoot } : {}),
+                    });
                     finalOutput = (stdout || stderr || "✅ 指令執行成功，無特殊輸出").trim();
                     execResult = `[Step ${nextIndex + 1} Success] cmd: ${cmd}\nResult:\n${finalOutput}`;
                     console.log(`✅ [Executor] 成功捕獲終端機輸出 (${finalOutput.length} 字元)`);

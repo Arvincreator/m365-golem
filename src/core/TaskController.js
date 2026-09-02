@@ -80,6 +80,8 @@ class TaskController {
         let reportBuffer = [];
         for (let i = startIndex; i < steps.length; i++) {
             const step = steps[i];
+            const normalizedStepAction = String(step.action || '').trim().toLowerCase().replace(/_/g, '-');
+            const isNativeCommand = !normalizedStepAction || normalizedStepAction === 'command';
             const shouldAssembleSkill = step.action && step.action !== 'command';
             let cmdToRun =
                 step.cmd ||
@@ -214,7 +216,10 @@ class TaskController {
             console.log(`🟢 [TaskController] 指令安全放行: ${cmdToRun}`);
             try {
                 if (!this.internalExecutor) this.internalExecutor = new Executor();
-                const output = await this.internalExecutor.run(cmdToRun);
+                const workspaceCwd = isNativeCommand && ctx && ctx.workspaceRoot
+                    ? String(ctx.workspaceRoot)
+                    : undefined;
+                const output = await this.internalExecutor.run(cmdToRun, workspaceCwd ? { cwd: workspaceCwd } : {});
                 reportBuffer.push(`[Step ${i + 1} Success] cmd: ${cmdToRun}\nResult:\n${(output || "").trim() || "(No stdout)"}`);
             } catch (err) { reportBuffer.push(`[Step ${i + 1} Failed] cmd: ${cmdToRun}\nError:\n${err.message}`); }
         }

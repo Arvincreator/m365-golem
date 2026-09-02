@@ -1133,12 +1133,17 @@ class GolemBrain {
                 toolVectorIndex: this.toolVectorIndex || null,
             });
             const runtimeContext = this._buildRuntimeTurnContext(options);
+            const routeOptions = {
+                preferredSkillIds: Array.isArray(options.preferredSkillIds) ? options.preferredSkillIds : [],
+                preferredSkillActions: Array.isArray(options.preferredSkillActions) ? options.preferredSkillActions : [],
+                preferredMcpServers: Array.isArray(options.preferredMcpServers) ? options.preferredMcpServers : [],
+            };
             // 優先使用 async 版本（向量搜尋），fallback 到同步版本
             let hint;
             if (this.toolVectorIndex) {
-                hint = await this.toolRouter.buildRoutingHintAsync(text);
+                hint = await this.toolRouter.buildRoutingHintAsync(text, routeOptions);
             } else {
-                hint = this.toolRouter.buildRoutingHint(text);
+                hint = this.toolRouter.buildRoutingHint(text, routeOptions);
             }
             const personaContext = this._buildPersonaTurnContext();
             const prefixBlocks = [runtimeContext];

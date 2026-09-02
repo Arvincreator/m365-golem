@@ -65,6 +65,26 @@ describe('ToolRouter', () => {
         expect(hint).toContain('"action": "reference-files"');
     });
 
+    test('makes explicitly selected Skills and MCP servers the top per-turn routes without approving execution', () => {
+        const router = new ToolRouter({
+            activeScene: 'assistant',
+            activeTools: [],
+        });
+
+        const result = router.route('請查閱我指定的資料來源', {
+            preferredSkillIds: ['reference-files'],
+            preferredSkillActions: ['reference-files'],
+            preferredMcpServers: ['chrome-devtools'],
+        });
+
+        expect(result.skills[0]).toEqual(expect.objectContaining({
+            id: 'reference-files',
+            preferred: true,
+            allowed: true,
+        }));
+        expect(result.mcpTools.filter((tool) => tool.server === 'chrome-devtools').every((tool) => tool.preferred)).toBe(true);
+    });
+
     test('does not recommend tools for conceptual explanation requests', () => {
         const router = new ToolRouter({
             activeScene: 'coding',

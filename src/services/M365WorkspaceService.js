@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const path = require('path');
 const ConfigManager = require('../config');
 const M365WorkspaceStore = require('../managers/M365WorkspaceStore');
+const M365ProjectWorkspaceService = require('./M365ProjectWorkspaceService');
 
 function envFlag(name, fallback = false) {
     const raw = process.env[name];
@@ -55,6 +56,25 @@ async function getM365WorkspaceStore(server) {
 
     await server.m365WorkspaceStoreReady;
     return server.m365WorkspaceStore;
+}
+
+function getM365ProjectWorkspaceService(server) {
+    if (!isM365WorkspaceEnabled()) {
+        throw serviceError(
+            'M365_WORKSPACE_DISABLED',
+            'M365 project and conversation persistence is disabled.',
+            409
+        );
+    }
+    if (!server.m365ProjectWorkspaceService) {
+        const configuredRoot = String(process.env.M365_PROJECTS_ROOT || '').trim();
+        server.m365ProjectWorkspaceService = new M365ProjectWorkspaceService({
+            rootDir: configuredRoot
+                ? path.resolve(configuredRoot)
+                : path.resolve(process.cwd(), 'data', 'm365-projects'),
+        });
+    }
+    return server.m365ProjectWorkspaceService;
 }
 
 function resolveM365Brain(golemId) {
@@ -185,6 +205,7 @@ module.exports = {
     acquireM365DispatchLease,
     activateM365Conversation,
     captureM365ConversationBinding,
+    getM365ProjectWorkspaceService,
     getM365WorkspaceStore,
     isM365RunnerEnabled,
     isM365WorkspaceEnabled,
