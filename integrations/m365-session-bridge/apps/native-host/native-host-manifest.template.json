@@ -1,0 +1,7 @@
+{
+  "name": "m365_session_bridge",
+  "description": "M365 Golem Session Bridge native host — relays approved local operations between the Edge extension and the built-in MCP server. Never handles Microsoft credentials.",
+  "path": "{{NATIVE_HOST_EXE_PATH}}",
+  "type": "stdio",
+  "allowed_origins": ["chrome-extension://kfhagpcophihiigloppibgodojmgcajd/"]
+}

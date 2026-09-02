@@ -13,6 +13,69 @@
 const fs   = require('fs');
 const path = require('path');
 
+const M365_SCALAR_MEMORY_PATHS = Object.freeze({
+    'identity.preferredLanguage': (value) => String(value || '').trim().slice(0, 24),
+    'identity.timezone': (value) => String(value || '').trim().slice(0, 64),
+    'communication.tone': (value) => ['formal', 'casual', 'neutral'].includes(String(value)) ? String(value) : null,
+    'communication.responseLength': (value) => ['brief', 'medium', 'detailed'].includes(String(value)) ? String(value) : null,
+    'communication.preferredScriptType': (value) => String(value || '').trim().slice(0, 24),
+    'communication.usesEmoji': (value) => typeof value === 'boolean' ? value : null,
+    'communication.codeExamplesPreferred': (value) => typeof value === 'boolean' ? value : null,
+    'tech.prefersCli': (value) => typeof value === 'boolean' ? value : null,
+    'work.workStyle': (value) => ['solo', 'team', 'mixed'].includes(String(value)) ? String(value) : null,
+});
+
+const M365_ARRAY_MEMORY_PATHS = new Set([
+    'identity.knownNames',
+    'tech.languages',
+    'tech.frameworks',
+    'tech.tools',
+    'tech.os',
+    'work.commonTasks',
+    'work.projectTypes',
+    'preferences.topics',
+    'preferences.dislikes',
+    'preferences.taboos',
+    'preferences.favoriteBots',
+]);
+
+function hasSensitiveProfileValue(value) {
+    const text = String(value || '');
+    return /-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----/i.test(text)
+        || /\b(?:password|passwd|pwd|client_secret|access_token|refresh_token|api[_-]?key)\s*[:=]\s*[^\s,;]{6,}/i.test(text)
+        || /\bBearer\s+[A-Za-z0-9._~+/-]{12,}/i.test(text)
+        || /\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/.test(text);
+}
+
+function parseM365UserMemoryBlock(raw) {
+    const text = String(raw || '')
+        .replace(/```(?:json)?\s*/gi, '')
+        .replace(/```/g, '')
+        .trim();
+    if (!text || text.toLowerCase() === 'null') return [];
+    let parsed;
+    try {
+        parsed = JSON.parse(text);
+    } catch (_) {
+        const error = new Error('User memory must be a JSON object or array.');
+        error.code = 'M365_USER_MEMORY_FORMAT_INVALID';
+        throw error;
+    }
+    if (parsed && Array.isArray(parsed.entries)) parsed = parsed.entries;
+    return Array.isArray(parsed) ? parsed : [parsed];
+}
+
+function readPath(target, pathName) {
+    return String(pathName || '').split('.').reduce((value, key) => value && value[key], target);
+}
+
+function writePath(target, pathName, value) {
+    const keys = String(pathName || '').split('.');
+    const leaf = keys.pop();
+    const parent = keys.reduce((current, key) => current[key], target);
+    parent[leaf] = value;
+}
+
 /** 預設空白使用者檔案 */
 const DEFAULT_PROFILE = () => ({
     version: '1.0',
@@ -230,6 +293,8 @@ ${recentConversation.slice(-3000)}
         if (p.identity.knownNames.length > 0) {
             lines.push(`使用者稱呼：${p.identity.knownNames.join(' / ')}`);
         }
+        if (p.identity.preferredLanguage) lines.push(`偏好語言：${p.identity.preferredLanguage}`);
+        if (p.identity.timezone) lines.push(`時區：${p.identity.timezone}`);
 
         // 溝通風格
         const toneSuffix = {
@@ -238,6 +303,11 @@ ${recentConversation.slice(-3000)}
             neutral: '',
         }[p.communication.tone] || '';
         if (toneSuffix) lines.push(toneSuffix);
+        const responseLengthText = {
+            brief: '偏好精簡、先給結論的回覆',
+            detailed: '偏好較完整、含必要依據的回覆',
+        }[p.communication.responseLength];
+        if (responseLengthText) lines.push(responseLengthText);
 
         // 技術背景
         const techParts = [];
@@ -245,10 +315,22 @@ ${recentConversation.slice(-3000)}
         if (p.tech.frameworks.length > 0) techParts.push(`框架：${p.tech.frameworks.slice(0, 5).join(', ')}`);
         if (p.tech.tools.length > 0) techParts.push(`工具：${p.tech.tools.slice(0, 5).join(', ')}`);
         if (techParts.length > 0) lines.push(`技術偏好：${techParts.join('；')}`);
+        if (typeof p.tech.prefersCli === 'boolean') {
+            lines.push(p.tech.prefersCli ? '介面偏好：較習慣 CLI' : '介面偏好：較習慣圖形介面');
+        }
 
         // 興趣
         if (p.preferences.topics.length > 0) {
             lines.push(`關注主題：${p.preferences.topics.slice(0, 5).join(', ')}`);
+        }
+        if (p.work.commonTasks.length > 0) {
+            lines.push(`常見工作：${p.work.commonTasks.slice(0, 5).join(', ')}`);
+        }
+        if (p.preferences.dislikes.length > 0) {
+            lines.push(`不偏好的方式：${p.preferences.dislikes.slice(0, 5).join(', ')}`);
+        }
+        if (p.preferences.taboos.length > 0) {
+            lines.push(`避免事項：${p.preferences.taboos.slice(0, 5).join(', ')}`);
         }
 
         // 最近里程碑
@@ -270,6 +352,89 @@ ${recentConversation.slice(-3000)}
      */
     getProfile() {
         return this.load();
+    }
+
+    /**
+     * Apply a structured memory proposal emitted by the resident M365 Copilot.
+     * This lane is intentionally narrower than arbitrary GOLEM_MEMORY: only
+     * whitelisted, non-secret user-preference fields can be changed.
+     */
+    applyM365MemoryBlock(rawBlock) {
+        return this.applyM365MemoryOperations(parseM365UserMemoryBlock(rawBlock));
+    }
+
+    applyM365MemoryOperations(operations) {
+        // Validate and apply against a copy so one invalid operation cannot leave
+        // a partially mutated in-memory profile behind.
+        const profile = JSON.parse(JSON.stringify(this.load()));
+        const results = [];
+
+        for (const item of (Array.isArray(operations) ? operations : [])) {
+            if (!item || typeof item !== 'object') {
+                const error = new Error('User memory entries must be objects.');
+                error.code = 'M365_USER_MEMORY_ENTRY_INVALID';
+                throw error;
+            }
+            const operation = String(item.operation || 'add').trim().toLowerCase();
+            const pathName = String(item.path || '').trim();
+            const value = item.value;
+            if (hasSensitiveProfileValue(value)) {
+                const error = new Error('Secrets and authentication material cannot be stored in user memory.');
+                error.code = 'M365_USER_MEMORY_SENSITIVE';
+                throw error;
+            }
+
+            if (Object.prototype.hasOwnProperty.call(M365_SCALAR_MEMORY_PATHS, pathName)) {
+                if (operation !== 'set') {
+                    const error = new Error(`User memory path ${pathName} only supports operation=set.`);
+                    error.code = 'M365_USER_MEMORY_OPERATION_INVALID';
+                    throw error;
+                }
+                const normalized = M365_SCALAR_MEMORY_PATHS[pathName](value);
+                if (normalized === null || normalized === '') {
+                    const error = new Error(`User memory value is invalid for ${pathName}.`);
+                    error.code = 'M365_USER_MEMORY_VALUE_INVALID';
+                    throw error;
+                }
+                const changed = readPath(profile, pathName) !== normalized;
+                if (changed) writePath(profile, pathName, normalized);
+                results.push({ operation, path: pathName, changed });
+                continue;
+            }
+
+            if (!M365_ARRAY_MEMORY_PATHS.has(pathName) || !['add', 'remove'].includes(operation)) {
+                const error = new Error(`User memory path or operation is not allowed: ${operation} ${pathName}`);
+                error.code = 'M365_USER_MEMORY_PATH_INVALID';
+                throw error;
+            }
+            const normalized = String(value || '').trim().replace(/[\r\n]/g, ' ').slice(0, 200);
+            if (!normalized) {
+                const error = new Error(`User memory value is invalid for ${pathName}.`);
+                error.code = 'M365_USER_MEMORY_VALUE_INVALID';
+                throw error;
+            }
+            const values = readPath(profile, pathName);
+            if (!Array.isArray(values)) {
+                const error = new Error(`User memory path is not an array: ${pathName}`);
+                error.code = 'M365_USER_MEMORY_PATH_INVALID';
+                throw error;
+            }
+            const existingIndex = values.findIndex((entry) => String(entry).toLowerCase() === normalized.toLowerCase());
+            if (operation === 'add' && existingIndex < 0) values.push(normalized);
+            if (operation === 'remove' && existingIndex >= 0) values.splice(existingIndex, 1);
+            if (values.length > 50) values.splice(0, values.length - 50);
+            results.push({ operation, path: pathName, changed: operation === 'add' ? existingIndex < 0 : existingIndex >= 0 });
+        }
+
+        if (results.some((result) => result.changed)) {
+            profile.meta.totalInteractions += 1;
+            profile.meta.lastProfiledAt = new Date().toISOString();
+            profile.meta.profileConfidence = Math.min(100, profile.meta.profileConfidence + 10);
+            this._profile = profile;
+            this._dirty = true;
+            this.save();
+        }
+        return results;
     }
 
     // ── Private ───────────────────────────────────────────────

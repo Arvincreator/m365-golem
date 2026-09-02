@@ -41,7 +41,7 @@
 
 1. 新專案對話的第一則使用者訊息會帶入 Golem 身分、目前人格、本機 harness 與 M365 推理層的分工、Action 格式、人工核准規則及 Observation 回傳方式。它不會在背景自動送出啟動訊息。
 2. 初始背景不會列出 Windows 使用者名稱、本機絕對路徑、系統指紋或完整 Skill/MCP 清單。這些資料不是教會模型使用工具所必需，也不應整包送往 M365。
-3. 每一輪都由原版工具向量索引依使用者意圖篩選候選工具。M365 模式的向量索引使用純本機模型，內容只包含 Skill／MCP 的名稱、說明與觸發詞，與聊天長期記憶分開；命中的 Skill 會附上精簡使用指南，命中的 MCP 會附精確 server/tool/schema，一般唯讀本機檢查則會給出 `command` Action 範例。
+3. 每一輪都由原版工具向量索引依使用者意圖篩選候選工具。M365 模式的向量索引使用純本機模型，內容只包含 Skill／MCP 的名稱、說明與觸發詞，與聊天長期記憶分開；命中的 Skill 會附上精簡使用指南，命中的 MCP 會附精確 server/tool/schema，一般唯讀本機檢查則會給出 `command` Action 範例。內建的 `m365-session-bridge` 只在使用者提供精確 SharePoint Online／OneDrive for Business 網址時加入候選，不得被描述為整個 M365 搜尋工具。
 4. 當使用者已明確要求查看、列出、檢查、搜尋或操作，且本輪路由已有可行工具時，模型應直接產生最小必要的 `GOLEM_ACTION`，不可只回答「我可以提出 Action」。
 5. Action 仍不是執行結果。它必須先出現在本機待核准區，由使用者核准並通過 Action Gate；只有收到本機 Observation 後，模型才能描述實際結果。
 
@@ -73,7 +73,7 @@ PLAYWRIGHT_M365_BLOCK_HEAVY_RESOURCES=false
 
 ## 第一次人工驗證流程
 
-1. 在 Windows 安全工作副本執行 `Start-M365-POC.bat`；它會確認 `.env` 使用 `m365-web`，再啟動本機 Dashboard 與獨立的可見 Edge 工作視窗。M365 POC 預熱不要求先建立 GOLEM persona 或記憶。
+1. 全新下載先執行 `Install-M365-Golem.bat`，並依畫面指示在 `edge://extensions` 人工載入內建 Session Bridge 的 unpacked extension；之後執行 `Start-Golem.bat`。啟動器會確認 `.env` 使用 `m365-web`，再啟動本機 Dashboard 與獨立的可見 Edge 工作視窗。M365 POC 預熱不要求先建立 GOLEM persona 或記憶。
 2. 若畫面進入 Microsoft 登入頁，GOLEM 會回報 `M365_HUMAN_LOGIN_REQUIRED` 並停止；由使用者自行完成帳密、MFA、裝置合規或條款確認。
 3. 登入完成並看到 Copilot Chat 輸入框後，再從 GOLEM 明確送出一則無敏感資料的測試訊息。
 4. 建議測試文字使用唯一標記，例如：`請只回覆 POC-M365-READY-20260831`。
@@ -105,8 +105,15 @@ PLAYWRIGHT_M365_BLOCK_HEAVY_RESOURCES=false
 
 - 尚未驗證租戶的服務端聊天歷史、稽核與資料保留設定；這些不由 GOLEM 安全模式控制。
 - 尚未證明目前 selector 能涵蓋其他租戶、語言或未來 Microsoft 365 UI 版本；找不到可信節點時仍會在 60 秒內停止且不自動重送。
-- M365 網頁本身的附件、引用、語音、Agent 與 Microsoft 365 工作負載自動操作仍不在傳輸 POC 範圍。另行安裝的 Skill/MCP 只能在其既有權限與本機核准範圍內執行，不能視為租戶管理員已授權或正式上線。
+- M365 網頁本身的附件、引用、語音、Agent 與 Microsoft 365 工作負載自動操作仍不在傳輸 POC 範圍。內建 Session Bridge 與其他 Skill/MCP 只能在其既有權限與本機核准範圍內執行，不能視為租戶管理員已授權或正式上線。
 - `M365_POC_SAFE_MODE=false`、`M365_LOCAL_MEMORY_ENABLED=true` 或 `M365_ACTIONS_ENABLED=true` 即使存在，也不代表已核准；啟用前需要另外做資料邊界、權限與人工審查。工具總開關即使開啟，也只代表可以「提出並人工核准」本機工具動作，不是自動核准。
+
+## 內建 Session Bridge 的發布邊界
+
+- GitHub 只保存 `integrations/m365-session-bridge` 的可重建原始碼、鎖版依賴、manifest template 與 deny-first policy template。
+- 安裝時才在 `%LOCALAPPDATA%\M365-Golem\m365-session-bridge` 產生政策、IPC 秘密與稽核紀錄；`data/mcp-servers.json` 與 Native Messaging 實機 manifest 也只存在本機。
+- 初始 policy 的 `writeEnabled=false`，且不內建任何租戶、站台或文件庫白名單。支援但未列入的精確 SharePoint／OneDrive 目標會顯示原生核准視窗；拒絕、逾時、401 或 403 都不得繞過。
+- Edge 擴充功能不能靜默安裝，必須由使用者在 `edge://extensions` 親自載入。這個人工步驟與 Microsoft 登入／MFA 都不是自動測試通過就能取代的正式驗收。
 
 ## 外部範例的採用邊界
 

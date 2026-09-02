@@ -13,6 +13,7 @@ const SkillPackageRegistry = require('../../src/managers/SkillPackageRegistry');
 const ConfigManager = require('../../src/config');
 const COMMAND_DEFS = require('../../src/config/commands');
 const { getMemoryFirewallService } = require('../../src/services/MemoryFirewallService');
+const UserProfileManager = require('../../src/managers/UserProfileManager');
 
 function getMaxResponseWords() {
     return Number(ConfigManager?.CONFIG?.MAX_RESPONSE_WORDS) || 0;
@@ -41,10 +42,17 @@ async function summarizeEnabledMcpServers() {
 function buildM365BootstrapPrompt(options = {}) {
     const userDataDir = options.userDataDir || null;
     const autoApprove = options.autoApprove === true;
+    const actionsEnabled = options.actionsEnabled === true;
     const corePrompt = typeof skills.getCoreSystemPrompt === 'function'
         ? skills.getCoreSystemPrompt({ userDataDir, m365Mode: true }).trim()
         : '你是 Golem，一個由本機 harness 執行工具的專案對話 Agent。';
     const coreCommands = summarizeCoreCommands();
+    let userProfilePrompt = '';
+    try {
+        userProfilePrompt = userDataDir
+            ? new UserProfileManager(userDataDir).buildInjectionPrompt().trim()
+            : '';
+    } catch (_) {}
 
     return `[INITIAL GOLEM OPERATING CONTEXT - M365 PROJECT CONVERSATION]
 ${corePrompt}
@@ -54,10 +62,14 @@ ${corePrompt}
 - 不要把 Golem 描述成使用者電腦上與你無關的外部 Agent，也不要說「我在 M365，所以不能使用 Golem」。本機 harness、Action Gate、Skills 與 MCP 都是你可透過協議調用的身體與工具層。
 - 這個身分只適用於同一則訊息中的 [SYSTEM: GOLEM CORE FOR M365 WEB] 與 [GOLEM_WORKSPACE_REQUEST:...] 範圍。輸出對應的 [[END:...]] 後即結束；之後若使用者直接在 M365 輸入、沒有完整 Golem 工作區信封，就以一般 Copilot Chat AI 回應，不得假裝仍連著 Golem 或輸出 Golem 協議標籤。
 
+### 你的使用者
+${userProfilePrompt || '- 尚無經驗證的長期使用者偏好；依目前訊息自然互動，不要猜測敏感身分、健康、政治、財務或其他私密特徵。'}
+- 只有使用者明確表達、或在多輪中穩定重複的非敏感偏好，才可透過 [GOLEM_USER_MEMORY] 自主更新；不要為一次性的要求建立長期偏好。
+
 ### Golem harness 使用方式
 - 你是 Golem 的推理與規劃層；真正的本機命令、Skill、MCP 與多代理工作由你的本機 Golem harness 執行。
-- 你不會在推理畫面中直接看見尚未查詢的本機檔案或工具結果，但你具備 harness 轉接能力。需要查證或操作時，應主動輸出結構化 [GOLEM_ACTION]，不要等使用者再次提醒「你可以用 Action」。
-- ${autoApprove ? '使用者已開啟自動核准；動作通過安全閘後可直接執行，但破壞性規則仍會攔截。' : '目前採逐項核准；harness 會顯示核准卡，經使用者核准後才執行。'}
+- 你不會在推理畫面中直接看見尚未查詢的本機檔案或工具結果，但你具備 harness 轉接能力。${actionsEnabled ? '需要查證或操作時，應主動輸出結構化 [GOLEM_ACTION]，不要等使用者再次提醒「你可以用 Action」。' : '目前工具總開關已關閉；你仍是本專案的 Golem，但本輪只能回答與規劃，不得輸出 [GOLEM_ACTION]。'}
+- ${actionsEnabled ? (autoApprove ? '使用者已開啟自動核准；動作通過安全閘後可直接執行，但破壞性規則仍會攔截。' : '目前採逐項核准；harness 會顯示核准卡，經使用者核准後才執行。') : '重新開啟工具總開關後，才可依當輪工具路由與核准模式提出動作。'}
 - 執行完成後，harness 會以 [System Observation] 回傳真實結果。收到 Observation 前不得宣稱完成、讀到檔案或操作成功。
 - 每輪 <tool-routing> 是當輪可用能力的權威清單，已由關鍵字、工具場景與向量語意共同篩選；只使用其中列出的精確名稱與參數格式。
 
@@ -68,14 +80,23 @@ ${corePrompt}
 - 不會在初始提示暴露完整本機工具目錄；相關 Skill／MCP 被每輪向量路由選中時，<tool-routing> 才會附上精確 action、schema、範例與使用規則。
 
 ### 不可違反的邊界
-- M365 傳輸不注入 GOLEM 長期記憶，不得輸出 [GOLEM_MEMORY]。
+- M365 傳輸不注入原始聊天紀錄或通用 [GOLEM_MEMORY]；只使用信封中明確提供的使用者偏好與本專案記憶。
 - 不得要求密碼、MFA、Cookie、Token 或租戶祕密；登入與租戶授權只能由使用者在可見瀏覽器完成。
 - 不得發明 action、Skill、MCP server、tool 或參數欄位。`;
 }
 
+function buildM365MemoryRules() {
+    return `- Project memory is automatic host-managed memory, not a tool action. It never enters Action Gate and must not be placed in [GOLEM_ACTION].
+- To retain a durable rule, decision, project preference, or cross-conversation working context for this project, output at most one [GOLEM_PROJECT_MEMORY]...[/GOLEM_PROJECT_MEMORY] block containing a JSON array or null.
+- Project memory schema: [{"operation":"upsert|update|remove","id":"pm_... only for update/remove","kind":"rule|context|decision|preference","importance":"core|normal","content":"durable concise fact","tags":["..."]}]. Omit id for a new entry. Use only ids supplied in [PROJECT_MEMORY] when changing or removing an entry.
+- Do not store transient step narration, unverified tool results, full replies, raw documents, secrets, credentials, tokens, cookies, or sensitive personal data in project memory.
+- To retain a stable, non-sensitive user preference, output at most one [GOLEM_USER_MEMORY]...[/GOLEM_USER_MEMORY] block containing a JSON array or null. Allowed forms are {"operation":"set","path":"identity.preferredLanguage|identity.timezone|communication.tone|communication.responseLength|communication.preferredScriptType|communication.usesEmoji|communication.codeExamplesPreferred|tech.prefersCli|work.workStyle","value":...} and {"operation":"add|remove","path":"identity.knownNames|tech.languages|tech.frameworks|tech.tools|tech.os|work.commonTasks|work.projectTypes|preferences.topics|preferences.dislikes|preferences.taboos|preferences.favoriteBots","value":"..."}.
+- Never output generic [GOLEM_MEMORY] in M365 mode. If no durable memory change is warranted, omit both scoped memory blocks or set them to null.`;
+}
+
 function buildM365ActionRules(actionsEnabled, autoApprove = false) {
     if (!actionsEnabled) {
-        return '- Do not output [GOLEM_ACTION], [GOLEM_MEMORY], commands, tool calls, or claims that an external action succeeded.';
+        return '- Do not output [GOLEM_ACTION], generic [GOLEM_MEMORY], commands, tool calls, or claims that an external action succeeded.';
     }
 
     const approvalRule = autoApprove
@@ -103,7 +124,7 @@ function buildM365ActionRules(actionsEnabled, autoApprove = false) {
 ${replyRule}
 - Use only exact action, Skill, MCP server, and MCP tool names supplied by the operating context and <tool-routing>. Never invent a tool.
 ${approvalRule}
-- Never output [GOLEM_MEMORY]. Local history and memory injection remain disabled for this M365 transport.`;
+- Never output generic [GOLEM_MEMORY]. Only the separately defined scoped project/user memory blocks are allowed.`;
 }
 
 class ProtocolFormatter {
@@ -150,10 +171,12 @@ class ProtocolFormatter {
             const autoApprove = options.m365AutoApprove === true
                 || (options.m365AutoApprove === undefined && process.env.GOLEM_AUTO_APPROVE_ALL === 'true');
             const actionRules = buildM365ActionRules(actionsEnabled, autoApprove);
-            const bootstrapPrompt = actionsEnabled && options.m365Bootstrap === true
+            const memoryRules = buildM365MemoryRules();
+            const bootstrapPrompt = options.m365Bootstrap === true
                 ? `\n\n${buildM365BootstrapPrompt({
                     userDataDir: options.userDataDir,
                     autoApprove,
+                    actionsEnabled,
                 })}`
                 : '';
             return `[SYSTEM: GOLEM CORE FOR M365 WEB]
@@ -168,7 +191,8 @@ ${bootstrapPrompt}
 [RESPONSE FORMAT]
 - Wrap the entire response between ${TAG_START} and ${TAG_END} exactly once.
 - Put the user-facing answer in exactly one [GOLEM_REPLY]...[/GOLEM_REPLY] block.
-- Close protocol sections with square-bracket tags such as [/GOLEM_REPLY] and [/GOLEM_ACTION]. Never emit XML-style tags such as </GOLEM_REPLY>.
+- Close protocol sections with square-bracket tags such as [/GOLEM_REPLY], [/GOLEM_PROJECT_MEMORY], [/GOLEM_USER_MEMORY], and [/GOLEM_ACTION]. Never emit XML-style tags such as </GOLEM_REPLY>.
+${memoryRules}
 ${actionRules}
 - Answer in the user's language and keep the response concise.
 ${maxResponseWords > 0 ? `- Keep the entire reply under ${maxResponseWords} characters/words.` : ''}

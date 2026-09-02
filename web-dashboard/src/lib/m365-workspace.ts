@@ -26,6 +26,17 @@ export type M365ProjectWorkspace = {
     agentsPath: string;
     agentsContent: string;
     agentsTruncated: boolean;
+    memoryEntries: Array<{
+        id: string;
+        kind: "rule" | "context" | "decision" | "preference";
+        importance: "core" | "normal";
+        content: string;
+        tags: string[];
+        createdAt: string;
+        updatedAt: string;
+    }>;
+    memoryCount: number;
+    managedBy: "golem";
     updatedAt: string;
 };
 

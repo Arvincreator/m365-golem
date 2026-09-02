@@ -8,6 +8,8 @@ describe('ResponseParser M365 reply-only envelope', () => {
 
         expect(parsed).toEqual({
             memory: null,
+            projectMemory: null,
+            userMemory: null,
             avoidMemory: null,
             actions: [],
             reply: 'POC-M365-READY',

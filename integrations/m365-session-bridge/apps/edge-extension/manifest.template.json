@@ -1,0 +1,14 @@
+{
+  "manifest_version": 3,
+  "name": "M365 Session Bridge",
+  "version": "0.1.0",
+  "description": "Lets M365 Golem perform an approved set of SharePoint/OneDrive for Business file actions through your existing signed-in Edge session. It never reads, stores, or transmits your Microsoft password, cookies, or access tokens.",
+  "permissions": ["nativeMessaging", "scripting", "alarms"],
+  "host_permissions": ["__HOST_PERMISSIONS_PLACEHOLDER__"],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "minimum_chrome_version": "95",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAv0709qy34MZoTQuc9mMorkDJNOdHaHLs3ckvRyT5iG08CJNGwlUu7aLcURPBv4atqp9W0Pqs2Wkt/vCMx/9ye4Y78sLvs5CzMKrrTffcCG5YMIYjDlvFStuw2IEmKoxw7whqNJVzsZBR9zO8dCnDzdn4YvMYszJms6lxWRKnJfboxFzPzxGxZ9aY0Lq2Wwvmkxm/2OkB9zbnA9z2tt8IIbRJNJVDOZ01WUvuf6cIpenqOCz4hJpDExGXvvKgaIgSOxnHRB3v47hs813tKo/PmdtRCkA0PfIFqIT91W064VOSpdjxP739422PXuTco6hOpDJGUMIw5m1gKARa56nLCQIDAQAB"
+}

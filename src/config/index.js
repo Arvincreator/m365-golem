@@ -64,7 +64,7 @@ const CONFIG = {
     ADMIN_ID: cleanEnv(process.env.ADMIN_ID),
     DISCORD_ADMIN_ID: cleanEnv(process.env.DISCORD_ADMIN_ID),
     ADMIN_IDS: [process.env.ADMIN_ID, process.env.DISCORD_ADMIN_ID].map(k => cleanEnv(k)).filter(k => k),
-    GITHUB_REPO: cleanEnv(process.env.GITHUB_REPO || 'https://raw.githubusercontent.com/Arvincreator/project-golem/main/', true),
+    GITHUB_REPO: cleanEnv(process.env.GITHUB_REPO || 'https://raw.githubusercontent.com/Arvincreator/m365-golem/main/', true),
     QMD_PATH: cleanEnv(process.env.GOLEM_QMD_PATH || 'qmd', true),
     DONATE_URL: 'https://buymeacoffee.com/arvincreator',
     TZ: cleanEnv(process.env.TZ) || 'Asia/Taipei',
@@ -196,7 +196,7 @@ const reloadConfig = () => {
     CONFIG.ADMIN_IDS.length = 0;
     CONFIG.ADMIN_IDS.push(...newAdminIds);
 
-    CONFIG.GITHUB_REPO = cleanEnv(process.env.GITHUB_REPO || 'https://raw.githubusercontent.com/Arvincreator/project-golem/main/', true);
+    CONFIG.GITHUB_REPO = cleanEnv(process.env.GITHUB_REPO || 'https://raw.githubusercontent.com/Arvincreator/m365-golem/main/', true);
     CONFIG.QMD_PATH = cleanEnv(process.env.GOLEM_QMD_PATH || 'qmd', true);
     CONFIG.TZ = cleanEnv(process.env.TZ) || 'Asia/Taipei';
     CONFIG.INTERVENTION_LEVEL = cleanEnv(process.env.GOLEM_INTERVENTION_LEVEL) || 'CONSERVATIVE';

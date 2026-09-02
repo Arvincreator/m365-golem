@@ -353,6 +353,9 @@ class ConversationManager {
                 preferredSkillIds: task.ctx && Array.isArray(task.ctx.preferredSkillIds) ? task.ctx.preferredSkillIds : [],
                 preferredSkillActions: task.ctx && Array.isArray(task.ctx.preferredSkillActions) ? task.ctx.preferredSkillActions : [],
                 preferredMcpServers: task.ctx && Array.isArray(task.ctx.preferredMcpServers) ? task.ctx.preferredMcpServers : [],
+                toolRoutingQuery: task.ctx && typeof task.ctx.toolRoutingQuery === 'string'
+                    ? task.ctx.toolRoutingQuery
+                    : task.text,
                 ...task.options // 🎯 [v9.1.13] 透傳來自隊列的自定義選項 (如 suppressReply)
             });
 

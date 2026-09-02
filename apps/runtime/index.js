@@ -1,7 +1,6 @@
 /**
- * 🦞 Project Golem v9.5 (Single-Golem Edition)
- * -------------------------------------------------------------------------
- * 架構：[Universal Context] -> [Conversation Queue] -> [NeuroShunter] <==> [Web Gemini]
+ * M365 Golem local runtime.
+ * Visible Edge + Microsoft 365 Copilot Web, with local Action/Observation tools.
  */
 const fs_sync = require('fs');
 const path_sync = require('path');
@@ -10,10 +9,12 @@ const { v4: uuidv4 } = require('uuid');
 // ── 首次啟動自動初始化 .env ────────────────────────────────────────────────
 const PROJECT_ROOT = path_sync.resolve(__dirname, '../..');
 const envPath = path_sync.resolve(PROJECT_ROOT, '.env');
-const envExamplePath = path_sync.resolve(PROJECT_ROOT, '.env.example');
+const m365EnvExamplePath = path_sync.resolve(PROJECT_ROOT, 'M365-POC.env.example');
+const legacyEnvExamplePath = path_sync.resolve(PROJECT_ROOT, '.env.example');
+const envExamplePath = fs_sync.existsSync(m365EnvExamplePath) ? m365EnvExamplePath : legacyEnvExamplePath;
 if (!fs_sync.existsSync(envPath) && fs_sync.existsSync(envExamplePath)) {
     fs_sync.copyFileSync(envExamplePath, envPath);
-    console.log('📋 [Bootstrap] .env 不存在，已從 .env.example 複製初始設定檔。');
+    console.log(`📋 [Bootstrap] .env 不存在，已從 ${path_sync.basename(envExamplePath)} 複製初始設定檔。`);
     console.log('🌐 [Bootstrap] 請前往 http://localhost:3000/dashboard 完成初始化設定。');
 }
 

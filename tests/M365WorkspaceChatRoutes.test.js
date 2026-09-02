@@ -15,6 +15,11 @@ const mockMarkReconcile = jest.fn();
 const mockHandleDashboardMessage = jest.fn();
 const mockProjectWorkspaceService = {
     ensureProject: jest.fn(),
+    getRelevantMemories: jest.fn(),
+};
+const mockBrain = {
+    toolVectorIndex: null,
+    _resolveToolVectorEmbedder: jest.fn(() => null),
 };
 const mockSkillPackageRegistry = {
     listSkillPackages: jest.fn(),
@@ -52,6 +57,7 @@ jest.mock('../src/services/M365WorkspaceService', () => ({
         server.m365DispatchLease = null;
         return true;
     }),
+    resolveM365Brain: jest.fn(() => mockBrain),
 }));
 
 jest.mock('../index.js', () => ({
@@ -147,10 +153,26 @@ describe('workspace-aware M365 chat route', () => {
             projectId: 'project-1',
             rootPath: 'C:\\local\\m365-projects\\project-1',
             agentsPath: 'C:\\local\\m365-projects\\project-1\\AGENTS.md',
-            agentsContent: '# Project rules\n\n- Keep a visible evidence trail.',
+            agentsContent: '# AGENTS.md\n\n> Managed automatically by the resident Golem AI.',
             agentsTruncated: false,
+            memoryEntries: [{
+                id: 'pm_0123456789abcdef',
+                kind: 'rule',
+                importance: 'core',
+                content: 'Keep a visible evidence trail.',
+                tags: ['evidence'],
+            }],
+            memoryCount: 1,
+            managedBy: 'golem',
             updatedAt: '2026-09-01T00:00:00.000Z',
         });
+        mockProjectWorkspaceService.getRelevantMemories.mockResolvedValue([{
+            id: 'pm_0123456789abcdef',
+            kind: 'rule',
+            importance: 'core',
+            content: 'Keep a visible evidence trail.',
+            tags: ['evidence'],
+        }]);
         mockSkillPackageRegistry.listSkillPackages.mockReturnValue([]);
     });
 
@@ -174,12 +196,14 @@ describe('workspace-aware M365 chat route', () => {
     test('persists the user before dispatch, binds the remote chat, and persists the response', async () => {
         mockHandleDashboardMessage.mockImplementation(async (ctx) => {
             expect(ctx.textOverride).toContain('[PROJECT_CONTEXT version="1"]');
-            expect(ctx.textOverride).toContain('[PROJECT_AGENTS]');
+            expect(ctx.textOverride).toContain('[PROJECT_MEMORY]');
             expect(ctx.textOverride).toContain('Keep a visible evidence trail.');
             expect(ctx.textOverride).toContain('[GOLEM_WORKSPACE_REQUEST:');
             expect(ctx.textOverride).toContain('[TURN_RESPONSE_MODE]');
             expect(ctx.textOverride).toContain('[/GOLEM_WORKSPACE_REQUEST]');
             expect(ctx.workspaceRoot).toBe('C:\\local\\m365-projects\\project-1');
+            expect(ctx.m365ProjectWorkspaceService).toBe(mockProjectWorkspaceService);
+            expect(ctx.toolRoutingQuery).toBe('Prepare a memo.');
             await ctx.onTransportComplete({ text: 'M365 answer' });
             await ctx.reply('M365 answer');
         });
@@ -220,7 +244,7 @@ describe('workspace-aware M365 chat route', () => {
         }));
     });
 
-    test('loads AGENTS.md on every turn even when encrypted project context is already current', async () => {
+    test('loads relevant project memory on every turn even when encrypted project context is already current', async () => {
         mockStore.getConversation.mockResolvedValue({
             id: 'conversation-1',
             projectId: 'project-1',
@@ -232,7 +256,7 @@ describe('workspace-aware M365 chat route', () => {
         });
         mockHandleDashboardMessage.mockImplementation(async (ctx) => {
             expect(ctx.textOverride).not.toContain('[PROJECT_CONTEXT version="1"]');
-            expect(ctx.textOverride).toContain('[PROJECT_AGENTS]');
+            expect(ctx.textOverride).toContain('[PROJECT_MEMORY]');
             expect(ctx.textOverride).toContain('Keep a visible evidence trail.');
             expect(ctx.textOverride).toContain('[LOCAL_PROJECT_WORKSPACE]');
             await ctx.onTransportComplete({ text: 'M365 answer' });
@@ -249,6 +273,11 @@ describe('workspace-aware M365 chat route', () => {
         expect(result.response.status).toBe(200);
         await waitFor(() => serverContext.m365DispatchLease === null);
         expect(mockStore.acknowledgeConversationProjectContext).not.toHaveBeenCalled();
+        expect(mockProjectWorkspaceService.getRelevantMemories).toHaveBeenCalledWith(
+            'project-1',
+            'Continue this project.',
+            expect.objectContaining({ limit: 8 })
+        );
     });
 
     test('adds only explicitly selected file text, MCP servers, Skills, and response mode to the Golem workspace envelope', async () => {

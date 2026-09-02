@@ -26,7 +26,7 @@ contributions are allowed under the main repository license.
 For commercial licensing, partnership, or permission requests, contact:
 
 - GitHub: `@Arvincreator`
-- Repository: `https://github.com/Arvincreator/project-golem`
+- Repository: `https://github.com/Arvincreator/m365-golem`
 
 Please include:
 

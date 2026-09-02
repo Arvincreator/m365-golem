@@ -103,9 +103,9 @@ class SystemUpdater {
         let remoteVersion = 'Unknown';
         let remoteVersionError = null;
         try {
-            const rawUrl = 'https://raw.githubusercontent.com/Arvincreator/project-golem/main/package.json';
+            const rawUrl = 'https://raw.githubusercontent.com/Arvincreator/m365-golem/main/package.json';
             const response = await fetch(rawUrl, {
-                headers: { 'User-Agent': 'Project-Golem-Updater/1.0' },
+                headers: { 'User-Agent': 'M365-Golem-Updater/0.1' },
                 signal: AbortSignal.timeout(8000)
             });
             if (response.ok) {
@@ -277,7 +277,7 @@ class SystemUpdater {
         try {
             // 1. Download
             this.broadcast(io, 'running', '從 GitHub 下載最新版本...', 10);
-            const repoUrl = 'https://github.com/Arvincreator/project-golem/archive/refs/heads/main.zip';
+            const repoUrl = 'https://github.com/Arvincreator/m365-golem/archive/refs/heads/main.zip';
             const response = await fetch(repoUrl);
             if (!response.ok) throw new Error(`下載 ZIP 失敗: HTTP ${response.status}`);
 
@@ -290,7 +290,7 @@ class SystemUpdater {
             const zip = new AdmZip(buffer);
             zip.extractAllTo(tempDir, true);
 
-            // The unzipped folder will be like project-golem-main
+            // The unzipped folder will be like m365-golem-main.
             const extractedFolders = fs.readdirSync(tempDir);
             if (extractedFolders.length === 0) throw new Error('ZIP 包內沒有檔案');
             const sourceDir = path.join(tempDir, extractedFolders[0]);

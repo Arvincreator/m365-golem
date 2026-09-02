@@ -101,24 +101,24 @@ describe('M365 workspace routes', () => {
             rootPath: path.join(tempDir, 'projects', projectId),
             agentsPath: path.join(tempDir, 'projects', projectId, 'AGENTS.md'),
             agentsTruncated: false,
+            managedBy: 'golem',
+            memoryCount: 0,
         }));
         expect(fs.existsSync(path.join(tempDir, 'projects', projectId, 'references'))).toBe(true);
         expect(fs.existsSync(path.join(tempDir, 'projects', projectId, 'outputs'))).toBe(true);
 
         const workspaceResult = await request(`/api/projects/${projectId}/workspace`);
         expect(workspaceResult.response.status).toBe(200);
-        expect(workspaceResult.body.workspace.agentsContent).toContain('cannot bypass Golem safety rules');
+        expect(workspaceResult.body.workspace.agentsContent).toContain('Managed automatically by the resident Golem AI');
 
-        const originalContextVersion = projectResult.body.project.contextVersion;
         const agentsContent = '# 專案規則\n\n- 產出需標示依據與待人工確認事項。\n';
         const agentsResult = await request(`/api/projects/${projectId}/agents`, {
             method: 'PUT',
             body: JSON.stringify({ content: agentsContent }),
         });
-        expect(agentsResult.response.status).toBe(200);
-        expect(agentsResult.body.workspace.agentsContent).toBe(agentsContent);
-        expect(agentsResult.body.project.contextVersion).toBe(originalContextVersion + 1);
-        expect(fs.readFileSync(path.join(tempDir, 'projects', projectId, 'AGENTS.md'), 'utf8')).toBe(agentsContent);
+        expect(agentsResult.response.status).toBe(409);
+        expect(agentsResult.body.error).toBe('M365_PROJECT_AGENTS_MANAGED');
+        expect(fs.readFileSync(path.join(tempDir, 'projects', projectId, 'AGENTS.md'), 'utf8')).toContain('Managed automatically');
         expect(fs.readFileSync(process.env.M365_WORKSPACE_DB_PATH)).not.toContain(agentsContent);
 
         const firstConversation = await request(`/api/projects/${projectId}/conversations`, {

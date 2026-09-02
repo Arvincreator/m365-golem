@@ -7,7 +7,9 @@ const MCPToolCatalog = require('../mcp/MCPToolCatalog');
 
 const MCP_CONFIG_PATH = path.resolve(process.cwd(), 'data', 'mcp-servers.json');
 const LOCAL_COMMAND_RE = /(terminal|shell|bash|zsh|cmd|命令|指令|終端機|本機|專案|repo|資料夾|檔案|目錄|路徑|安裝|npm|pnpm|yarn|node|python|git|ls|pwd|cd|cat|sed|grep|rg|build|test|lint|run|execute|執行|編譯|啟動|server)/i;
-const EXTERNAL_SYSTEM_RE = /(@gmail|@google|calendar|gmail|drive|mcp|devtools|notion|slack|teams|github[^a-z]|telegram|discord|瀏覽器自動化|外部服務|第三方)/i;
+const EXTERNAL_SYSTEM_RE = /(@gmail|@google|calendar|gmail|drive|onedrive|sharepoint|microsoft\s*365|\bm365\b|mcp|devtools|notion|slack|teams|github[^a-z]|telegram|discord|瀏覽器自動化|外部服務|第三方)/i;
+const M365_DATA_RE = /(sharepoint|one\s*drive|onedrive|microsoft\s*365|\bm365\b|\.sharepoint\.(?:com|us|de|cn)|sharepoint-mil\.us)/i;
+const M365_SEARCH_RE = /(搜尋|查找|全文搜尋|全域搜尋|找出.{0,24}(?:檔案|文件)|\bsearch\b|\bfind\b.{0,24}\b(?:files?|documents?)\b)/i;
 const STOPWORDS = new Set([
     'the', 'and', 'for', 'with', 'from', 'this', 'that', 'what', 'when', 'where', 'how',
     '你', '我', '他', '她', '它', '我們', '你們', '請', '幫我', '可以', '一下', '這個', '那個',
@@ -58,6 +60,25 @@ function inferIntentBoosts(text) {
     add(/(spotify|音樂|播放清單)/i, ['spotify']);
     add(/(代理|agent|multi-agent|協作|委派|delegate)/i, ['multi-agent', 'delegate-task']);
     add(/(檔案|附件|參考資料|reference)/i, ['reference-files']);
+
+    const isM365DataTask = M365_DATA_RE.test(t);
+    if (isM365DataTask) {
+        add(/(狀態|連線|在線|status|connect)/i, ['m365-session-bridge/m365_bridge_status']);
+        add(/(列出|列舉|查看.*資料夾|資料夾.*檔案|有哪些檔案|folder.*(?:list|content)|list.*folder|enumerate)/i, ['m365-session-bridge/m365_list_folder']);
+        add(/(下載|download)/i, ['m365-session-bridge/m365_download_file']);
+        add(/(上傳|upload)/i, ['m365-session-bridge/m365_upload_file']);
+        add(/(複製|copy)/i, ['m365-session-bridge/m365_copy_file']);
+        add(/(移動|move)/i, ['m365-session-bridge/m365_move_file']);
+        add(/(重新命名|改名|rename)/i, ['m365-session-bridge/m365_rename_file', 'm365-session-bridge/m365_rename_folder']);
+        add(/(建立|新增|create).{0,8}(資料夾|folder)/i, ['m365-session-bridge/m365_create_folder']);
+        add(/(版本紀錄|版本歷程|歷史版本|version history|list.*version)/i, ['m365-session-bridge/m365_list_file_versions']);
+        add(/(還原|restore).{0,8}(版本|version)/i, ['m365-session-bridge/m365_restore_file_version']);
+        add(/(簽出|check.?out)/i, ['m365-session-bridge/m365_checkout_file']);
+        add(/(簽入|check.?in)/i, ['m365-session-bridge/m365_checkin_file']);
+        add(/(中繼資料|metadata|欄位值)/i, ['m365-session-bridge/m365_update_file_metadata']);
+        add(/(檔案網址|檔案連結|canonical.*url|get.*file.*url)/i, ['m365-session-bridge/m365_get_file_url']);
+        add(/(回收|recycle)/i, ['m365-session-bridge/m365_recycle_file', 'm365-session-bridge/m365_recycle_folder']);
+    }
 
     return boosts;
 }
@@ -131,6 +152,15 @@ function summarizeSkillGuide(content, maxChars = 1000) {
     return `${head.trim()}\n…\n${cleaned.slice(marker, marker + remaining).trim()}\n…(guide truncated)`;
 }
 
+function summarizeCatalogDescription(value, maxChars = 180) {
+    const cleaned = String(value || '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    if (!cleaned) return '';
+    if (cleaned.length <= maxChars) return cleaned;
+    return `${cleaned.slice(0, maxChars - 1).trim()}…`;
+}
+
 function isLikelyCommandTask(query) {
     const text = String(query || '');
     if (!text.trim()) return false;
@@ -161,6 +191,7 @@ class ToolRouter {
         this.activeScene = options.activeScene || toolsetManager.getActiveScene();
         this.policy = options.policy || new ToolUsePolicy();
         this.toolVectorIndex = options.toolVectorIndex || null; // 由 GolemBrain 注入
+        this.mcpServers = Array.isArray(options.mcpServers) ? options.mcpServers : null;
     }
 
     async routeAsync(query, options = {}) {
@@ -188,6 +219,19 @@ class ToolRouter {
         const preferredMcpServers = new Set((options.preferredMcpServers || []).map(normalizeText));
         const requestClass = this.policy.classifyRequest(query);
         const vectorBoostIds = options.vectorBoostIds instanceof Set ? options.vectorBoostIds : new Set();
+        const exactMcpIntentIds = new Set(
+            inferIntentBoosts(query).filter((id) => id.startsWith('m365-session-bridge/'))
+        );
+        const hasExactMcpRoute = exactMcpIntentIds.size > 0;
+        const hasUnsupportedM365Search = M365_DATA_RE.test(String(query || ''))
+            && M365_SEARCH_RE.test(String(query || ''))
+            && !hasExactMcpRoute;
+        const connectorBoundary = hasUnsupportedM365Search
+            ? {
+                code: 'm365_exact_url_only',
+                message: 'm365-session-bridge does not provide tenant-wide, semantic, Outlook, Teams, Calendar, or general Microsoft 365 search. It only operates on exact SharePoint Online or OneDrive for Business URLs and folders.',
+            }
+            : null;
 
         const skillCandidates = SkillPackageRegistry.listSkillPackages({ userDataDir: this.userDataDir })
             .filter(pkg => pkg.enabled !== false)
@@ -226,12 +270,37 @@ class ToolRouter {
             }
         }
 
-        const skills = this.policy.filter(query, skillCandidates)
-            .sort((a, b) => b.score - a.score)
-            .slice(0, maxSkills);
+        const catalogRequest = {
+            skills: requestClass.skillCatalog === true,
+        };
+        const skillCatalog = catalogRequest.skills
+            ? skillCandidates
+                .filter((candidate) => candidate.allowed)
+                .map((candidate) => ({
+                    id: candidate.id,
+                    name: candidate.name,
+                    description: summarizeCatalogDescription(candidate.description || candidate.name),
+                    action: candidate.action,
+                    hasRuntime: candidate.hasRuntime,
+                }))
+                .sort((a, b) => a.id.localeCompare(b.id))
+            : [];
+        const inactiveSkillCount = catalogRequest.skills
+            ? skillCandidates.filter((candidate) => !candidate.allowed).length
+            : 0;
+
+        const skills = (catalogRequest.skills && !requestClass.explicitAction)
+            || hasExactMcpRoute
+            || hasUnsupportedM365Search
+            ? []
+            : this.policy.filter(query, skillCandidates)
+                .sort((a, b) => b.score - a.score)
+                .slice(0, maxSkills);
 
         const mcpTools = [];
-        for (const server of loadMcpServers()) {
+        const mcpServers = (this.mcpServers || loadMcpServers())
+            .filter((server) => server && server.enabled !== false);
+        for (const server of mcpServers) {
             const serverDesc = String(server.description || '').trim();
             for (const tool of server.cachedTools || []) {
                 const catalogTool = MCPToolCatalog.findTool(server.name, tool.name, [server]);
@@ -267,6 +336,14 @@ class ToolRouter {
 
         const filteredMcpTools = this.policy.filter(query, mcpTools)
             .sort((a, b) => b.score - a.score);
+        const intentMatchedMcpTools = hasUnsupportedM365Search
+            ? []
+            : hasExactMcpRoute
+            ? filteredMcpTools.filter((candidate) => exactMcpIntentIds.has(candidate.id))
+            : filteredMcpTools;
+        const routedMcpTools = catalogRequest.skills && !requestClass.explicitAction
+            ? []
+            : intentMatchedMcpTools.slice(0, maxMcpTools);
 
         const commandLane = {
             recommended: requestClass.shouldRoute && isLikelyCommandTask(query),
@@ -277,7 +354,11 @@ class ToolRouter {
 
         return {
             skills,
-            mcpTools: filteredMcpTools.slice(0, maxMcpTools),
+            skillCatalog,
+            inactiveSkillCount,
+            catalogRequest,
+            connectorBoundary,
+            mcpTools: routedMcpTools,
             commandLane,
             slashCommands: loadCoreSlashCommands(),
             activeScene: this.activeScene,
@@ -295,12 +376,44 @@ class ToolRouter {
     }
 
     _formatRoutingHint(result) {
-        if (result.skills.length === 0 && result.mcpTools.length === 0 && !result.commandLane.recommended) return '';
+        if (
+            result.skills.length === 0
+            && result.mcpTools.length === 0
+            && !result.commandLane.recommended
+            && !result.catalogRequest?.skills
+            && !result.connectorBoundary
+        ) return '';
 
         const lines = [
             '<tool-routing>',
             `[System note: 以下是本輪依使用者訊息自動產生的工具建議。若任務符合，優先使用；若不符合，可以忽略。當工具能取得事實、操作外部系統或執行專門能力時，不要只用文字猜測。Active scene: ${result.activeScene}]`,
         ];
+
+        if (result.catalogRequest?.skills) {
+            lines.push(`Current available Skill catalog (${result.skillCatalog.length}; authoritative for this turn):`);
+            if (result.skillCatalog.length === 0) {
+                lines.push('- No packaged Skill is active in the current toolset. State that clearly.');
+            } else {
+                for (const skill of result.skillCatalog) {
+                    const runtime = skill.hasRuntime ? `action=${skill.action}` : 'prompt-only';
+                    const description = skill.description ? ` — ${skill.description}` : '';
+                    lines.push(`- ${skill.id} (${skill.name || skill.id}): ${runtime}${description}`);
+                }
+            }
+            if (result.inactiveSkillCount > 0) {
+                lines.push(`- ${result.inactiveSkillCount} other installed Skill package(s) are not active in the current scene; do not present them as currently available.`);
+            }
+            lines.push('- Answer the inventory question directly from this catalog. Do not claim that no Skill list was provided.');
+            lines.push('- This catalog is informational. Do not emit a tool action merely to answer this inventory question; when the user later requests a task, the normal per-turn vector route will provide the selected Skill usage guide and exact fields.');
+        }
+
+        if (result.connectorBoundary?.code === 'm365_exact_url_only') {
+            lines.push('M365 connector boundary:');
+            lines.push(`- ${result.connectorBoundary.message}`);
+            lines.push('- Do not emit a GOLEM_ACTION for tenant-wide or semantic M365 search with this connector. Explain the limitation and ask for an exact SharePoint/OneDrive URL, or state that a separate officially authorized connector/API is required.');
+            lines.push('</tool-routing>');
+            return lines.join('\n');
+        }
 
         if (result.commandLane.recommended) {
             lines.push('Relevant command lane:');

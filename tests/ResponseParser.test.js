@@ -4,7 +4,14 @@ describe('ResponseParser', () => {
     describe('parse', () => {
         test('returns empty structure for null input', () => {
             const result = ResponseParser.parse(null);
-            expect(result).toEqual({ memory: null, actions: [], reply: '' });
+            expect(result).toEqual({
+                memory: null,
+                projectMemory: null,
+                userMemory: null,
+                avoidMemory: null,
+                actions: [],
+                reply: '',
+            });
         });
 
         test('parses GOLEM_REPLY tag', () => {
@@ -23,6 +30,19 @@ describe('ResponseParser', () => {
             const raw = '[GOLEM_MEMORY]null[GOLEM_REPLY]ok';
             const result = ResponseParser.parse(raw);
             expect(result.memory).toBeNull();
+        });
+
+        test('parses scoped project and user memory blocks without treating them as actions', () => {
+            const projectMemory = '[{"operation":"upsert","kind":"rule","content":"Keep evidence visible."}]';
+            const userMemory = '[{"operation":"set","path":"communication.responseLength","value":"brief"}]';
+            const raw = `[GOLEM_PROJECT_MEMORY]${projectMemory}[/GOLEM_PROJECT_MEMORY]` +
+                `[GOLEM_USER_MEMORY]${userMemory}[/GOLEM_USER_MEMORY]` +
+                '[GOLEM_REPLY]已記住。[/GOLEM_REPLY]';
+            const result = ResponseParser.parse(raw);
+            expect(result.projectMemory).toBe(projectMemory);
+            expect(result.userMemory).toBe(userMemory);
+            expect(result.actions).toEqual([]);
+            expect(result.reply).toBe('已記住。');
         });
 
         test('parses GOLEM_ACTION with a valid JSON array', () => {

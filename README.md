@@ -1,286 +1,113 @@
-<div align="center">
-  <img src="assets/logo.png" width="280" alt="Project Golem Logo" />
-  <h1>Project Golem</h1>
-  <p><strong>你的 AI 操作中樞：可對話、可行動、可記憶、可長期協作。</strong></p>
+# M365 Golem
 
-  <p>
-    <img src="https://img.shields.io/badge/version-9.7.9-blue?style=for-the-badge" alt="version" />
-    <img src="https://img.shields.io/badge/node.js-20~22-3C873A?style=for-the-badge&logo=nodedotjs&logoColor=white" alt="node" />
-    <img src="https://img.shields.io/badge/backend-gemini%20web%20%7C%20ollama%20%7C%20lmstudio-orange?style=for-the-badge" alt="backend" />
-    <img src="https://img.shields.io/badge/dashboard-next.js-black?style=for-the-badge&logo=nextdotjs" alt="dashboard" />
-  </p>
+M365 Golem 是一套 Windows 本機 AI 工作台。它沿用 Project Golem 已驗證的
+Action／Observation、Skills、MCP、人工核准與專案記憶架構，將推理層改為使用
+**可見的 Microsoft Edge + Microsoft 365 Copilot Chat 網頁**；不呼叫 Copilot
+Chat API，也不要求把 Microsoft 帳密、MFA、Cookie 或 Token 交給 Golem。
 
-  <p>
-    <a href="README.en.md"><strong>English README</strong></a> ·
-    <a href="docs/CONTRIBUTING.zh-TW.md">貢獻指南</a> ·
-    <a href="docs/AGENTS.md">開發代理指南</a>
-  </p>
-</div>
+目前定位是可下載安裝的 POC／DEV 版本，不是 Microsoft 365 租戶正式上線核准。
 
----
+## 主要能力
 
-## Project Golem 是什麼
+- Codex 式「專案 → 多個對話」工作區，同一專案共享獨立的工作規則與脈絡。
+- 第一次對話載入 Golem 身分、專案背景、Action 規則與工具使用方式。
+- 每輪只篩選並注入最相關的 Skills／MCP 工具，不把整本工具庫送進對話。
+- 工具動作透過原版 Action Gate 執行，Observation 回到同一個專案對話。
+- 內建 M365 Session Bridge，可操作**精確網址**指向的 SharePoint Online 或
+  OneDrive for Business 檔案與資料夾。
+- 專案本機資料加密保存；登入與 MFA 始終在可見 Edge 由使用者親自完成。
 
-Project Golem 不是單純聊天機器人，而是一套可運行的 AI 工作系統。  
-它把「語言模型能力」和「實際操作能力」整合成同一個執行核心，讓你可以在一個 Dashboard 裡完成：
+## 系統需求
 
-- 即時對話與任務協作
-- 技能掛載與工具擴充（MCP / Skills）
-- 長期記憶管理與檢索
-- 多代理討論與共識彙整
-- RPG 劇情互動、股市看板、協作日曆、羈絆日記
-- 系統安全、設定、更新與維運
-
-你可以使用：
-
-- `Gemini Web`（Browser-in-the-Loop，透過 Playwright）
-- `Ollama`（本機/私有模型）
-- `LM Studio`（OpenAI-compatible local API）
-
----
-
-## 為什麼它有價值
-
-多數 AI 工具在「一次對話」很強，但在「長期工作」會掉鏈。Project Golem 的設計重心是讓 AI 在真實環境裡持續可用：
-
-- 有狀態：保留長期上下文與記憶
-- 有行動：可透過工具與技能執行任務
-- 有邊界：具備安全控管與操作限制
-- 有介面：透過 Web Dashboard 做人機協作與治理
-
----
-
-## 適合的使用場景
-
-| 場景 | Golem 可以做什麼 |
-| --- | --- |
-| 個人 AI 工作台 | 把對話、記憶、工具、設定集中到同一個 Dashboard，不需要在多個 AI 網頁之間切換。 |
-| 本機私有 AI | 使用 Ollama 或 LM Studio，讓模型推理與記憶資料留在自己的機器或私有網路內。 |
-| 長期專案陪跑 | 透過記憶核心、摘要與技能系統，讓 AI 累積專案背景，而不是每次都重新解釋。 |
-| 多代理決策 | 建立不同角色進行討論，例如產品、工程、安全、營運，再整理成可執行結論。 |
-| 工具型代理實驗 | 用 MCP 與 Skills 把搜尋、檔案、外部服務、專案工具逐步接進 AI 工作流。 |
-| 生活與創作陪伴 | 用文字 RPG、羈絆日記、協作日曆，把 AI 從工具延伸成可共同規劃、共同記錄的互動角色。 |
-| 金融資訊看板 | 透過台股/美股股市看板，整理行情、新聞、技術指標與 watchlist，交給 Golem 做分析上下文。 |
-
----
-
-## 核心能力
-
-| 能力 | 說明 |
-| --- | --- |
-| 多後端大腦 | 支援 `gemini`、`ollama`、`lmstudio`，可依成本、隱私、效能切換。 |
-| Web Dashboard | 預設 `http://localhost:3000/dashboard`，提供對話、監控、設定、技能、MCP、記憶管理。 |
-| 長期記憶 | 支援 `lancedb-pro` 與 `native` 記憶模式，含摘要壓縮與檢索流程。 |
-| 多代理協作 | Interactive Multi-Agent 模式可建立角色群組做討論與共識輸出。 |
-| 技能系統 | 可載入內建/自訂技能，支援安裝、啟用、測試與管理。 |
-| MCP 工具擴充 | 可接入標準 I/O MCP server，將外部能力接進 Golem 工作流。 |
-| 股市看板 | 支援台股/美股 watchlist、行情、K 線、技術指標、新聞脈絡與 Golem 分析快照。 |
-| 協作日曆 | Dashboard 行事曆可建立、更新、刪除行程，並提供 Golem 可讀取的協作排程資料。 |
-| 文字 RPG | 原生文字 RPG 模式，支援世界觀/角色建立、選項互動、會員回合數與外部通道綁定。 |
-| 羈絆日記 | 使用者日記、AI 日記、AI 想法、週摘要、羈絆等級、SQLite 備份與還原流程。 |
-| 外部通道 | 可選 Telegram / Discord bridge。 |
-| 安全治理 | 遠端存取保護、操作 token、風險命令防護、權限檢查。 |
-
----
-
-## 介面預覽
-
-<img src="assets/screenshots/dashboard-skills.png" width="900" alt="Skills" />
-<img src="assets/screenshots/dashboard-memory-core.png" width="900" alt="Memory Core" />
-<img src="assets/screenshots/dashboard-stocks.png" width="900" alt="Stocks" />
-<img src="assets/screenshots/dashboard-mcp.png" width="900" alt="MCP Tools" />
-<img src="assets/screenshots/dashboard-calendar.png" width="900" alt="Calendar" />
-<img src="assets/screenshots/dashboard-rpg.png" width="900" alt="Text RPG" />
-<img src="assets/screenshots/dashboard-settings.png" width="900" alt="System Settings" />
-
-目前 Dashboard（`web-dashboard/src/app/dashboard`）的主路由包含：
-
-- `/dashboard`：Unified Console（Overview + 即時狀態）
-- `/dashboard/chat`：聊天工作台
-- `/dashboard/diary`：羈絆日記
-- `/dashboard/persona`：人格設定
-- `/dashboard/prompt-pool`：Prompt Pool
-- `/dashboard/prompt-trends`：Prompt 趨勢分析
-- `/dashboard/stocks`：股市看板
-- `/dashboard/calendar`：協作日曆
-- `/dashboard/rpg`：文字 RPG
-- `/dashboard/skills`：技能管理
-- `/dashboard/mcp`：MCP 管理
-- `/dashboard/action-gate`：Action Gate（高風險操作核准流）
-- `/dashboard/agents`：代理清單
-- `/dashboard/office`：Agent 辦公室 / 協作空間
-- `/dashboard/memory`：記憶核心
-- `/dashboard/memory-firewall`：記憶防火牆
-- `/dashboard/reference-files`：Reference Files
-- `/dashboard/settings`：系統設定總覽
-
----
-
-## 快速開始
-
-### 1) 環境需求
-
-- Node.js `>=20 <23`
+- Windows 10／11
+- Node.js 20 以上
 - npm
-- Chromium / Google Chrome（Gemini Web 模式需要）
+- Microsoft Edge
+- 可使用 Microsoft 365 Copilot Chat 的組織帳號
 
-### 2) 安裝與啟動（推薦）
+## 全新下載後安裝
 
-Windows（請使用 Git Bash）：
+1. 從 GitHub 下載並解壓縮，或 clone 本倉庫。
+2. 雙擊 `Install-M365-Golem.bat`。
+3. 安裝器會以鎖版依賴建置 Golem、Dashboard 與內建 Session Bridge。
+4. 依安裝畫面提示，在 Edge 開啟 `edge://extensions`：
+   - 開啟「開發人員模式」；
+   - 點「載入解壓縮」；
+   - 選擇
+     `integrations\m365-session-bridge\apps\edge-extension\dist`。
+5. 雙擊 `Start-Golem.bat`。
+6. 在自動開啟的可見 Edge 視窗自行完成登入與 MFA，再從本機工作台開始對話。
 
-```bash
-cd /你的/project-golem-main/資料夾
-./setup.sh
+也可以在 PowerShell 執行：
+
+```powershell
+npm.cmd run install:m365
+npm.cmd run dashboard
 ```
 
-macOS（請使用終端機 Terminal）：
+只檢查乾淨下載後的安裝計畫，不修改檔案或登錄：
 
-```bash
-cd /你的/project-golem-main/資料夾
-./setup.sh
+```powershell
+npm.cmd run install:m365:plan
 ```
 
-按下 Enter 後，系統會自動引導你完成安裝或進入啟動選單。
+## 內建 M365 Session Bridge
 
----
+Bridge 隨本倉庫一起發布，不需要使用者另外下載另一個專案。安裝器會：
 
-## 最常用指令
+1. 從 `integrations/m365-session-bridge` 的 TypeScript 原始碼重建元件；
+2. 只在目前 Windows 使用者的 `HKCU` 註冊 Edge Native Messaging host；
+3. 將 `m365-session-bridge` 合併到本機 `data/mcp-servers.json`；
+4. 在 `%LOCALAPPDATA%\M365-Golem\m365-session-bridge` 建立每台電腦專屬的
+   政策、IPC 秘密與稽核紀錄。
 
-| 指令 | 說明 |
+它只支援精確 SharePoint Online／OneDrive for Business 網址與檔案操作，**不是**
+Microsoft Graph、Outlook、Teams、Calendar 或整個 M365 的搜尋連接器。初始政策：
+
+- 寫入預設關閉；
+- 覆寫、永久刪除、外部分享、權限修改、批次刪除及任意 HTTP 永遠預設禁止；
+- 未列入的支援站台必須經本機原生核准視窗確認；
+- 本機檔案範圍預設只允許目前 M365 Golem 專案根目錄；
+- Microsoft 365 權限仍完全來自使用者現有的 Edge 登入與租戶授權。
+
+Bridge 不會讓 Golem 自動取得整個 M365。若需要 Outlook、Teams、Calendar 或一般
+SharePoint 搜尋，應另外使用權限範圍清楚的官方連接器。
+
+## GitHub `main` 的乾淨發布界線
+
+`main` 應只包含可重建、可審查的來源與範本。下列內容不得提交：
+
+- `.env`、帳密、Token、Cookie、Edge profile 或 MFA 資料；
+- `node_modules`、Next.js／TypeScript 編譯輸出；
+- `data/mcp-servers.json` 與任何機器絕對路徑；
+- M365 租戶、站台或文件庫白名單；
+- Bridge 的 IPC 秘密、政策修改、日誌與 Native Messaging 實機 manifest；
+- 本機專案對話、資料庫、向量索引與使用者長期偏好。
+
+這些內容都在安裝或執行時於本機生成，並由 `.gitignore` 排除。
+
+## 常用指令
+
+| 指令 | 用途 |
 | --- | --- |
-| `npm run dashboard` | 啟動 runtime + Web Dashboard |
-| `npm start` | 啟動核心 runtime |
-| `npm run dev` | 開發模式（nodemon） |
-| `npm run doctor` | 環境健康檢查 |
-| `npm run arch:check` | 架構邊界檢查 |
-| `npm test` | 執行測試 |
+| `npm.cmd run dashboard` | 啟動本機工作台與可見 Edge |
+| `npm.cmd run install:m365` | 執行完整 Windows 安裝 |
+| `npm.cmd run install:m365:plan` | 唯讀檢查全新安裝前提 |
+| `npm.cmd run bridge:build` | 重建內建 Session Bridge |
+| `npm.cmd run bridge:test` | 執行 Bridge 單元／整合測試 |
+| `npm.cmd run arch:check` | 檢查架構邊界 |
+| `npm.cmd test -- --runInBand` | 執行 Golem 測試 |
 
-### 常用對話指令
+## 安全與驗收
 
-| 指令 | 說明 |
-| --- | --- |
-| `/help` | 查看目前可用指令 |
-| `/new` | 開新對話並載入相關記憶 |
-| `/new_memory` | 重置底層記憶狀態 |
-| `/skills` | 查看已安裝技能 |
-| `/learn <功能>` | 讓 Golem 嘗試學習或生成新技能 |
-| `/stocks TSM NVDA 2330` | 建立即時股市分析上下文 |
-| `/stockboard` | 開啟股市看板式分析上下文 |
-| `/rpg start` | 啟動原生文字 RPG 模式 |
-| `/rpg bind` | 產生會員/外部通道綁定碼 |
-| `/install skill-gh <url>` | 從 GitHub 安裝技能 |
-| `/install mcp-url <url>` | 從 HTTPS JSON 安裝 MCP 設定 |
+- [M365 Copilot Chat Web POC 安全與驗收說明](docs/M365-COPILOT-WEB-POC.zh-TW.md)
+- [M365 專用來源分析與差異](docs/M365-ONLY-SOURCE-ANALYSIS.zh-TW.md)
+- [內建 Bridge 說明](integrations/m365-session-bridge/README.md)
 
----
+自動測試、成功建置、人工 Edge 登入、租戶授權、實際檔案操作、正式部署與 production
+核准是不同階段；不得因為其中一項通過就宣稱其他階段也完成。
 
-## 核心設定範例
+## 授權與來源
 
-### Gemini Web（預設）
-
-```env
-GOLEM_BACKEND=gemini
-GOLEM_MEMORY_MODE=lancedb-pro
-PLAYWRIGHT_STEALTH_ENABLED=true
-ALLOW_REMOTE_ACCESS=false
-```
-
-### Microsoft 365 Copilot Chat Web（安全 POC，不使用 API）
-
-```env
-GOLEM_BACKEND=m365-web
-PLAYWRIGHT_PROFILE=m365-work
-PLAYWRIGHT_HEADLESS=false
-M365_COPILOT_URLS=https://m365.cloud.microsoft/chat
-M365_POC_SAFE_MODE=true
-M365_LOCAL_MEMORY_ENABLED=false
-M365_ACTIONS_ENABLED=false
-M365_AUTO_BOOT_PROMPT=false
-PLAYWRIGHT_M365_BROWSER_CHANNEL=msedge
-```
-
-登入與 MFA 必須由使用者在可見的 Edge 視窗完成。第一次真實租戶驗證前，請先閱讀 [M365 Copilot Chat Web POC 安全與驗收說明](docs/M365-COPILOT-WEB-POC.zh-TW.md)。
-
-Windows 安全工作副本可直接執行 `Start-M365-POC.bat`。若 `.env` 不存在，啟動檔只會從不含密碼或 Token 的 `M365-POC.env.example` 建立 POC 設定；若現有 `.env` 不是 `m365-web`，啟動檔會停止，不會覆寫既有設定。
-
-### Ollama
-
-```env
-GOLEM_BACKEND=ollama
-GOLEM_OLLAMA_BASE_URL=http://127.0.0.1:11434
-GOLEM_OLLAMA_BRAIN_MODEL=llama3.1:8b
-GOLEM_EMBEDDING_PROVIDER=ollama
-GOLEM_OLLAMA_EMBEDDING_MODEL=nomic-embed-text
-```
-
-### LM Studio
-
-```env
-GOLEM_BACKEND=lmstudio
-GOLEM_LMSTUDIO_BASE_URL=http://127.0.0.1:1234/v1
-GOLEM_LMSTUDIO_BRAIN_MODEL=local-model
-GOLEM_LMSTUDIO_API_KEY=
-```
-
-### 遠端管理安全建議
-
-```env
-ALLOW_REMOTE_ACCESS=false
-REMOTE_ACCESS_PASSWORD=
-SYSTEM_OP_TOKEN=
-```
-
-若要開放遠端，請務必同時設定強密碼、token，並搭配防火牆或 VPN。
-
----
-
-## 部署方式
-
-本機開發與個人使用建議直接跑 Node.js。若要部署到伺服器或 VPS，可以使用 Docker Compose 或 headless/noVNC 流程。
-
-```bash
-docker compose up -d --build
-```
-
-更多部署細節請看 [Docker 本機部署指南](docs/DOCKER-LOCAL.zh-TW.md) 與 [VPS VNC Setup Guide](docs/VPS_VNC_Setup_Guide.md)。
-
----
-
-## 專案結構
-
-```text
-project-golem/
-├── apps/
-│   ├── runtime/              # 核心啟動入口
-│   └── dashboard/            # Dashboard plugin / app layer
-├── src/                      # 核心邏輯（brain, manager, services, bridges）
-├── web-dashboard/            # Next.js Dashboard 與前端頁面
-├── packages/                 # memory / protocol / security 等共享模組
-├── docs/                     # 文件與指南
-├── assets/                   # README 截圖素材
-├── index.js                  # 相容入口（轉交 apps/runtime）
-└── dashboard.js              # 相容入口（Dashboard 啟動）
-```
-
----
-
-## 文件地圖
-
-- [Web Dashboard 使用說明](docs/Web-Dashboard-使用說明.md)
-- [MCP 使用與開發指南](docs/MCP-使用與開發指南.md)
-- [記憶系統架構說明](docs/記憶系統架構說明.md)
-- [Golem 指令說明一覽表](docs/golem指令說明一覽表.md)
-- [Docker 本機部署指南](docs/DOCKER-LOCAL.zh-TW.md)
-- [VPS VNC Setup Guide](docs/VPS_VNC_Setup_Guide.md)
-
----
-
-## 授權
-
-本專案採 **Source-Available Non-Commercial** 授權。  
-請參考：[LICENSE](LICENSE) 與 [COMMERCIAL-LICENSE.md](COMMERCIAL-LICENSE.md)。
-
----
-
-## 作者
-
-**Arvin Chen**
+本專案由 Project Golem 原始碼改造，保留原倉庫的來源歷史與模組化設計。使用與再散布
+受本倉庫 [LICENSE](LICENSE) 約束；公司或組織的正式營運使用，仍須完成權利與法務確認。

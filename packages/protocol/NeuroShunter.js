@@ -318,6 +318,48 @@ class NeuroShunter {
             await brain.memorize(parsed.memory, { type: 'fact', timestamp: Date.now() });
         }
 
+        // 1a. M365 專案／使用者記憶是非執行型協議：像原版 GOLEM_MEMORY
+        // 一樣由模型自主維護，但由宿主限制可寫欄位、敏感資料與專案範圍。
+        // 這兩條記憶 lane 不進入 Action Gate；工具與外部副作用仍照常核准。
+        if (parsed.projectMemory) {
+            try {
+                if (!brain || !brain.webBackend || brain.webBackend.id !== 'm365-web'
+                    || !ctx || !ctx.workspaceProjectId
+                    || !ctx.m365ProjectWorkspaceService
+                    || typeof ctx.m365ProjectWorkspaceService.applyMemoryBlock !== 'function') {
+                    throw new Error('No scoped M365 project workspace is active.');
+                }
+                const result = ctx.m365ProjectWorkspaceService.applyMemoryBlock(
+                    ctx.workspaceProjectId,
+                    parsed.projectMemory,
+                    {
+                        conversationId: ctx.workspaceConversationId,
+                        requestId: ctx.workspaceRequestId,
+                    }
+                );
+                console.log(`[GOLEM_PROJECT_MEMORY] updated=${result.results.filter((item) => item.changed).length} project=${ctx.workspaceProjectId}`);
+            } catch (error) {
+                console.warn(`[GOLEM_PROJECT_MEMORY] rejected: ${error.code || error.message}`);
+                parsed.reply = `${parsed.reply || ''}\n\n⚠️ 專案記憶未寫入：格式、敏感資料或專案邊界檢查未通過。`.trim();
+            }
+        }
+
+        if (parsed.userMemory) {
+            try {
+                if (!brain || !brain.webBackend || brain.webBackend.id !== 'm365-web'
+                    || !ctx || !ctx.workspaceProjectId
+                    || !brain.userProfile
+                    || typeof brain.userProfile.applyM365MemoryBlock !== 'function') {
+                    throw new Error('M365 user profile service is unavailable.');
+                }
+                const results = brain.userProfile.applyM365MemoryBlock(parsed.userMemory);
+                console.log(`[GOLEM_USER_MEMORY] updated=${results.filter((item) => item.changed).length}`);
+            } catch (error) {
+                console.warn(`[GOLEM_USER_MEMORY] rejected: ${error.code || error.message}`);
+                parsed.reply = `${parsed.reply || ''}\n\n⚠️ 使用者偏好記憶未寫入：格式或敏感資料檢查未通過。`.trim();
+            }
+        }
+
         // 1b. 處理記憶防火牆標籤（僅在服務啟用時）
         if (parsed.avoidMemory) {
             const firewall = getMemoryFirewallService();

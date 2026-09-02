@@ -71,10 +71,13 @@ describe('ProtocolFormatter M365 Web safe mode', () => {
         expect(envelope).toContain('{"action":"command","parameter":"echo %CD%"}');
         expect(envelope).toContain('Do not merely say that you can propose an action');
         expect(envelope).toContain('Never emit XML-style tags such as </GOLEM_REPLY>');
-        expect(envelope).toContain('Never output [GOLEM_MEMORY]');
+        expect(envelope).toContain('Never output generic [GOLEM_MEMORY]');
+        expect(envelope).toContain('[GOLEM_PROJECT_MEMORY]');
+        expect(envelope).toContain('[GOLEM_USER_MEMORY]');
+        expect(envelope).toContain('never enters Action Gate');
         expect(envelope).not.toContain('Do not output [GOLEM_ACTION]');
         expect(result.systemPrompt).toContain('local approval gate handles confirmation');
-        expect(result.systemPrompt).toContain('Never output [GOLEM_MEMORY]');
+        expect(result.systemPrompt).toContain('Never output generic [GOLEM_MEMORY]');
         expect(result.skillMemoryText).toBeNull();
     });
 
@@ -98,6 +101,21 @@ describe('ProtocolFormatter M365 Web safe mode', () => {
         expect(envelope).toContain('mcp_call');
         expect(envelope).not.toContain('已安裝的 MCP Server：');
         expect(envelope).not.toContain('C:\\Users\\');
+    });
+
+    test('first project turn keeps the Golem identity even when the tool master switch is off', () => {
+        const envelope = ProtocolFormatter.buildEnvelope('先討論，不使用工具', 'm365-no-tools-bootstrap', {
+            webBackendId: 'm365-web',
+            safeMode: true,
+            actionsEnabled: false,
+            m365Bootstrap: true,
+            userDataDir: 'm365-bootstrap-test-profile',
+        });
+
+        expect(envelope).toContain('INITIAL GOLEM OPERATING CONTEXT');
+        expect(envelope).toContain('你就是住在 Golem 工作台中的 AI 推理核心');
+        expect(envelope).toContain('目前工具總開關已關閉');
+        expect(envelope).toContain('Do not output [GOLEM_ACTION]');
     });
 
     test('scopes the resident Golem identity to complete workspace envelopes only', () => {

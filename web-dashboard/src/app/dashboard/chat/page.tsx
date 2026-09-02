@@ -25,7 +25,7 @@ import {
 } from "lucide-react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { apiGet, apiPost, apiPut } from "@/lib/api-client";
+import { apiGet, apiPost } from "@/lib/api-client";
 import { apiUrl } from "@/lib/api";
 import { socket } from "@/lib/socket";
 import { cn } from "@/lib/utils";
@@ -50,6 +50,7 @@ import {
 } from "@/lib/m365-workspace";
 
 type SocketLog = {
+    projectId?: string;
     conversationId?: string;
     requestId?: string;
     type?: string;
@@ -159,8 +160,6 @@ export default function M365ChatPage() {
     const [selectedMcpServerNames, setSelectedMcpServerNames] = useState<string[]>([]);
     const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
     const [showAgentsEditor, setShowAgentsEditor] = useState(false);
-    const [agentsDraft, setAgentsDraft] = useState("");
-    const [savingAgents, setSavingAgents] = useState(false);
     const [loading, setLoading] = useState(true);
     const [sending, setSending] = useState(false);
     const [activating, setActivating] = useState(false);
@@ -239,21 +238,31 @@ export default function M365ChatPage() {
         setPendingLocalActions(data.items || []);
     }, [activeConversationId]);
 
+    const loadProjectWorkspace = useCallback(async () => {
+        if (!activeProjectId) return null;
+        const data = await apiGet<{ workspace: M365ProjectWorkspace }>(
+            apiUrl(`/api/projects/${encodeURIComponent(activeProjectId)}/workspace`),
+            undefined,
+            { retries: 0 }
+        );
+        setProjectWorkspace(data.workspace);
+        return data.workspace;
+    }, [activeProjectId]);
+
     const loadContext = useCallback(async () => {
         if (!activeProjectId || !activeConversationId) return;
-        const [projectData, conversationData, workspaceData] = await Promise.all([
+        const [projectData, conversationData] = await Promise.all([
             apiGet<{ project: M365Project }>(apiUrl(`/api/projects/${encodeURIComponent(activeProjectId)}`)),
             apiGet<{ conversation: M365Conversation }>(apiUrl(`/api/conversations/${encodeURIComponent(activeConversationId)}`)),
-            apiGet<{ workspace: M365ProjectWorkspace }>(apiUrl(`/api/projects/${encodeURIComponent(activeProjectId)}/workspace`)),
+            loadProjectWorkspace(),
         ]);
         if (conversationData.conversation.projectId !== projectData.project.id) {
             throw new Error("目前選取的對話不屬於這個專案，請回到專案頁重新選擇。");
         }
         setProject(projectData.project);
-        setProjectWorkspace(workspaceData.workspace);
         setConversation(conversationData.conversation);
         await Promise.all([loadMessages(), loadRuns(), loadPendingLocalActions()]);
-    }, [activeConversationId, activeProjectId, loadMessages, loadPendingLocalActions, loadRuns]);
+    }, [activeConversationId, activeProjectId, loadMessages, loadPendingLocalActions, loadProjectWorkspace, loadRuns]);
 
     useEffect(() => {
         if (!hydrated || !activeProjectId || !activeConversationId) {
@@ -327,10 +336,11 @@ export default function M365ChatPage() {
             loadMessages().catch(() => undefined);
             loadRuns().catch(() => undefined);
             loadPendingLocalActions().catch(() => undefined);
+            loadProjectWorkspace().catch(() => undefined);
         };
         socket.on("log", handleLog);
         return () => { socket.off("log", handleLog); };
-    }, [activeConversationId, loadMessages, loadPendingLocalActions, loadRuns]);
+    }, [activeConversationId, loadMessages, loadPendingLocalActions, loadProjectWorkspace, loadRuns]);
 
     useEffect(() => {
         if (!activeConversationId) return;
@@ -409,26 +419,6 @@ export default function M365ChatPage() {
             }
             return [...current, id];
         });
-    };
-
-    const saveProjectAgents = async () => {
-        if (!project || savingAgents) return;
-        setSavingAgents(true);
-        setError("");
-        try {
-            const result = await apiPut<{ project: M365Project; workspace: M365ProjectWorkspace }>(
-                apiUrl(`/api/projects/${encodeURIComponent(project.id)}/agents`),
-                { content: agentsDraft }
-            );
-            setProject(result.project);
-            setProjectWorkspace(result.workspace);
-            setShowAgentsEditor(false);
-            setNotice("AGENTS.md 已儲存；下次需要同步專案脈絡時會載入最新版。");
-        } catch (requestError) {
-            setError(errorMessage(requestError));
-        } finally {
-            setSavingAgents(false);
-        }
     };
 
     const changeResponseMode = (mode: ResponseMode) => {
@@ -1056,16 +1046,13 @@ export default function M365ChatPage() {
                                 {projectWorkspace && (
                                     <button
                                         type="button"
-                                        onClick={() => {
-                                            setAgentsDraft(projectWorkspace.agentsContent);
-                                            setShowAgentsEditor(true);
-                                        }}
+                                        onClick={() => setShowAgentsEditor(true)}
                                         className="flex w-full items-start gap-2 rounded-lg p-2 text-left hover:bg-accent"
                                     >
                                         <FileText className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
                                         <span className="min-w-0">
                                             <span className="block font-medium">AGENTS.md</span>
-                                            <span className="block truncate text-[10px] text-muted-foreground" title={projectWorkspace.rootPath}>{projectWorkspace.rootPath}</span>
+                                            <span className="block text-[10px] text-muted-foreground">Golem 自主管理 · {projectWorkspace.memoryCount} 則專案記憶</span>
                                         </span>
                                     </button>
                                 )}
@@ -1213,25 +1200,21 @@ export default function M365ChatPage() {
                     <DialogHeader>
                         <DialogTitle>專案 AGENTS.md</DialogTitle>
                         <DialogDescription>
-                            這是本機明文專案規則，會在需要同步專案脈絡時傳給 M365。請勿放入密碼、Token、Cookie 或私鑰；它不能繞過 Action Gate、核准或資料邊界。
+                            這份檔案由目前專案中的 Golem 自主累積，供同專案的所有對話共用；其他專案不會載入。每輪只會用本機向量索引挑出相關內容送給 M365，使用者不能在此直接改寫。
                         </DialogDescription>
                     </DialogHeader>
                     <div className="space-y-2">
                         <p className="truncate text-xs text-muted-foreground" title={projectWorkspace?.agentsPath}>{projectWorkspace?.agentsPath}</p>
                         <textarea
-                            value={agentsDraft}
-                            onChange={(event) => setAgentsDraft(event.target.value)}
+                            value={projectWorkspace?.agentsContent || ""}
+                            readOnly
                             rows={18}
-                            maxLength={12000}
-                            className="custom-scrollbar w-full resize-y rounded-xl border border-input bg-background px-3 py-2 font-mono text-xs leading-5 outline-none focus:ring-2 focus:ring-ring"
+                            className="custom-scrollbar w-full resize-y rounded-xl border border-input bg-muted/30 px-3 py-2 font-mono text-xs leading-5 outline-none"
                         />
                         <div className="flex items-center justify-between gap-3">
-                            <span className="text-xs text-muted-foreground">{agentsDraft.length.toLocaleString()}/12,000 字</span>
+                            <span className="text-xs text-muted-foreground">{projectWorkspace?.memoryCount || 0} 則 · 工具動作仍由 Action Gate 管理</span>
                             <div className="flex gap-2">
-                                <button type="button" onClick={() => setShowAgentsEditor(false)} className="rounded-lg border border-border px-4 py-2 text-xs">取消</button>
-                                <button type="button" disabled={savingAgents} onClick={() => void saveProjectAgents()} className="rounded-lg bg-primary px-4 py-2 text-xs font-medium text-primary-foreground disabled:opacity-50">
-                                    {savingAgents ? "儲存中…" : "儲存 AGENTS.md"}
-                                </button>
+                                <button type="button" onClick={() => setShowAgentsEditor(false)} className="rounded-lg border border-border px-4 py-2 text-xs">關閉</button>
                             </div>
                         </div>
                     </div>

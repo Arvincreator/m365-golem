@@ -1,0 +1,14 @@
+node_modules/
+**/dist/
+*.tsbuildinfo
+
+# Generated per-machine state. Never publish these files.
+config/policy.json
+config/policy.json.bak
+config/secret.local.json
+runtime/
+logs/
+apps/edge-extension/manifest.json
+apps/native-host/native-host-manifest.json
+apps/native-host/node-path.local.txt
+.env

@@ -1,0 +1,20 @@
+{
+  "name": "@m365-bridge/edge-extension",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "generate-manifest": "node scripts/generate-manifest.mjs",
+    "build": "npm run generate-manifest && node scripts/build.mjs",
+    "clean": "rimraf dist *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@m365-bridge/protocol": "^0.1.0",
+    "@m365-bridge/sharepoint": "^0.1.0"
+  },
+  "devDependencies": {
+    "@types/chrome": "^0.0.269",
+    "esbuild": "^0.23.1",
+    "typescript": "^5.5.4",
+    "rimraf": "^6.0.1"
+  }
+}

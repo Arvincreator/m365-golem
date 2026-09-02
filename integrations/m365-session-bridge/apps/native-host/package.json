@@ -1,0 +1,21 @@
+{
+  "name": "@m365-bridge/native-host",
+  "version": "0.1.0",
+  "private": true,
+  "bin": {
+    "m365-native-host": "dist/index.js"
+  },
+  "scripts": {
+    "build": "tsc -b",
+    "test": "node --test dist/*.test.js",
+    "clean": "rimraf dist *.tsbuildinfo"
+  },
+  "dependencies": {
+    "@m365-bridge/protocol": "^0.1.0",
+    "@m365-bridge/files": "^0.1.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.5.4",
+    "rimraf": "^6.0.1"
+  }
+}

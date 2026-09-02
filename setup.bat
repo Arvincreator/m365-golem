@@ -1,5 +1,5 @@
 @echo off
-:: Project Golem v9.1 - Launcher
-:: 將所有邏輯交給 PowerShell 處理，以完整支援繁體中文
+setlocal
 cd /d "%~dp0"
-powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0setup.ps1" %*
+call "%~dp0Install-M365-Golem.bat" %*
+exit /b %ERRORLEVEL%

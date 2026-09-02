@@ -220,6 +220,28 @@ describe('GolemBrain m365-web bootstrap', () => {
         );
     });
 
+    test('injects the active Skill catalog for a natural-language inventory question', async () => {
+        ConfigManager.CONFIG.M365_ACTIONS_ENABLED = true;
+        const brain = new GolemBrain({
+            golemId: 'm365-skill-catalog-test',
+            toolsetScene: 'assistant',
+            toolsetTools: ['log-reader', 'reference-files'],
+        });
+        brain._refreshWebBackendDefinition();
+
+        const routed = await brain._withToolRoutingHint(
+            '[GOLEM_WORKSPACE_REQUEST:req]\n[USER INPUT]\n你有什麼 Skill 可用？',
+            false,
+            { toolRoutingQuery: '你有什麼 Skill 可用？' }
+        );
+
+        expect(routed).toContain('Current available Skill catalog (2; authoritative for this turn)');
+        expect(routed).toContain('log-reader');
+        expect(routed).toContain('reference-files');
+        expect(routed).toContain('Do not claim that no Skill list was provided');
+        expect(routed).toContain('[GOLEM_WORKSPACE_REQUEST:req]');
+    });
+
     test('keeps tool-vector routing enabled with an isolated local embedder while long-term memory stays off', async () => {
         ConfigManager.CONFIG.M365_ACTIONS_ENABLED = true;
         const brain = new GolemBrain({ golemId: 'm365-tool-vector-test' });

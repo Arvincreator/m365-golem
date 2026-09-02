@@ -2,7 +2,8 @@ const SkillHandler = require('../src/core/action_handlers/SkillHandler');
 const SkillManager = require('../src/managers/SkillManager');
 
 jest.mock('../src/managers/SkillManager', () => ({
-    getSkill: jest.fn()
+    getSkill: jest.fn(),
+    listSkills: jest.fn()
 }));
 
 jest.mock('../src/mcp/MCPManager', () => ({
@@ -16,6 +17,7 @@ describe('SkillHandler', () => {
 
     beforeEach(() => {
         jest.clearAllMocks();
+        SkillManager.listSkills.mockReturnValue([{ name: 'reference-files' }]);
         mockCtx = {
             reply: jest.fn().mockResolvedValue()
         };
@@ -26,11 +28,12 @@ describe('SkillHandler', () => {
         mockAct = { action: 'TestSkill', args: { foo: 'bar' } };
     });
 
-    test('execute should return false if skill not found', async () => {
+    test('execute should handle an unknown skill with actionable help', async () => {
         SkillManager.getSkill.mockReturnValue(null);
         const result = await SkillHandler.execute(mockCtx, mockAct, mockBrain);
-        expect(result).toBe(false);
-        expect(mockCtx.reply).not.toHaveBeenCalled();
+        expect(result).toBe(true);
+        expect(mockCtx.reply).toHaveBeenCalledWith(expect.stringContaining('找不到技能 action'));
+        expect(mockCtx.reply).toHaveBeenCalledWith(expect.stringContaining('/skills'));
     });
 
     test('execute should run skill and return true', async () => {
@@ -46,7 +49,7 @@ describe('SkillHandler', () => {
         expect(mockCtx.reply).toHaveBeenCalledWith(expect.stringContaining('執行技能: **TestSkill**'));
         expect(mockSkill.run).toHaveBeenCalledWith(expect.objectContaining({
             brain: mockBrain,
-            args: mockAct
+            args: mockAct.args
         }));
         expect(mockCtx.reply).toHaveBeenCalledWith(expect.stringContaining('技能「TestSkill」已完成'));
         expect(mockCtx.reply).not.toHaveBeenCalledWith(expect.stringContaining('Skill success'));

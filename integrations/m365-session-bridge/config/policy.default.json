@@ -1,0 +1,34 @@
+{
+  "writeEnabled": false,
+  "readHostPatterns": [
+    "*.sharepoint.com",
+    "*.sharepoint.us",
+    "*.sharepoint-mil.us",
+    "*.sharepoint.de",
+    "*.sharepoint.cn"
+  ],
+  "allowedHosts": [],
+  "allowedSites": [],
+  "deniedHosts": [],
+  "deniedSites": [],
+  "allowedLibraries": [],
+  "allowedLocalPaths": [
+    "%M365_GOLEM_ROOT%"
+  ],
+  "allowOverwrite": false,
+  "allowRecycle": true,
+  "allowPermanentDelete": false,
+  "allowExternalSharing": false,
+  "allowPermissionChange": false,
+  "allowBulkDelete": false,
+  "allowArbitraryHttp": false,
+  "denylistExtensions": [
+    ".exe",
+    ".dll",
+    ".bat",
+    ".cmd",
+    ".ps1",
+    ".vbs",
+    ".msi"
+  ]
+}

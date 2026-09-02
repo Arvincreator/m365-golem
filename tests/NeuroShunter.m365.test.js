@@ -91,6 +91,89 @@ describe('NeuroShunter M365 safety gates', () => {
         expect(CommandHandler.execute).not.toHaveBeenCalled();
     });
 
+    test('writes scoped project and user memory automatically without creating an approval task', async () => {
+        const projectMemoryService = {
+            applyMemoryBlock: jest.fn(() => ({ results: [{ changed: true }] })),
+        };
+        const userProfile = {
+            applyM365MemoryBlock: jest.fn(() => [{ changed: true }]),
+        };
+        const ctx = {
+            reply: jest.fn().mockResolvedValue(),
+            shouldMentionSender: false,
+            platform: 'web',
+            workspaceProjectId: 'project-1',
+            workspaceConversationId: 'conversation-1',
+            workspaceRequestId: 'request-1',
+            m365ProjectWorkspaceService: projectMemoryService,
+        };
+        const brain = {
+            webBackend: { id: 'm365-web', safeMode: true },
+            userProfile,
+            memorize: jest.fn().mockResolvedValue(),
+            _appendChatLog: jest.fn(),
+            areActionsEnabled: jest.fn(() => true),
+            isLocalContextEnabled: jest.fn(() => false),
+        };
+        const controller = { pendingTasks: new Map() };
+        ResponseParser.parse.mockReturnValue({
+            memory: null,
+            projectMemory: '[{"operation":"upsert","kind":"rule","content":"Keep evidence visible."}]',
+            userMemory: '[{"operation":"set","path":"communication.responseLength","value":"brief"}]',
+            reply: '我已保留跨對話仍需沿用的規則。',
+            actions: [],
+        });
+
+        await NeuroShunter.dispatch(ctx, 'raw', brain, controller);
+
+        expect(controller.pendingTasks.size).toBe(0);
+        expect(projectMemoryService.applyMemoryBlock).toHaveBeenCalledWith(
+            'project-1',
+            expect.any(String),
+            { conversationId: 'conversation-1', requestId: 'request-1' }
+        );
+        expect(userProfile.applyM365MemoryBlock).toHaveBeenCalledTimes(1);
+        expect(brain.memorize).not.toHaveBeenCalled();
+        expect(ctx.reply).toHaveBeenCalledWith('我已保留跨對話仍需沿用的規則。');
+    });
+
+    test('rejects scoped memory protocols outside an active M365 project conversation', async () => {
+        const projectMemoryService = {
+            applyMemoryBlock: jest.fn(() => ({ results: [{ changed: true }] })),
+        };
+        const userProfile = {
+            applyM365MemoryBlock: jest.fn(() => [{ changed: true }]),
+        };
+        const ctx = {
+            reply: jest.fn().mockResolvedValue(),
+            shouldMentionSender: false,
+            platform: 'web',
+            m365ProjectWorkspaceService: projectMemoryService,
+        };
+        const brain = {
+            webBackend: { id: 'm365-web', safeMode: true },
+            userProfile,
+            memorize: jest.fn().mockResolvedValue(),
+            _appendChatLog: jest.fn(),
+            areActionsEnabled: jest.fn(() => true),
+            isLocalContextEnabled: jest.fn(() => false),
+        };
+        ResponseParser.parse.mockReturnValue({
+            memory: null,
+            projectMemory: '[{"operation":"upsert","kind":"rule","content":"Do not cross projects."}]',
+            userMemory: '[{"operation":"set","path":"communication.responseLength","value":"brief"}]',
+            reply: '一般回覆。',
+            actions: [],
+        });
+
+        await NeuroShunter.dispatch(ctx, 'raw', brain, { pendingTasks: new Map() });
+
+        expect(projectMemoryService.applyMemoryBlock).not.toHaveBeenCalled();
+        expect(userProfile.applyM365MemoryBlock).not.toHaveBeenCalled();
+        expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('專案記憶未寫入'));
+        expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('使用者偏好記憶未寫入'));
+    });
+
     test('routes M365 inline protocol transitions through the real parser into approval', async () => {
         const actualParser = jest.requireActual('../src/utils/ResponseParser');
         ResponseParser.parse.mockImplementation((raw) => actualParser.parse(raw));

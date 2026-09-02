@@ -1,0 +1,17 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "outDir": "dist",
+    "rootDir": "src",
+    "composite": true
+  },
+  "include": ["src"],
+  "references": [
+    { "path": "../../packages/protocol" },
+    { "path": "../../packages/policy" },
+    { "path": "../../packages/files" },
+    { "path": "../../packages/audit" },
+    { "path": "../../packages/documents" },
+    { "path": "../../packages/sharepoint" }
+  ]
+}

@@ -1,5 +1,42 @@
 const ToolRouter = require('../src/managers/ToolRouter');
 
+function makeM365BridgeServer() {
+    return {
+        name: 'm365-session-bridge',
+        enabled: true,
+        description: 'SharePoint Online and OneDrive for Business exact URL operations',
+        cachedTools: [
+            {
+                name: 'm365_list_folder',
+                description: 'List files and sub-folders directly inside one SharePoint/OneDrive folder.',
+                inputSchema: {
+                    type: 'object',
+                    properties: { folderUrl: { type: 'string' }, maxItems: { type: 'number' } },
+                    required: ['folderUrl'],
+                },
+            },
+            {
+                name: 'm365_download_file',
+                description: 'Download one SharePoint/OneDrive file from an exact URL to an allowed local path.',
+                inputSchema: {
+                    type: 'object',
+                    properties: { fileUrl: { type: 'string' }, destinationPath: { type: 'string' } },
+                    required: ['fileUrl', 'destinationPath'],
+                },
+            },
+            {
+                name: 'm365_checkin_file',
+                description: 'Check in one SharePoint/OneDrive file.',
+                inputSchema: {
+                    type: 'object',
+                    properties: { fileUrl: { type: 'string' } },
+                    required: ['fileUrl'],
+                },
+            },
+        ],
+    };
+}
+
 describe('ToolRouter', () => {
     test('recommends log skill for debugging/log requests', () => {
         const router = new ToolRouter({
@@ -35,6 +72,25 @@ describe('ToolRouter', () => {
         expect(hint).toBe('');
     });
 
+    test('answers a natural-language Skill inventory question from the active package catalog', () => {
+        const router = new ToolRouter({
+            activeScene: 'assistant',
+            activeTools: ['log-reader', 'reference-files']
+        });
+
+        const result = router.route('你有什麼 skill 可用？');
+        const hint = router.buildRoutingHint('你有什麼 skill 可用？');
+
+        expect(result.catalogRequest).toEqual(expect.objectContaining({ skills: true }));
+        expect(result.skillCatalog.map((skill) => skill.id)).toEqual(['log-reader', 'reference-files']);
+        expect(hint).toContain('<tool-routing>');
+        expect(hint).toContain('Current available Skill catalog');
+        expect(hint).toContain('log-reader');
+        expect(hint).toContain('reference-files');
+        expect(hint).toContain('Do not claim that no Skill list was provided');
+        expect(hint).toContain('Do not emit a tool action merely to answer this inventory question');
+    });
+
     test('tells the model to emit a read-only command action for the reported M365 root-directory request', () => {
         const router = new ToolRouter({
             activeScene: 'coding',
@@ -63,6 +119,7 @@ describe('ToolRouter', () => {
         expect(hint).toContain('reference-files');
         expect(hint).toContain('Selected usage guide');
         expect(hint).toContain('"action": "reference-files"');
+        expect(hint).not.toContain('Current available Skill catalog');
     });
 
     test('makes explicitly selected Skills and MCP servers the top per-turn routes without approving execution', () => {
@@ -118,5 +175,70 @@ describe('ToolRouter', () => {
 
         const result = router.route('請分析台積電股市看板和 NVDA 今天的行情');
         expect(result.skills.some(skill => skill.id === 'stock-dashboard')).toBe(false);
+    });
+
+    test('routes a SharePoint folder listing request to m365-session-bridge list_folder', () => {
+        const router = new ToolRouter({
+            activeScene: 'assistant',
+            activeTools: [],
+            mcpServers: [makeM365BridgeServer()],
+        });
+        const query = '列出這個 SharePoint 資料夾有哪些檔案：https://contoso.sharepoint.com/sites/Example/Shared%20Documents';
+
+        const result = router.route(query);
+        const hint = router.buildRoutingHint(query);
+
+        expect(result.commandLane.recommended).toBe(false);
+        expect(result.mcpTools[0]).toEqual(expect.objectContaining({
+            server: 'm365-session-bridge',
+            name: 'm365_list_folder',
+        }));
+        expect(result.mcpTools.map((tool) => tool.name)).toEqual(['m365_list_folder']);
+        expect(result.mcpTools[0].policy.risk).toBe('read');
+        expect(result.skills).toEqual([]);
+        expect(hint).toContain('mcp_call server="m365-session-bridge" tool="m365_list_folder"');
+        expect(hint).toContain('"folderUrl"');
+        expect(hint).not.toContain('m365_checkin_file');
+    });
+
+    test('routes an explicit OneDrive download request to m365-session-bridge download_file', () => {
+        const router = new ToolRouter({
+            activeScene: 'assistant',
+            activeTools: [],
+            mcpServers: [makeM365BridgeServer()],
+        });
+        const query = '下載這個 OneDrive 檔案：https://contoso-my.sharepoint.com/personal/test_user_example_com/Documents/file.docx';
+
+        const result = router.route(query);
+
+        expect(result.mcpTools[0]).toEqual(expect.objectContaining({
+            server: 'm365-session-bridge',
+            name: 'm365_download_file',
+        }));
+        expect(result.mcpTools.map((tool) => tool.name)).toEqual(['m365_download_file']);
+        expect(result.mcpTools[0].policy.risk).toBe('action');
+        expect(result.skills).toEqual([]);
+    });
+
+    test('does not misroute tenant-wide M365 search to public-web Skills or exact-URL bridge tools', () => {
+        const router = new ToolRouter({
+            activeScene: 'assistant',
+            activeTools: ['chrome-devtools', 'duckduckgo-search'],
+            mcpServers: [makeM365BridgeServer()],
+        });
+        const query = '搜尋整個 Microsoft 365 裡所有提到預算的文件';
+
+        const result = router.route(query);
+        const hint = router.buildRoutingHint(query);
+
+        expect(result.skills).toEqual([]);
+        expect(result.mcpTools).toEqual([]);
+        expect(result.commandLane.recommended).toBe(false);
+        expect(result.connectorBoundary).toEqual(expect.objectContaining({
+            code: 'm365_exact_url_only',
+        }));
+        expect(hint).toContain('does not provide tenant-wide');
+        expect(hint).toContain('ask for an exact SharePoint/OneDrive URL');
+        expect(hint).not.toContain('duckduckgo-search');
     });
 });

@@ -1139,11 +1139,14 @@ class GolemBrain {
                 preferredMcpServers: Array.isArray(options.preferredMcpServers) ? options.preferredMcpServers : [],
             };
             // 優先使用 async 版本（向量搜尋），fallback 到同步版本
+            const routingQuery = typeof options.toolRoutingQuery === 'string' && options.toolRoutingQuery.trim()
+                ? options.toolRoutingQuery.trim()
+                : text;
             let hint;
             if (this.toolVectorIndex) {
-                hint = await this.toolRouter.buildRoutingHintAsync(text, routeOptions);
+                hint = await this.toolRouter.buildRoutingHintAsync(routingQuery, routeOptions);
             } else {
-                hint = this.toolRouter.buildRoutingHint(text, routeOptions);
+                hint = this.toolRouter.buildRoutingHint(routingQuery, routeOptions);
             }
             const personaContext = this._buildPersonaTurnContext();
             const prefixBlocks = [runtimeContext];

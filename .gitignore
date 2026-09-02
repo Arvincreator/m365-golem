@@ -98,6 +98,9 @@ data/dashboard/collab-calendar.json
 data/dashboard/memory-firewall.json
 data/dashboard/prompt-pool.json
 data/dashboard/google-oauth-token.json
+# 本機 MCP 啟動路徑與環境設定，可能包含機器路徑或連接器祕密
+data/mcp-servers.json
+data/mcp-servers.json.bak-*
 data/dashboard/stock-dashboard-snapshot.json
 data/rpg-memberships.json
 data/rpg-mobile-link-requests.json
@@ -108,3 +111,14 @@ notebooklm_venv
 .golem/
 skills.db
 web-dashboard/tsconfig.tsbuildinfo
+
+# Built-in M365 Session Bridge: only reproducible source is tracked.
+integrations/m365-session-bridge/node_modules/
+integrations/m365-session-bridge/**/dist/
+integrations/m365-session-bridge/*.tsbuildinfo
+integrations/m365-session-bridge/**/manifest.json
+integrations/m365-session-bridge/apps/native-host/node-path.local.txt
+integrations/m365-session-bridge/config/policy.json
+integrations/m365-session-bridge/config/policy.json.bak
+integrations/m365-session-bridge/runtime/
+integrations/m365-session-bridge/logs/
