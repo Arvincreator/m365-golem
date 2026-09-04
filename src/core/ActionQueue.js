@@ -1,8 +1,14 @@
+const crypto = require('crypto');
+
 class ActionQueue {
     constructor(options = {}) {
         this.golemId = options.golemId || 'default';
         this.queue = [];
         this.isProcessing = false;
+        this.activeTask = null;
+        this.PROCESS_DELAY = Number.isFinite(Number(options.processDelayMs))
+            ? Math.max(0, Number(options.processDelayMs))
+            : 200;
     }
 
     /**
@@ -15,10 +21,14 @@ class ActionQueue {
         console.log(`📥 [Action Queue:${this.golemId}] 收到新行動任務、加入隊列 (Priority: ${options.isPriority})`);
 
         const taskItem = {
+            id: String(options.id || crypto.randomUUID()),
             ctx,
             taskFn,
             timestamp: Date.now(),
-            isPriority: options.isPriority
+            isPriority: options.isPriority === true,
+            metadata: options.metadata && typeof options.metadata === 'object'
+                ? { ...options.metadata }
+                : {},
         };
 
         if (options.isPriority) {
@@ -28,6 +38,32 @@ class ActionQueue {
         }
 
         this._processQueue();
+        return taskItem.id;
+    }
+
+    getSnapshot(filter = {}) {
+        const conversationId = String(filter.conversationId || '').trim();
+        const matches = (task) => !conversationId
+            || String(task && task.metadata && task.metadata.conversationId || '') === conversationId;
+        const view = (task, status, position) => ({
+            id: task.id,
+            status,
+            position,
+            requestedAt: task.timestamp,
+            title: String(task.metadata.title || '工具動作'),
+            summary: String(task.metadata.summary || ''),
+            actionCount: Math.max(1, Number(task.metadata.actionCount || 1)),
+            conversationId: String(task.metadata.conversationId || ''),
+        });
+
+        const items = [];
+        if (this.activeTask && matches(this.activeTask)) {
+            items.push(view(this.activeTask, 'running', 0));
+        }
+        this.queue.forEach((task, index) => {
+            if (matches(task)) items.push(view(task, 'queued', index + 1));
+        });
+        return items;
     }
 
     /**
@@ -38,6 +74,7 @@ class ActionQueue {
 
         this.isProcessing = true;
         const task = this.queue.shift();
+        this.activeTask = task;
 
         try {
             console.log(`⚙️ [Action Queue:${this.golemId}] 從隊列取出，開始非同步執行行動任務...`);
@@ -57,10 +94,11 @@ class ActionQueue {
                 task.ctx.reply(`❌ **系統層任務執行崩潰:**\n\`\`\`\n${error.message}\n\`\`\``, { parse_mode: 'Markdown' }).catch(() => { });
             }
         } finally {
+            this.activeTask = null;
             this.isProcessing = false;
 
             // 稍作延遲再提取下一個任務，避免過度頻繁刷新
-            setTimeout(() => this._processQueue(), 200);
+            setTimeout(() => this._processQueue(), this.PROCESS_DELAY);
         }
     }
 }

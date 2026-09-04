@@ -55,6 +55,9 @@ const RUN_TRANSITIONS = Object.freeze({
     COMPLETED: new Set(),
 });
 
+const WORKSPACE_MODES = new Set(['managed', 'create', 'existing']);
+const PROJECT_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/;
+
 function workspaceError(code, message, details = null) {
     const error = new Error(message);
     error.code = code;
@@ -153,10 +156,8 @@ class M365WorkspaceStore {
             )
         `);
 
-        const applied = await this._get('SELECT version FROM schema_migrations WHERE version = 1');
-        if (applied) return;
-
-        await this._transaction(async () => {
+        const versionOne = await this._get('SELECT version FROM schema_migrations WHERE version = 1');
+        if (!versionOne) await this._transaction(async () => {
             await this._run(`
                 CREATE TABLE projects (
                     id TEXT PRIMARY KEY,
@@ -310,6 +311,18 @@ class M365WorkspaceStore {
                 [this._now()]
             );
         });
+
+        const versionTwo = await this._get('SELECT version FROM schema_migrations WHERE version = 2');
+        if (!versionTwo) await this._transaction(async () => {
+            await this._run("ALTER TABLE projects ADD COLUMN workspace_mode TEXT NOT NULL DEFAULT 'managed' CHECK (workspace_mode IN ('managed', 'create', 'existing'))");
+            await this._run('ALTER TABLE projects ADD COLUMN workspace_path_ciphertext TEXT');
+            await this._run('ALTER TABLE projects ADD COLUMN workspace_path_iv TEXT');
+            await this._run('ALTER TABLE projects ADD COLUMN workspace_path_tag TEXT');
+            await this._run(
+                'INSERT INTO schema_migrations(version, applied_at) VALUES(2, ?)',
+                [this._now()]
+            );
+        });
     }
 
     _now() {
@@ -418,6 +431,10 @@ class M365WorkspaceStore {
             name: this._decrypt(row, 'name', `projects:${row.id}:name`),
             description: this._decrypt(row, 'description', `projects:${row.id}:description`),
             instructions: this._decrypt(row, 'instructions', `projects:${row.id}:instructions`),
+            workspaceMode: row.workspace_mode || 'managed',
+            workspacePath: row.workspace_path_ciphertext
+                ? this._decrypt(row, 'workspace_path', `projects:${row.id}:workspace_path`)
+                : null,
             status: row.status,
             retentionMode: row.retention_mode,
             contextVersion: row.context_version,
@@ -463,11 +480,25 @@ class M365WorkspaceStore {
         const name = requireText(input.name, 'name', 160);
         const description = optionalText(input.description, 'description', 8000);
         const instructions = optionalText(input.instructions, 'instructions', 12000);
-        const id = this.idFactory();
+        const workspaceMode = String(input.workspaceMode || 'managed').trim().toLowerCase();
+        if (!WORKSPACE_MODES.has(workspaceMode)) {
+            throw workspaceError('M365_VALIDATION_ERROR', 'workspaceMode must be managed, create, or existing.');
+        }
+        const workspacePath = optionalText(input.workspacePath, 'workspacePath', 4096);
+        if (workspaceMode !== 'managed' && !workspacePath) {
+            throw workspaceError('M365_VALIDATION_ERROR', 'workspacePath is required for a custom project workspace.');
+        }
+        const id = String(input.id || this.idFactory()).trim();
+        if (!PROJECT_ID_PATTERN.test(id)) {
+            throw workspaceError('M365_VALIDATION_ERROR', 'Project id is invalid.');
+        }
         const now = this._now();
         const nameParts = this._encryptedParams(name, `projects:${id}:name`);
         const descriptionParts = this._encryptedParams(description, `projects:${id}:description`);
         const instructionParts = this._encryptedParams(instructions, `projects:${id}:instructions`);
+        const workspacePathParts = workspacePath
+            ? this._encryptedParams(workspacePath, `projects:${id}:workspace_path`)
+            : [null, null, null];
 
         return this._enqueue(async () => {
             await this._run(`
@@ -476,18 +507,38 @@ class M365WorkspaceStore {
                     name_ciphertext, name_iv, name_tag,
                     description_ciphertext, description_iv, description_tag,
                     instructions_ciphertext, instructions_iv, instructions_tag,
+                    workspace_mode,
+                    workspace_path_ciphertext, workspace_path_iv, workspace_path_tag,
                     status, retention_mode, context_version, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 'manual', 1, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', 'manual', 1, ?, ?)
             `, [
                 id,
                 ...nameParts,
                 ...descriptionParts,
                 ...instructionParts,
+                workspaceMode,
+                ...workspacePathParts,
                 now,
                 now,
             ]);
             return this._decodeProject(await this._get('SELECT * FROM projects WHERE id = ?', [id]));
         });
+    }
+
+    async removeProjectAfterFailedCreation(projectId) {
+        return this._enqueue(async () => this._transaction(async () => {
+            const conversation = await this._get(
+                'SELECT id FROM conversations WHERE project_id = ? LIMIT 1',
+                [projectId]
+            );
+            if (conversation) {
+                throw workspaceError(
+                    'M365_PROJECT_ROLLBACK_BLOCKED',
+                    'Cannot roll back a project after conversations have been created.'
+                );
+            }
+            await this._run('DELETE FROM projects WHERE id = ?', [projectId]);
+        }));
     }
 
     async listProjects(options = {}) {
@@ -825,6 +876,9 @@ class M365WorkspaceStore {
         const verification = requireText(input.verification, 'verification', 20000);
         const rawMaxSteps = Number(input.maxSteps || 6);
         const maxSteps = Number.isFinite(rawMaxSteps) ? Math.max(1, Math.min(Math.floor(rawMaxSteps), 12)) : 6;
+        const startImmediately = input.startImmediately === true;
+        const initialStatus = startImmediately ? 'RUNNING' : 'WAITING_START_APPROVAL';
+        const origin = String(input.origin || (startImmediately ? 'copilot' : 'user')).trim().slice(0, 40) || 'user';
         const id = this.idFactory();
         const now = this._now();
         return this._enqueue(async () => this._transaction(async () => {
@@ -851,23 +905,26 @@ class M365WorkspaceStore {
                     objective_ciphertext, objective_iv, objective_tag,
                     constraints_ciphertext, constraints_iv, constraints_tag,
                     verification_ciphertext, verification_iv, verification_tag,
-                    status, max_steps, current_step, created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'WAITING_START_APPROVAL', ?, 0, ?, ?)
+                    status, max_steps, current_step, created_at, started_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
             `, [
                 id,
                 conversationId,
                 ...this._encryptedParams(objective, `runs:${id}:objective`),
                 ...this._encryptedParams(constraints, `runs:${id}:constraints`),
                 ...this._encryptedParams(verification, `runs:${id}:verification`),
+                initialStatus,
                 maxSteps,
                 now,
+                startImmediately ? now : null,
                 now,
             ]);
-            await this._appendRunEventDirect(id, 'run_created', { maxSteps });
+            await this._appendRunEventDirect(id, 'run_created', { maxSteps, origin, startImmediately });
             await this._appendCheckpointDirect(id, null, {
-                status: 'WAITING_START_APPROVAL',
+                status: initialStatus,
                 currentStep: 0,
-                pendingApproval: 'run_start',
+                pendingApproval: startImmediately ? null : 'run_start',
+                origin,
             });
             return this._decodeRun(await this._get('SELECT * FROM runs WHERE id = ?', [id]));
         }));

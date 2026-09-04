@@ -11,6 +11,8 @@ const MAX_MEMORY_CONTENT_CHARS = 2000;
 const MAX_MEMORY_TAGS = 8;
 const MAX_MEMORY_TAG_CHARS = 64;
 const PROJECT_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/;
+const WORKSPACE_MODES = new Set(['managed', 'create', 'existing']);
+const WINDOWS_RESERVED_NAMES = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i;
 const MEMORY_KINDS = new Set(['rule', 'context', 'decision', 'preference']);
 const MEMORY_IMPORTANCE = new Set(['core', 'normal']);
 
@@ -19,6 +21,58 @@ function workspaceError(code, message, statusCode = 400) {
     error.code = code;
     error.statusCode = statusCode;
     return error;
+}
+
+function normalizeWorkspaceMode(value) {
+    const mode = String(value || 'managed').trim().toLowerCase();
+    if (!WORKSPACE_MODES.has(mode)) {
+        throw workspaceError(
+            'M365_PROJECT_WORKSPACE_MODE_INVALID',
+            'Workspace mode must be managed, create, or existing.'
+        );
+    }
+    return mode;
+}
+
+function requireAbsoluteWorkspacePath(value, fieldName = 'workspacePath') {
+    const raw = String(value || '').trim();
+    if (!raw || raw.length > 4096 || !path.isAbsolute(raw)) {
+        throw workspaceError(
+            'M365_PROJECT_WORKSPACE_PATH_INVALID',
+            `${fieldName} must be an absolute local path.`
+        );
+    }
+    const resolved = path.resolve(raw);
+    if (resolved === path.parse(resolved).root || (process.platform === 'win32' && resolved.startsWith('\\\\'))) {
+        throw workspaceError(
+            'M365_PROJECT_WORKSPACE_PATH_INVALID',
+            'A drive root or network path cannot be used as a project workspace.'
+        );
+    }
+    return resolved;
+}
+
+function suggestedFolderName(value) {
+    const normalized = String(value || '')
+        .trim()
+        .replace(/[<>:"/\\|?*\u0000-\u001f]/g, '-')
+        .replace(/[. ]+$/g, '')
+        .slice(0, 120);
+    if (!normalized || WINDOWS_RESERVED_NAMES.test(normalized)) return 'M365-Golem-Project';
+    return normalized;
+}
+
+function validateFolderName(value, fallback) {
+    const name = String(value || suggestedFolderName(fallback)).trim();
+    if (!name || name.length > 120 || name === '.' || name === '..'
+        || /[<>:"/\\|?*\u0000-\u001f]/.test(name) || /[. ]$/.test(name)
+        || WINDOWS_RESERVED_NAMES.test(name)) {
+        throw workspaceError(
+            'M365_PROJECT_WORKSPACE_FOLDER_NAME_INVALID',
+            'The new workspace folder name is not valid on this computer.'
+        );
+    }
+    return name;
 }
 
 function containsSensitiveValue(value) {
@@ -147,10 +201,13 @@ class M365ProjectWorkspaceService {
         this._vectorIndexes = new Map();
     }
 
-    _projectRoot(projectId) {
+    _projectRoot(projectId, workspacePath = '') {
         const id = String(projectId || '').trim();
         if (!PROJECT_ID_PATTERN.test(id)) {
             throw workspaceError('M365_PROJECT_WORKSPACE_ID_INVALID', 'Invalid project workspace identifier.');
+        }
+        if (String(workspacePath || '').trim()) {
+            return requireAbsoluteWorkspacePath(workspacePath);
         }
         const projectRoot = path.resolve(this.rootDir, id);
         const prefix = `${this.rootDir}${path.sep}`;
@@ -160,12 +217,120 @@ class M365ProjectWorkspaceService {
         return projectRoot;
     }
 
+    _assertUsableDirectory(directoryPath, fieldName) {
+        const stat = fs.lstatSync(directoryPath);
+        if (stat.isSymbolicLink() || !stat.isDirectory()) {
+            throw workspaceError(
+                'M365_PROJECT_WORKSPACE_PATH_INVALID',
+                `${fieldName} must be a regular local directory.`
+            );
+        }
+        try {
+            fs.accessSync(directoryPath, fs.constants.R_OK | fs.constants.W_OK);
+        } catch (_) {
+            throw workspaceError(
+                'M365_PROJECT_WORKSPACE_ACCESS_DENIED',
+                `${fieldName} is not readable and writable by M365 Golem.`
+            );
+        }
+    }
+
+    _assertCustomWorkspaceAvailable(projectId, projectRoot) {
+        if (!fs.existsSync(projectRoot)) return;
+        this._assertUsableDirectory(projectRoot, 'workspacePath');
+        const agentsPath = path.join(projectRoot, 'AGENTS.md');
+        const rulesPath = this._rulesPath(projectRoot);
+        if (fs.existsSync(agentsPath)) {
+            const agentsStat = this._assertRegularFileOrMissing(agentsPath, 'M365_PROJECT_AGENTS_FILE_INVALID');
+            if (agentsStat.size > this.maxAgentsChars * 4) {
+                throw workspaceError(
+                    'M365_PROJECT_AGENTS_CONFLICT',
+                    'This folder contains an AGENTS.md that is too large for M365 Golem to verify safely.',
+                    409
+                );
+            }
+            const content = fs.readFileSync(agentsPath, 'utf8');
+            if (content.length > this.maxAgentsChars) {
+                throw workspaceError(
+                    'M365_PROJECT_AGENTS_CONFLICT',
+                    'This folder contains an AGENTS.md that is too large for M365 Golem to verify safely.',
+                    409
+                );
+            }
+            const managedForThisProject = content.includes('Managed automatically by the resident Golem AI')
+                && content.includes(`Project workspace: ${projectId}`);
+            if (!managedForThisProject) {
+                throw workspaceError(
+                    'M365_PROJECT_AGENTS_CONFLICT',
+                    'This folder already contains an AGENTS.md that M365 Golem will not overwrite.',
+                    409
+                );
+            }
+        } else if (fs.existsSync(rulesPath)) {
+            throw workspaceError(
+                'M365_PROJECT_WORKSPACE_ALREADY_MANAGED',
+                'This folder already contains another Golem project memory store.',
+                409
+            );
+        }
+    }
+
+    planProjectWorkspace(projectId, input = {}) {
+        const mode = normalizeWorkspaceMode(input.workspaceMode);
+        if (mode === 'managed') {
+            return {
+                mode,
+                rootPath: this._projectRoot(projectId),
+                workspacePathForStorage: null,
+                rootExisted: fs.existsSync(this._projectRoot(projectId)),
+            };
+        }
+
+        if (mode === 'existing') {
+            const rootPath = requireAbsoluteWorkspacePath(input.workspacePath);
+            if (!fs.existsSync(rootPath)) {
+                throw workspaceError(
+                    'M365_PROJECT_WORKSPACE_NOT_FOUND',
+                    'The selected existing workspace folder does not exist.',
+                    404
+                );
+            }
+            this._assertCustomWorkspaceAvailable(projectId, rootPath);
+            return { mode, rootPath, workspacePathForStorage: rootPath, rootExisted: true };
+        }
+
+        const parentPath = requireAbsoluteWorkspacePath(input.workspacePath, 'workspaceParentPath');
+        if (!fs.existsSync(parentPath)) {
+            throw workspaceError(
+                'M365_PROJECT_WORKSPACE_PARENT_NOT_FOUND',
+                'The selected parent folder does not exist.',
+                404
+            );
+        }
+        this._assertUsableDirectory(parentPath, 'workspaceParentPath');
+        const folderName = validateFolderName(input.workspaceFolderName, input.projectName);
+        const rootPath = path.resolve(parentPath, folderName);
+        const prefix = `${parentPath}${path.sep}`;
+        if (!rootPath.startsWith(prefix)) {
+            throw workspaceError('M365_PROJECT_WORKSPACE_PATH_INVALID', 'The new workspace must remain inside the selected parent folder.');
+        }
+        if (fs.existsSync(rootPath)) {
+            throw workspaceError(
+                'M365_PROJECT_WORKSPACE_EXISTS',
+                'The new workspace folder already exists. Choose “Use existing folder” instead.',
+                409
+            );
+        }
+        return { mode, rootPath, workspacePathForStorage: rootPath, rootExisted: false };
+    }
+
     _assertRegularFileOrMissing(filePath, code = 'M365_PROJECT_WORKSPACE_FILE_INVALID') {
-        if (!fs.existsSync(filePath)) return;
+        if (!fs.existsSync(filePath)) return null;
         const stat = fs.lstatSync(filePath);
         if (stat.isSymbolicLink() || !stat.isFile()) {
             throw workspaceError(code, 'Managed project files must be regular files inside the project workspace.');
         }
+        return stat;
     }
 
     _rulesPath(projectRoot) {
@@ -251,9 +416,21 @@ class M365ProjectWorkspaceService {
         return entries;
     }
 
-    ensureProject(projectId) {
-        const projectRoot = this._projectRoot(projectId);
-        fs.mkdirSync(projectRoot, { recursive: true });
+    ensureProject(projectId, options = {}) {
+        const workspacePath = String(options.workspacePath || '').trim();
+        const projectRoot = this._projectRoot(projectId, workspacePath);
+        if (workspacePath) this._assertCustomWorkspaceAvailable(projectId, projectRoot);
+        if (!fs.existsSync(projectRoot)) {
+            if (workspacePath && options.createWorkspaceRoot !== true) {
+                throw workspaceError(
+                    'M365_PROJECT_WORKSPACE_NOT_FOUND',
+                    'The project workspace folder no longer exists. Restore it at the saved location or create a new project.',
+                    404
+                );
+            }
+            if (workspacePath) fs.mkdirSync(projectRoot);
+            else fs.mkdirSync(projectRoot, { recursive: true });
+        }
         const rootStat = fs.lstatSync(projectRoot);
         if (rootStat.isSymbolicLink() || !rootStat.isDirectory()) {
             throw workspaceError('M365_PROJECT_WORKSPACE_PATH_INVALID', 'Project workspace must be a regular local directory.');
@@ -264,17 +441,24 @@ class M365ProjectWorkspaceService {
         fs.mkdirSync(path.join(projectRoot, '.golem'), { recursive: true });
 
         const rulesPath = this._rulesPath(projectRoot);
-        const entries = fs.existsSync(rulesPath)
-            ? this._readEntries(projectRoot)
-            : this._migrateLegacyAgents(projectId, projectRoot);
+        let entries;
+        if (fs.existsSync(rulesPath)) {
+            entries = this._readEntries(projectRoot);
+        } else if (workspacePath) {
+            entries = [];
+            this._writeEntries(projectRoot, entries);
+        } else {
+            entries = this._migrateLegacyAgents(projectId, projectRoot);
+        }
         this._writeAgents(projectId, projectRoot, entries);
-        return this.getProjectWorkspace(projectId, { ensure: false });
+        return this.getProjectWorkspace(projectId, { ensure: false, workspacePath });
     }
 
     getProjectWorkspace(projectId, options = {}) {
-        const projectRoot = this._projectRoot(projectId);
+        const workspacePath = String(options.workspacePath || '').trim();
+        const projectRoot = this._projectRoot(projectId, workspacePath);
         if (options.ensure !== false && !fs.existsSync(this._rulesPath(projectRoot))) {
-            return this.ensureProject(projectId);
+            return this.ensureProject(projectId, { workspacePath });
         }
         const agentsPath = path.join(projectRoot, 'AGENTS.md');
         const rulesPath = this._rulesPath(projectRoot);
@@ -308,7 +492,8 @@ class M365ProjectWorkspaceService {
     }
 
     applyMemoryOperations(projectId, operations, metadata = {}) {
-        const workspace = this.ensureProject(projectId);
+        const workspacePath = String(metadata.workspacePath || '').trim();
+        const workspace = this.ensureProject(projectId, { workspacePath });
         let entries = [...workspace.memoryEntries];
         const now = new Date().toISOString();
         const results = [];
@@ -388,11 +573,15 @@ class M365ProjectWorkspaceService {
         entries.sort((a, b) => String(a.createdAt).localeCompare(String(b.createdAt)));
         this._writeEntries(workspace.rootPath, entries);
         this._writeAgents(projectId, workspace.rootPath, entries);
-        return { workspace: this.getProjectWorkspace(projectId, { ensure: false }), results };
+        return {
+            workspace: this.getProjectWorkspace(projectId, { ensure: false, workspacePath }),
+            results,
+        };
     }
 
     async getRelevantMemories(projectId, query, options = {}) {
-        const workspace = this.ensureProject(projectId);
+        const workspacePath = String(options.workspacePath || '').trim();
+        const workspace = this.ensureProject(projectId, { workspacePath });
         const entries = workspace.memoryEntries;
         if (entries.length === 0) return [];
         const limit = Math.max(1, Math.min(20, Number(options.limit || 8)));
@@ -401,10 +590,11 @@ class M365ProjectWorkspaceService {
 
         if (options.embedder && typeof options.embedder.embedQuery === 'function') {
             try {
-                let index = this._vectorIndexes.get(projectId);
+                const indexKey = `${projectId}:${workspace.rootPath}`;
+                let index = this._vectorIndexes.get(indexKey);
                 if (!index || index.embedder !== options.embedder) {
                     index = new ProjectRuleVectorIndex(workspace.rootPath, options.embedder);
-                    this._vectorIndexes.set(projectId, index);
+                    this._vectorIndexes.set(indexKey, index);
                 }
                 await index.sync(entries);
                 const matches = await index.search(query, { limit: Math.max(limit * 2, 10) });
@@ -439,3 +629,6 @@ module.exports.defaultAgentsTemplate = defaultAgentsTemplate;
 module.exports.parseMemoryBlock = parseMemoryBlock;
 module.exports.renderAgents = renderAgents;
 module.exports.containsSensitiveValue = containsSensitiveValue;
+module.exports.normalizeWorkspaceMode = normalizeWorkspaceMode;
+module.exports.requireAbsoluteWorkspacePath = requireAbsoluteWorkspacePath;
+module.exports.suggestedFolderName = suggestedFolderName;

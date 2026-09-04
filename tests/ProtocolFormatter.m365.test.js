@@ -2,9 +2,11 @@ const ProtocolFormatter = require('../packages/protocol/ProtocolFormatter');
 
 describe('ProtocolFormatter M365 Web safe mode', () => {
     const originalAutoApproveAll = process.env.GOLEM_AUTO_APPROVE_ALL;
+    const originalRunnerEnabled = process.env.M365_RUNNER_ENABLED;
 
     beforeAll(() => {
         delete process.env.GOLEM_AUTO_APPROVE_ALL;
+        delete process.env.M365_RUNNER_ENABLED;
     });
 
     afterAll(() => {
@@ -12,6 +14,11 @@ describe('ProtocolFormatter M365 Web safe mode', () => {
             delete process.env.GOLEM_AUTO_APPROVE_ALL;
         } else {
             process.env.GOLEM_AUTO_APPROVE_ALL = originalAutoApproveAll;
+        }
+        if (originalRunnerEnabled === undefined) {
+            delete process.env.M365_RUNNER_ENABLED;
+        } else {
+            process.env.M365_RUNNER_ENABLED = originalRunnerEnabled;
         }
     });
 
@@ -131,5 +138,50 @@ describe('ProtocolFormatter M365 Web safe mode', () => {
         expect(envelope).toContain('After you emit [[END:scope]], this Golem role ends');
         expect(envelope).toContain('without the complete Golem markers is an ordinary Copilot Chat turn');
         expect(envelope).toContain('do not answer "我在 M365，所以無法存取本機"');
+    });
+
+    test('lets Copilot author a durable plan only inside an enabled project conversation', () => {
+        process.env.M365_RUNNER_ENABLED = 'true';
+        const initial = ProtocolFormatter.buildEnvelope('完成一個需要多個工具步驟的任務', 'plan-initial', {
+            webBackendId: 'm365-web',
+            safeMode: true,
+            actionsEnabled: true,
+            workspaceConversationId: 'conversation-1',
+        });
+        const continuation = ProtocolFormatter.buildEnvelope('繼續', 'plan-next', {
+            webBackendId: 'm365-web',
+            safeMode: true,
+            actionsEnabled: true,
+            workspaceConversationId: 'conversation-1',
+            workspacePlanId: 'run-1',
+            workspacePlanRevision: 3,
+        });
+
+        expect(initial).toContain('[GOLEM_PLAN]');
+        expect(initial).toContain('silently decide whether the requested outcome needs a durable multi-step run');
+        expect(initial).toContain('never wait for the user to name GOLEM_PLAN');
+        expect(initial).toContain('create, modify, test, or verify a local project artifact');
+        expect(initial).toContain('not merely a local-tool plan');
+        expect(initial).toContain('Native Microsoft 365 Copilot reasoning or generation');
+        expect(initial).toContain('"action":"plan_checkpoint"');
+        expect(initial).toContain('records a bound Observation and wakes your next plan turn');
+        expect(initial).toContain('製作一個有互動能力的網頁');
+        expect(initial).toContain('not merely displaying a long code draft');
+        expect(initial).toContain('For a new plan, set plan_id to null and revision to 1');
+        expect(initial).toContain('exactly one bounded [GOLEM_ACTION]');
+        expect(initial).toContain('Only a host-generated [GOLEM_OBSERVATION] proves external work');
+        expect(initial).toContain('Do not wait for another user message merely to continue a safe running plan');
+        expect(initial).toContain('A final complete plan is the required signal that closes the local multi-step run');
+        expect(continuation).toContain('plan_id=run-1, last accepted revision=3');
+        expect(continuation).toContain('increment the revision by exactly one');
+
+        delete process.env.M365_RUNNER_ENABLED;
+        const disabled = ProtocolFormatter.buildEnvelope('完成任務', 'plan-disabled', {
+            webBackendId: 'm365-web',
+            safeMode: true,
+            actionsEnabled: true,
+            workspaceConversationId: 'conversation-1',
+        });
+        expect(disabled).toContain('Do not output [GOLEM_PLAN]');
     });
 });

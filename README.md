@@ -10,9 +10,17 @@ Chat API，也不要求把 Microsoft 帳密、MFA、Cookie 或 Token 交給 Gole
 ## 主要能力
 
 - Codex 式「專案 → 多個對話」工作區，同一專案共享獨立的工作規則與脈絡。
+- 建立專案時可使用 Golem 預設位置、在指定位置建立新資料夾，或連結既有的
+  本機工作資料夾；不同專案的 `AGENTS.md` 與記憶彼此隔離。
 - 第一次對話載入 Golem 身分、專案背景、Action 規則與工具使用方式。
 - 每輪只篩選並注入最相關的 Skills／MCP 工具，不把整本工具庫送進對話。
 - 工具動作透過原版 Action Gate 執行，Observation 回到同一個專案對話。
+- 複雜工作可由 Copilot 自行產生最多 12 步的自主計畫；每次只提出一個 Action，
+  收到本機 Observation 後才可推進下一步。右側可收合面板會持續顯示目前步驟、
+  完成進度，以及正在等待核准、工具執行或 Observation 的狀態。
+- 對話框可新增檔案、選擇整個資料夾或直接拖曳；檔案會經本機安全檢查後，
+  由可見 Edge 上傳到目前的 M365 Copilot 對話，並等待 OneDrive 處理完成與
+  送出鍵真正啟用後才送出。
 - 內建 M365 Session Bridge，可操作**精確網址**指向的 SharePoint Online 或
   OneDrive for Business 檔案與資料夾。
 - 專案本機資料加密保存；登入與 MFA 始終在可見 Edge 由使用者親自完成。
@@ -27,7 +35,11 @@ Chat API，也不要求把 Microsoft 帳密、MFA、Cookie 或 Token 交給 Gole
 
 ## 全新下載後安裝
 
-1. 從 GitHub 下載 ZIP 後，**先對 ZIP 按右鍵 → 內容 → 解除封鎖 → 套用**，
+一般使用者請下載 Release 中的 `M365-Golem-v<版本>.zip`；GitHub 自動產生的
+「Source code」是供開發者維護的完整原始碼，因此會包含測試。正式安裝 ZIP 不含
+測試、舊部署腳本、快取、登入 profile、對話資料或任何本機密鑰。
+
+1. 從 GitHub 下載安裝 ZIP 後，**先對 ZIP 按右鍵 → 內容 → 解除封鎖 → 套用**，
    再解壓縮；使用 `git clone` 則不需要這個步驟。這是 Windows 對網際網路
    下載腳本的安全標記，不需要關閉 Smart App Control。
 2. 若已經解壓縮才遇到封鎖，請在專案資料夾開啟 PowerShell，執行：
@@ -58,6 +70,26 @@ npm.cmd run dashboard
 ```powershell
 npm.cmd run install:m365:plan
 ```
+
+維護者可在已審查的工作樹建立乾淨安裝包：
+
+```powershell
+npm.cmd run package:windows
+```
+
+輸出位於 `release`，並附 SHA-256 校驗檔與 ZIP 內的安裝檔案清單。
+
+## 對話附件與參考檔案
+
+- `新增檔案`／`新增資料夾`／拖曳：把原始檔加入**這一輪**對話，經確認後會
+  上傳到目前 M365 Copilot Chat。每輪最多 10 個檔案、每檔最多 25 MiB、合計
+  最多 50 MiB；資料夾中的 `.git`、`node_modules`、建置輸出與隱藏項目會略過。
+- `選擇參考檔案`：沿用 Golem 的本機索引，只把已索引文字注入提示，不上傳
+  原始檔，適合重複使用的專案參考資料。
+- 常見 Office 文件、PDF、文字／程式碼與圖片格式可加入；最終是否接受仍由
+  使用者的 M365 租戶、授權與當下 Copilot 網頁入口決定。
+- 暫存檔只綁定目前專案與對話，送出完成或失敗後即清除；對話紀錄只保存檔名，
+  不另存一份原始附件。
 
 ## 內建 M365 Session Bridge
 
@@ -101,6 +133,7 @@ SharePoint 搜尋，應另外使用權限範圍清楚的官方連接器。
 | `npm.cmd run dashboard` | 啟動本機工作台與可見 Edge |
 | `npm.cmd run install:m365` | 執行完整 Windows 安裝 |
 | `npm.cmd run install:m365:plan` | 唯讀檢查全新安裝前提 |
+| `npm.cmd run package:windows` | 建立不含測試與本機資料的 Windows 安裝 ZIP |
 | `npm.cmd run bridge:build` | 重建內建 Session Bridge |
 | `npm.cmd run bridge:test` | 執行 Bridge 單元／整合測試 |
 | `npm.cmd run arch:check` | 檢查架構邊界 |

@@ -5,6 +5,81 @@ const { TIMINGS, LIMITS } = require('../../src/core/constants');
 
 class ResponseExtractor {
     /**
+     * Inspect the currently visible conversation without sending anything.
+     * Used by the M365 recovery button to find the exact request envelope that
+     * may have appeared after the normal wait expired.
+     */
+    static async inspectExistingResponse(page, selector, startTag, endTag, options = {}) {
+        return page.evaluate(({ sel, sTag, eTag, responseContainers, stopSelectors }) => {
+            const visible = (node) => {
+                if (!node || !(node instanceof HTMLElement)) return false;
+                const style = window.getComputedStyle(node);
+                const rect = node.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0
+                    && style.display !== 'none'
+                    && style.visibility !== 'hidden';
+            };
+            const closestMatching = (node, selectors) => {
+                for (const candidate of selectors || []) {
+                    try {
+                        const matched = node && node.closest(candidate);
+                        if (matched) return matched;
+                    } catch (_) { }
+                }
+                return null;
+            };
+            const nodes = (() => {
+                try { return Array.from(document.querySelectorAll(sel)); } catch (_) { return []; }
+            })();
+            const containers = [];
+            const seen = new Set();
+            for (const node of nodes) {
+                const container = closestMatching(node, responseContainers) || node.parentElement || node;
+                if (!container || seen.has(container)) continue;
+                seen.add(container);
+                containers.push(container);
+            }
+            const isGenerating = (stopSelectors || []).some((candidate) => {
+                try { return Array.from(document.querySelectorAll(candidate)).some(visible); } catch (_) { return false; }
+            });
+            for (let index = containers.length - 1; index >= 0; index -= 1) {
+                const container = containers[index];
+                const rawText = String(container.innerText || container.textContent || '');
+                const startIndex = rawText.indexOf(sTag);
+                const endIndex = rawText.indexOf(eTag, startIndex + sTag.length);
+                if (startIndex < 0 || endIndex <= startIndex) continue;
+                const attachments = Array.from(container.querySelectorAll('a[href]')).map((anchor) => {
+                    const href = String(anchor.href || '');
+                    if (!/^https:\/\//i.test(href)) return null;
+                    const name = String(anchor.innerText || anchor.getAttribute('download') || href)
+                        .replace(/\s+/g, ' ')
+                        .trim()
+                        .slice(0, 240);
+                    return { url: href, name, mimeType: 'application/octet-stream', isRemote: true };
+                }).filter(Boolean);
+                return {
+                    found: true,
+                    busy: isGenerating,
+                    status: 'ENVELOPE_COMPLETE',
+                    text: rawText.substring(startIndex + sTag.length, endIndex).trim(),
+                    attachments,
+                };
+            }
+            return { found: false, busy: isGenerating, status: isGenerating ? 'GENERATING' : 'NOT_FOUND', text: '', attachments: [] };
+        }, {
+            sel: selector,
+            sTag: startTag,
+            eTag: endTag,
+            responseContainers: Array.isArray(options.responseContainerSelectors) && options.responseContainerSelectors.length > 0
+                ? options.responseContainerSelectors
+                : ['model-response', '.markdown', '.model-response-text', '.message-content', '[data-message-id]', '.conversation-turn'],
+            stopSelectors: Array.isArray(options.stopSelectors) && options.stopSelectors.length > 0
+                ? options.stopSelectors
+                : ['button[aria-label*="Stop" i]', 'button[aria-label*="停止" i]', '[data-testid*="stop" i]'],
+        });
+    }
+
+    /**
      * 在瀏覽器內等待 AI 回應信封完成
      * (此函式會傳入 page.evaluate 在瀏覽器上下文中執行)
      *
@@ -165,14 +240,22 @@ class ResponseExtractor {
                                 const href = a.href || "";
                                 if (!href || !href.startsWith('http')) return;
                                 const isDownload = a.hasAttribute('download');
-                                const hasFileExt = /\.(pdf|docx|xlsx|txt|zip|md|js|py)$/i.test(href);
+                                const linkText = String(a.innerText || a.textContent || '').trim();
+                                const hasFileExt = /\.(pdf|docx|xlsx|pptx|csv|txt|zip|md|js|py)(?:$|[?#])/i.test(href)
+                                    || /\.(pdf|docx|xlsx|pptx|csv|txt|zip|md|js|py)$/i.test(linkText);
                                 const isGoogleContent = href.includes('googleusercontent.com') || href.includes('blob:');
-                                if (isDownload || hasFileExt || isGoogleContent) {
+                                const looksLikeDownload = /download|attachment/i.test(href);
+                                if (isDownload || hasFileExt || isGoogleContent || looksLikeDownload) {
                                     let mime = 'application/octet-stream';
                                     if (href.endsWith('.pdf')) mime = 'application/pdf';
                                     else if (href.endsWith('.md')) mime = 'text/markdown';
                                     else if (href.endsWith('.txt')) mime = 'text/plain';
-                                    attachments.push({ url: href, mimeType: mime });
+                                    attachments.push({
+                                        url: href,
+                                        mimeType: mime,
+                                        name: linkText || a.getAttribute('download') || '下載檔案',
+                                        isRemote: true,
+                                    });
                                 }
                             });
                         }

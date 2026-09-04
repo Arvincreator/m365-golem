@@ -47,4 +47,28 @@ describe('ActionQueue', () => {
 
         expect(results).toEqual(['slow', 'priority', 'normal']);
     });
+
+    test('exposes running and queued action state for one conversation', async () => {
+        let releaseFirst;
+        const first = new Promise((resolve) => { releaseFirst = resolve; });
+
+        await queue.enqueue(null, async () => first, {
+            metadata: { conversationId: 'conversation-1', title: 'First action' },
+        });
+        await queue.enqueue(null, async () => undefined, {
+            metadata: { conversationId: 'conversation-1', title: 'Second action', actionCount: 2 },
+        });
+
+        expect(queue.getSnapshot({ conversationId: 'conversation-1' })).toEqual([
+            expect.objectContaining({ status: 'running', position: 0, title: 'First action' }),
+            expect.objectContaining({ status: 'queued', position: 1, title: 'Second action', actionCount: 2 }),
+        ]);
+        expect(queue.getSnapshot({ conversationId: 'another-conversation' })).toEqual([]);
+        releaseFirst();
+        for (let index = 0; index < 20; index += 1) {
+            if (!queue.isProcessing && queue.getSnapshot().length === 0) break;
+            await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        expect(queue.getSnapshot()).toEqual([]);
+    });
 });

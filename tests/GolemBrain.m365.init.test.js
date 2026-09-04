@@ -195,6 +195,41 @@ describe('GolemBrain m365-web bootstrap', () => {
         expect(PageInteractor).not.toHaveBeenCalled();
     });
 
+    test('rejects an M365 attachment that did not pass the local harness boundary', async () => {
+        const brain = new GolemBrain({ golemId: 'm365-untrusted-attachment-test' });
+        await expect(brain.sendMessage('read this', false, {
+            attachment: { files: [{ name: 'evidence.txt' }] },
+        })).rejects.toMatchObject({ code: 'M365_ATTACHMENT_UNTRUSTED' });
+        expect(PageInteractor).not.toHaveBeenCalled();
+    });
+
+    test('passes a trusted project-bound attachment manifest to the page interactor', async () => {
+        const { page, context } = makeContext('https://m365.cloud.microsoft/chat/conversation/test');
+        const brain = new GolemBrain({ golemId: 'm365-trusted-attachment-test' });
+        brain.page = page;
+        brain.context = context;
+        brain.isInitialized = true;
+        brain._refreshWebBackendDefinition();
+        const attachment = {
+            validatedByM365Harness: true,
+            files: [{ name: 'evidence.txt', path: 'C:\\staged\\evidence.txt', size: 8 }],
+        };
+
+        await brain.sendMessage('read this', false, { attachment });
+
+        const interactor = PageInteractor.mock.results.at(-1).value;
+        expect(interactor.interact).toHaveBeenCalledWith(
+            expect.any(String),
+            expect.any(Object),
+            false,
+            expect.any(String),
+            expect.any(String),
+            0,
+            attachment,
+            expect.objectContaining({ attachment })
+        );
+    });
+
     test('passes the first project-turn bootstrap flag and local persona directory into the M365 envelope', async () => {
         ConfigManager.CONFIG.M365_ACTIONS_ENABLED = true;
         const { page, context } = makeContext('https://m365.cloud.microsoft/chat/conversation/test');

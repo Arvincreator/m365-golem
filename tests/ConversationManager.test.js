@@ -66,6 +66,38 @@ describe('ConversationManager', () => {
         expect(cm.queue[0].text).toBe('priority');
     });
 
+    test('can wait until an attachment task has finished before releasing its staging lifecycle', async () => {
+        let releaseTransport;
+        mockBrain.sendMessage.mockImplementation(() => new Promise((resolve) => {
+            releaseTransport = () => resolve({
+                text: '[GOLEM_REPLY] AI Response',
+                attachments: [],
+                status: 'ENVELOPE_COMPLETE'
+            });
+        }));
+        cm = new ConversationManager(mockBrain, mockShunter, mockController);
+
+        let settled = false;
+        const completion = cm.enqueue(mockCtx, 'attachment request', {
+            bypassDebounce: true,
+            isPriority: true,
+            attachment: { validatedByM365Harness: true, files: [{ name: 'brief.pdf' }] },
+            waitForCompletion: true
+        }).then(() => {
+            settled = true;
+        });
+
+        await Promise.resolve();
+        await Promise.resolve();
+        expect(mockBrain.sendMessage).toHaveBeenCalled();
+        expect(settled).toBe(false);
+
+        releaseTransport();
+        await completion;
+        expect(mockShunter.dispatch).toHaveBeenCalled();
+        expect(settled).toBe(true);
+    });
+
     test('should request queue approval when busy', () => {
         cm = new ConversationManager(mockBrain, mockShunter, mockController);
         jest.spyOn(cm, '_processQueue').mockImplementation(() => {});
@@ -126,7 +158,7 @@ describe('ConversationManager', () => {
         );
         expect(mockShunter.dispatch).toHaveBeenCalledWith(
             mockCtx,
-            '[GOLEM_REPLY] AI Response',
+            expect.objectContaining({ text: '[GOLEM_REPLY] AI Response' }),
             mockBrain,
             mockController,
             expect.objectContaining({

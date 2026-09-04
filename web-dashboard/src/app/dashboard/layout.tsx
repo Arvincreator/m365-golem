@@ -11,6 +11,7 @@ import {
     ChevronRight,
     FileText,
     Folder,
+    FolderOpen,
     Gauge,
     Library,
     MessageSquarePlus,
@@ -19,6 +20,7 @@ import {
     Pencil,
     Plus,
     Plug,
+    PowerOff,
     Search,
     Settings,
     ShieldCheck,
@@ -57,6 +59,16 @@ import type {
 } from "@/lib/m365-workspace";
 
 type ProjectSort = "recent" | "name";
+type WorkspaceMode = "managed" | "create" | "existing";
+
+const EMPTY_PROJECT_FORM = {
+    name: "",
+    description: "",
+    instructions: "",
+    workspaceMode: "managed" as WorkspaceMode,
+    workspacePath: "",
+    workspaceFolderName: "",
+};
 
 const TOOL_ITEMS = [
     { label: "MCP 工具", href: "/dashboard/mcp", icon: Plug },
@@ -82,6 +94,7 @@ function CodexSidebar({ open, setOpen }: { open: boolean; setOpen: (value: boole
         hydrated,
         activeProjectId,
         activeConversationId,
+        clearSelection,
         selectProject,
         selectConversation,
     } = useM365WorkspaceSelection();
@@ -93,7 +106,10 @@ function CodexSidebar({ open, setOpen }: { open: boolean; setOpen: (value: boole
     const [creatingConversationProjectId, setCreatingConversationProjectId] = useState("");
     const [showProjectDialog, setShowProjectDialog] = useState(false);
     const [savingProject, setSavingProject] = useState(false);
-    const [projectForm, setProjectForm] = useState({ name: "", description: "", instructions: "" });
+    const [pickingFolder, setPickingFolder] = useState(false);
+    const [projectForm, setProjectForm] = useState(EMPTY_PROJECT_FORM);
+    const [projectTreeLoaded, setProjectTreeLoaded] = useState(false);
+    const [conversationTreesLoaded, setConversationTreesLoaded] = useState<Set<string>>(new Set());
     const [projectFilter, setProjectFilter] = useState("");
     const [projectSort, setProjectSort] = useState<ProjectSort>("recent");
     const [renamingConversation, setRenamingConversation] = useState<M365Conversation | null>(null);
@@ -102,6 +118,8 @@ function CodexSidebar({ open, setOpen }: { open: boolean; setOpen: (value: boole
     const [deletingConversation, setDeletingConversation] = useState<M365Conversation | null>(null);
     const [deletingConversationId, setDeletingConversationId] = useState("");
     const [sidebarError, setSidebarError] = useState("");
+    const [shutdownConfirmOpen, setShutdownConfirmOpen] = useState(false);
+    const [shuttingDown, setShuttingDown] = useState(false);
 
     const loadWorkspace = useCallback(async () => {
         try {
@@ -125,18 +143,47 @@ function CodexSidebar({ open, setOpen }: { open: boolean; setOpen: (value: boole
                     const result = await apiGet<{ conversations: M365Conversation[] }>(
                         apiUrl(`/api/projects/${encodeURIComponent(project.id)}/conversations`)
                     );
-                    return [project.id, result.conversations || []] as const;
+                    return { projectId: project.id, conversations: result.conversations || [], loaded: true };
                 } catch {
-                    return [project.id, []] as const;
+                    return { projectId: project.id, conversations: [] as M365Conversation[], loaded: false };
                 }
             }));
             setProjects(projectItems);
-            setConversationsByProject(Object.fromEntries(conversationEntries));
+            setConversationsByProject((current) => Object.fromEntries(conversationEntries.map((entry) => [
+                entry.projectId,
+                entry.loaded ? entry.conversations : (current[entry.projectId] || []),
+            ])));
+            setConversationTreesLoaded(new Set(
+                conversationEntries.filter((entry) => entry.loaded).map((entry) => entry.projectId)
+            ));
+            setProjectTreeLoaded(true);
             setSidebarError("");
         } catch (error) {
             setSidebarError(error instanceof Error ? error.message : "無法讀取專案清單");
         }
     }, []);
+
+    useEffect(() => {
+        if (!hydrated || !projectTreeLoaded || !activeProjectId) return;
+        if (!projects.some((project) => project.id === activeProjectId)) {
+            clearSelection();
+            return;
+        }
+        if (!activeConversationId || !conversationTreesLoaded.has(activeProjectId)) return;
+        const conversationExists = (conversationsByProject[activeProjectId] || [])
+            .some((conversation) => conversation.id === activeConversationId);
+        if (!conversationExists) selectProject(activeProjectId);
+    }, [
+        activeConversationId,
+        activeProjectId,
+        clearSelection,
+        conversationTreesLoaded,
+        conversationsByProject,
+        hydrated,
+        projectTreeLoaded,
+        projects,
+        selectProject,
+    ]);
 
     useEffect(() => {
         if (!hydrated) return;
@@ -174,9 +221,52 @@ function CodexSidebar({ open, setOpen }: { open: boolean; setOpen: (value: boole
     }, [projectFilter, projectSort, projects]);
     const ready = workspace?.enabled && workspace.encryptionConfigured;
 
+    const pickWorkspaceFolder = async () => {
+        setPickingFolder(true);
+        setSidebarError("");
+        try {
+            const result = await apiPost<{ cancelled: boolean; path: string | null }>(
+                apiUrl("/api/m365/workspace/pick-folder"),
+                {
+                    description: projectForm.workspaceMode === "create"
+                        ? "選擇要建立專案工作資料夾的上層位置"
+                        : "選擇要連結到這個專案的既有工作資料夾",
+                    initialPath: projectForm.workspacePath || undefined,
+                }
+            );
+            if (!result.cancelled && result.path) {
+                setProjectForm((current) => ({ ...current, workspacePath: result.path || "" }));
+            }
+        } catch (error) {
+            setSidebarError(error instanceof Error ? error.message : "無法開啟資料夾選擇視窗");
+        } finally {
+            setPickingFolder(false);
+        }
+    };
+
+    const shutdownM365Golem = async () => {
+        setShuttingDown(true);
+        setSidebarError("");
+        try {
+            const result = await apiPost<{ success?: boolean }>(apiUrl("/api/system/shutdown"));
+            if (!result.success) throw new Error("背景服務沒有接受關閉要求");
+            setShutdownConfirmOpen(false);
+            window.setTimeout(() => {
+                window.close();
+                window.setTimeout(() => {
+                    if (!window.closed) window.location.replace("about:blank");
+                }, 400);
+            }, 100);
+        } catch (error) {
+            setSidebarError(error instanceof Error ? error.message : "目前無法關閉 M365 Golem");
+            setShuttingDown(false);
+        }
+    };
+
     const createProject = async (event: React.FormEvent<HTMLFormElement>) => {
         event.preventDefault();
-        if (!projectForm.name.trim()) return;
+        if (!projectForm.name.trim()
+            || (projectForm.workspaceMode !== "managed" && !projectForm.workspacePath.trim())) return;
         setSavingProject(true);
         setSidebarError("");
         try {
@@ -184,12 +274,15 @@ function CodexSidebar({ open, setOpen }: { open: boolean; setOpen: (value: boole
                 name: projectForm.name.trim(),
                 description: projectForm.description.trim(),
                 instructions: projectForm.instructions.trim(),
+                workspaceMode: projectForm.workspaceMode,
+                workspacePath: projectForm.workspacePath.trim() || undefined,
+                workspaceFolderName: projectForm.workspaceFolderName.trim() || undefined,
             });
             setProjects((current) => [data.project, ...current]);
             setConversationsByProject((current) => ({ ...current, [data.project.id]: [] }));
             setExpandedProjectIds((current) => new Set(current).add(data.project.id));
             selectProject(data.project.id);
-            setProjectForm({ name: "", description: "", instructions: "" });
+            setProjectForm(EMPTY_PROJECT_FORM);
             setShowProjectDialog(false);
         } catch (error) {
             setSidebarError(error instanceof Error ? error.message : "目前無法建立專案");
@@ -570,6 +663,20 @@ function CodexSidebar({ open, setOpen }: { open: boolean; setOpen: (value: boole
 
             <div className="space-y-3 border-t border-sidebar-border/70 p-3">
                 {sidebarError && open && <p className="line-clamp-2 text-[10px] text-destructive">{sidebarError}</p>}
+                <button
+                    type="button"
+                    onClick={() => setShutdownConfirmOpen(true)}
+                    disabled={shuttingDown}
+                    title={!open ? "關閉 M365 Golem" : undefined}
+                    aria-label="關閉 M365 Golem"
+                    className={cn(
+                        "flex h-9 w-full items-center rounded-lg text-xs text-muted-foreground transition-colors hover:bg-destructive/10 hover:text-destructive disabled:opacity-50",
+                        open ? "gap-2 px-2" : "justify-center"
+                    )}
+                >
+                    <PowerOff className="h-4 w-4 shrink-0" />
+                    {open && <span className="font-medium">關閉程式</span>}
+                </button>
                 <div className={cn("flex items-center", open ? "justify-between" : "justify-center")}>
                     {open && <span className="text-xs text-muted-foreground">顯示模式</span>}
                     <ThemeToggle />
@@ -587,8 +694,8 @@ function CodexSidebar({ open, setOpen }: { open: boolean; setOpen: (value: boole
                 </div>
             </div>
 
-            <Dialog open={showProjectDialog} onOpenChange={(nextOpen) => !savingProject && setShowProjectDialog(nextOpen)}>
-                <DialogContent className="sm:max-w-xl">
+            <Dialog open={showProjectDialog} onOpenChange={(nextOpen) => !savingProject && !pickingFolder && setShowProjectDialog(nextOpen)}>
+                <DialogContent className="max-h-[90vh] overflow-y-auto sm:max-w-2xl">
                     <form onSubmit={createProject} className="grid gap-4">
                         <DialogHeader>
                             <DialogTitle>新增專案</DialogTitle>
@@ -596,6 +703,11 @@ function CodexSidebar({ open, setOpen }: { open: boolean; setOpen: (value: boole
                                 專案會隔離固定背景與對話脈絡；請勿在固定指示中填入密碼、MFA 或瀏覽器機密。
                             </DialogDescription>
                         </DialogHeader>
+                        {sidebarError && (
+                            <p role="alert" className="rounded-lg border border-destructive/40 bg-destructive/10 px-3 py-2 text-xs leading-5 text-destructive">
+                                {sidebarError}
+                            </p>
+                        )}
                         <label className="grid gap-1.5 text-sm">
                             <span className="font-medium">專案名稱 *</span>
                             <input
@@ -608,6 +720,91 @@ function CodexSidebar({ open, setOpen }: { open: boolean; setOpen: (value: boole
                                 placeholder="例：A 客戶－年度查核"
                             />
                         </label>
+                        <fieldset className="grid gap-2.5">
+                            <legend className="text-sm font-medium">工作資料夾</legend>
+                            <div className="grid gap-2 sm:grid-cols-3">
+                                {([
+                                    ["managed", "Golem 預設位置", "相容既有專案，適合快速開始"],
+                                    ["create", "建立新資料夾", "在你選擇的位置建立專案資料夾"],
+                                    ["existing", "連結既有資料夾", "直接把現有工作目錄交給此專案"],
+                                ] as const).map(([mode, label, description]) => (
+                                    <button
+                                        key={mode}
+                                        type="button"
+                                        aria-pressed={projectForm.workspaceMode === mode}
+                                        onClick={() => setProjectForm((current) => ({
+                                            ...current,
+                                            workspaceMode: mode,
+                                            workspacePath: mode === "managed" ? "" : current.workspacePath,
+                                        }))}
+                                        className={cn(
+                                            "rounded-xl border p-3 text-left transition-colors",
+                                            projectForm.workspaceMode === mode
+                                                ? "border-primary bg-primary/10"
+                                                : "border-border hover:bg-accent"
+                                        )}
+                                    >
+                                        <span className="block text-sm font-medium">{label}</span>
+                                        <span className="mt-1 block text-[11px] leading-4 text-muted-foreground">{description}</span>
+                                    </button>
+                                ))}
+                            </div>
+
+                            {projectForm.workspaceMode !== "managed" && (
+                                <div className="grid gap-2 rounded-xl border border-border bg-muted/30 p-3">
+                                    <div className="grid gap-1.5 text-sm">
+                                        <span id="m365-workspace-path-label" className="font-medium">
+                                            {projectForm.workspaceMode === "create" ? "上層資料夾 *" : "既有工作資料夾 *"}
+                                        </span>
+                                        <div className="flex gap-2">
+                                            <input
+                                                required
+                                                aria-labelledby="m365-workspace-path-label"
+                                                value={projectForm.workspacePath}
+                                                onChange={(event) => setProjectForm((current) => ({ ...current, workspacePath: event.target.value }))}
+                                                className="min-w-0 flex-1 rounded-lg border border-input bg-background px-3 py-2.5 text-xs outline-none focus:ring-2 focus:ring-ring"
+                                                placeholder={projectForm.workspaceMode === "create" ? "例：C:\\Users\\你\\Desktop" : "例：C:\\Work\\客戶專案"}
+                                            />
+                                            <button
+                                                type="button"
+                                                onClick={() => void pickWorkspaceFolder()}
+                                                disabled={pickingFolder || savingProject}
+                                                className="inline-flex shrink-0 items-center gap-2 rounded-lg border border-border px-3 py-2 text-xs font-medium hover:bg-accent disabled:opacity-50"
+                                            >
+                                                <FolderOpen className="h-4 w-4" />
+                                                {pickingFolder ? "選擇中…" : "選擇資料夾"}
+                                            </button>
+                                        </div>
+                                    </div>
+                                    {projectForm.workspaceMode === "create" && (
+                                        <label className="grid gap-1.5 text-sm">
+                                            <span className="font-medium">新資料夾名稱</span>
+                                            <input
+                                                maxLength={120}
+                                                value={projectForm.workspaceFolderName}
+                                                onChange={(event) => setProjectForm((current) => ({ ...current, workspaceFolderName: event.target.value }))}
+                                                className="rounded-lg border border-input bg-background px-3 py-2.5 text-xs outline-none focus:ring-2 focus:ring-ring"
+                                                placeholder={projectForm.name.trim() || "未填時會依專案名稱產生"}
+                                            />
+                                        </label>
+                                    )}
+                                    <p className="text-[11px] leading-5 text-muted-foreground">
+                                        Golem 只會在選定的工作資料夾建立或維護 <code>AGENTS.md</code>、<code>.golem</code>、<code>references</code> 與 <code>outputs</code>。
+                                        若既有資料夾已有非 Golem 管理的 <code>AGENTS.md</code>，系統會拒絕建立，不會覆寫。
+                                    </p>
+                                    {/([\\/])OneDrive(?:[ \\/-]|$)/i.test(projectForm.workspacePath) && (
+                                        <p className="rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-2 text-[11px] leading-5 text-amber-700 dark:text-amber-300">
+                                            這個位置看起來位於 OneDrive。大型依賴、向量索引與工具輸出可能造成同步負擔，建議選本機非同步資料夾。
+                                        </p>
+                                    )}
+                                </div>
+                            )}
+                            {projectForm.workspaceMode === "managed" && (
+                                <p className="text-[11px] leading-5 text-muted-foreground">
+                                    專案會存放在 M365 Golem 的本機資料目錄。之後的對話、專案規則與工具工作都會固定使用同一個工作資料夾。
+                                </p>
+                            )}
+                        </fieldset>
                         <label className="grid gap-1.5 text-sm">
                             <span className="font-medium">用途說明</span>
                             <input
@@ -633,14 +830,17 @@ function CodexSidebar({ open, setOpen }: { open: boolean; setOpen: (value: boole
                             <button
                                 type="button"
                                 onClick={() => setShowProjectDialog(false)}
-                                disabled={savingProject}
+                                disabled={savingProject || pickingFolder}
                                 className="rounded-lg border border-border px-4 py-2 text-sm hover:bg-accent disabled:opacity-50"
                             >
                                 取消
                             </button>
                             <button
                                 type="submit"
-                                disabled={savingProject || !projectForm.name.trim()}
+                                disabled={savingProject
+                                    || pickingFolder
+                                    || !projectForm.name.trim()
+                                    || (projectForm.workspaceMode !== "managed" && !projectForm.workspacePath.trim())}
                                 className="rounded-lg bg-primary px-4 py-2 text-sm font-medium text-primary-foreground disabled:opacity-50"
                             >
                                 {savingProject ? "建立中…" : "建立專案"}
@@ -709,6 +909,16 @@ function CodexSidebar({ open, setOpen }: { open: boolean; setOpen: (value: boole
                 confirmText="刪除對話"
                 variant="danger"
                 isLoading={Boolean(deletingConversationId)}
+            />
+            <ConfirmModal
+                isOpen={shutdownConfirmOpen}
+                onClose={() => !shuttingDown && setShutdownConfirmOpen(false)}
+                onConfirm={() => void shutdownM365Golem()}
+                title="關閉 M365 Golem？"
+                description="這會停止 M365 專用 Edge 連線、MCP 子程序與本機背景服務，並關閉目前工作台頁面。進行中的對話或工具動作會中斷；其他 Edge 視窗不受影響。"
+                confirmText={shuttingDown ? "正在關閉…" : "關閉程式"}
+                variant="danger"
+                isLoading={shuttingDown}
             />
         </aside>
     );

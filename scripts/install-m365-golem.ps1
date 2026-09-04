@@ -36,7 +36,7 @@ $requiredFiles = @(
   'web-dashboard\package.json',
   'web-dashboard\package-lock.json',
   'M365-POC.env.example',
-  'Start-M365-POC.bat',
+  'Start-Golem.bat',
   'integrations\m365-session-bridge\package.json'
 )
 foreach ($requiredFile in $requiredFiles) {

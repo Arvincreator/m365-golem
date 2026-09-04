@@ -1,34 +1,17 @@
+const { parseM365PlanBlock } = require('../services/M365PlanProtocol');
+const {
+    extractJsonPayloadFromRenderedCode,
+    stripSequentialRenderedLineNumbers,
+} = require('./M365RenderedCode');
+
 // ============================================================
 // ⚡ ResponseParser (JSON 解析器 - 寬鬆版 + 集中化 + 終極矯正 + 穿透思考模式)
 // ============================================================
 class ResponseParser {
     static _stripRenderedCodeLineNumbers(raw) {
-        if (!raw) return "";
-        const text = String(raw);
-        const lines = text.split(/\r?\n/);
-        const gutterLines = lines
-            .map((line, index) => ({ index, value: line.trim() }))
-            .filter((entry) => /^\d+$/.test(entry.value));
-
-        // M365 的程式碼檢視會把 gutter 行號併入容器 innerText，例如：
-        // 1\n[\n2\n{...。只接受從 1 開始且完整遞增的行號序列，
-        // 避免把 Action 參數裡真正的數字內容誤刪。
-        if (gutterLines.length < 2) return text;
-        const hasSequentialGutter = gutterLines.every(
-            (entry, position) => Number(entry.value) === position + 1
-        );
-        if (!hasSequentialGutter) return text;
-
-        const gutterIndexes = new Set(gutterLines.map((entry) => entry.index));
-        const cleaned = lines
-            .filter((_, index) => !gutterIndexes.has(index))
-            .join('\n')
-            .trim();
-
-        if (!/^[\[{]/.test(cleaned) || !/"action"\s*:/.test(cleaned)) {
-            return text;
-        }
-        return cleaned;
+        return stripSequentialRenderedLineNumbers(raw, {
+            payloadPattern: /^\s*[\[{][\s\S]*"action"\s*:/,
+        });
     }
 
     static _extractProtocolBlock(raw, tagName) {
@@ -40,7 +23,7 @@ class ResponseParser {
         // 的同一行；這仍是明確的協議邊界，不能因此漏掉 Action。
         const lineStartRe = new RegExp(`(?:^|\\n)\\[${escaped}\\]\\s*`, 'i');
         const protocolTransitionRe = new RegExp(
-            `(?:\\[\\/(?:GOLEM_(?:MEMORY|PROJECT_MEMORY|USER_MEMORY|ACTION|REPLY)|AVOID_MEMORY)\\]|` +
+            `(?:\\[\\/(?:GOLEM_(?:MEMORY|PROJECT_MEMORY|USER_MEMORY|ACTION|PLAN|REPLY)|AVOID_MEMORY)\\]|` +
             `\\[{1,2}\\s*BEGIN\\s*:[^\\]\\n\\r]+?\\]{1,2})\\s*` +
             `\\[${escaped}\\]\\s*`,
             'i'
@@ -49,7 +32,7 @@ class ResponseParser {
         // blocks may omit closing tags: [GOLEM_MEMORY]... [GOLEM_ACTION]...
         // Only enable this loose scan when the whole response itself starts as a
         // protocol response, so ordinary prose mentioning a tag is not promoted.
-        const protocolResponseRe = /^\s*(?:\[{1,2}\s*BEGIN\s*:[^\]\n\r]+?\]{1,2}\s*)?\[(?:GOLEM_(?:MEMORY|PROJECT_MEMORY|USER_MEMORY|ACTION|REPLY)|AVOID_MEMORY)\]/i;
+        const protocolResponseRe = /^\s*(?:\[{1,2}\s*BEGIN\s*:[^\]\n\r]+?\]{1,2}\s*)?\[(?:GOLEM_(?:MEMORY|PROJECT_MEMORY|USER_MEMORY|ACTION|PLAN|REPLY)|AVOID_MEMORY)\]/i;
         const compactTagRe = new RegExp(`\\[${escaped}\\]\\s*`, 'i');
         const start = lineStartRe.exec(text)
             || protocolTransitionRe.exec(text)
@@ -59,7 +42,7 @@ class ResponseParser {
         const rest = text.slice(from);
         const closeRe = new RegExp(`\\[\\/${escaped}\\]`, 'i');
         const close = closeRe.exec(rest);
-        const endRe = /\s*\[(?:\/?(?:GOLEM_(?:MEMORY|PROJECT_MEMORY|USER_MEMORY|ACTION|REPLY)|AVOID_MEMORY))\]|\s*\[\[?\s*END\s*:[^\]\n\r]+?\]?\]?/i;
+        const endRe = /\s*\[(?:\/?(?:GOLEM_(?:MEMORY|PROJECT_MEMORY|USER_MEMORY|ACTION|PLAN|REPLY)|AVOID_MEMORY))\]|\s*\[\[?\s*END\s*:[^\]\n\r]+?\]?\]?/i;
         const end = endRe.exec(rest);
         const endIndexes = [close, end]
             .filter(Boolean)
@@ -83,8 +66,8 @@ class ResponseParser {
             .replace(/\[\[\s*END\s*:[^\]\n\r]+?\]/gi, '')
             .replace(/\[\s*BEGIN\s*:[^\]\n\r]+?\]\]/gi, '')
             .replace(/\[\s*END\s*:[^\]\n\r]+?\]\]/gi, '')
-            .replace(/\[\/(?:GOLEM_(?:MEMORY|PROJECT_MEMORY|USER_MEMORY|ACTION|REPLY)|AVOID_MEMORY)\]/gi, '')
-            .replace(/(?:^|\n)\s*\[(?:\/?GOLEM_(?:MEMORY|PROJECT_MEMORY|USER_MEMORY|ACTION|REPLY)|\/?AVOID_MEMORY)\]\s*(?=\n|$)/gi, '\n')
+            .replace(/\[\/(?:GOLEM_(?:MEMORY|PROJECT_MEMORY|USER_MEMORY|ACTION|PLAN|REPLY)|AVOID_MEMORY)\]/gi, '')
+            .replace(/(?:^|\n)\s*\[(?:\/?GOLEM_(?:MEMORY|PROJECT_MEMORY|USER_MEMORY|ACTION|PLAN|REPLY)|\/?AVOID_MEMORY)\]\s*(?=\n|$)/gi, '\n')
             .replace(/^\s*null\s*$/i, '')
             .trim();
     }
@@ -143,6 +126,15 @@ class ResponseParser {
             }
         }
 
+        const planResult = parseM365PlanBlock(rawText);
+        if (planResult.present) {
+            if (planResult.ok) parsed.plan = planResult.plan;
+            else parsed.planError = {
+                code: planResult.errorCode,
+                message: planResult.message,
+            };
+        }
+
         // 2. 獨立擷取 ACTION，並執行終極矯正
         const actionBlock = ResponseParser._extractProtocolBlock(rawText, 'GOLEM_ACTION');
         if (actionBlock) {
@@ -151,6 +143,10 @@ class ResponseParser {
             // 常見模型輸出: 在 JSON 前多打一行 "JSON"
             jsonCandidate = jsonCandidate.replace(/^\s*json\s*\n/i, '').trim();
             jsonCandidate = ResponseParser._stripRenderedCodeLineNumbers(jsonCandidate);
+            jsonCandidate = extractJsonPayloadFromRenderedCode(jsonCandidate, {
+                allowArray: true,
+                payloadPattern: /^\s*[\[{][\s\S]*"action"\s*:/,
+            });
 
             if (jsonCandidate && jsonCandidate !== 'null') {
                 try {
@@ -254,7 +250,8 @@ class ResponseParser {
 
         // ✨ [防呆機制] 如果完全沒有抓到任何結構化標籤，就把整段文字 (過濾掉雜訊) 當作 Reply
         if (!parsed.memory && !parsed.projectMemory && !parsed.userMemory
-            && !parsed.avoidMemory && parsed.actions.length === 0 && !parsed.reply) {
+            && !parsed.avoidMemory && !parsed.plan && !parsed.planError
+            && parsed.actions.length === 0 && !parsed.reply) {
             // 濾掉 Thinking Mode 常見的雜訊字眼
             let cleanRaw = rawText
                 .replace(/Assessing My Capabilities/gi, '')

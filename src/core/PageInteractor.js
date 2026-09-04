@@ -89,8 +89,10 @@ class PageInteractor {
             // 1. 捕獲基準文字
             const baseline = await this._captureBaseline(selectors.response);
 
-            // 1.5 處理附件貼入 (如果有的話) - 模擬人類 Ctrl+V / Cmd+V
-            if (attachment && attachment.path) {
+            // 1.5 M365 附件使用可見頁面的原生 file input；舊後端保留原本貼上流程。
+            if (attachment && this.backendDefinition.id === 'm365-web') {
+                await this._attachM365Files(attachment);
+            } else if (attachment && attachment.path) {
                 await this._attachFile(selectors.input, attachment.path, attachment.mimeType);
             }
 
@@ -100,13 +102,32 @@ class PageInteractor {
             // 3. 等待輸入穩定
             await new Promise(r => setTimeout(r, TIMINGS.INPUT_DELAY));
 
-            // 4. 發送訊息 (使用物理 Enter 爆破法)
+            // M365 first uploads pasted/selected files to OneDrive. A visible
+            // attachment card is not sufficient: wait until upload activity
+            // stops and the real send control becomes enabled.
+            if (attachment && this.backendDefinition.id === 'm365-web') {
+                await this._waitForM365AttachmentUploadReady(
+                    attachment,
+                    selectors.send,
+                    options.attachmentUploadTimeoutMs
+                );
+            }
+
+            // 4. 發送訊息。M365 只允許點擊已啟用的真正送出鍵，絕不以 Enter 強送。
             await this._clickSend(selectors.send, {
                 responseSelector: selectors.response,
                 baseline,
                 startTag,
-                payloadLength: String(payload || '').length
+                payloadLength: String(payload || '').length,
+                hasAttachment: Boolean(attachment && this.backendDefinition.id === 'm365-web')
             });
+            if (typeof options.onSendAccepted === 'function') {
+                await options.onSendAccepted({
+                    startTag,
+                    endTag,
+                    acceptedAt: Date.now(),
+                });
+            }
 
             // 5. 若為系統訊息，延遲後直接返回
             if (isSystem) {
@@ -129,7 +150,10 @@ class PageInteractor {
                 responseOptions.stableFallbackThreshold = Number(this.backendDefinition.unwrappedResponseStableThreshold);
             }
             if (this.backendDefinition.id === 'm365-web') {
-                responseOptions.extractAttachments = false;
+                // Preserve only links that are visibly rendered in the M365
+                // answer. They remain remote links; the harness does not fetch
+                // them with hidden APIs or browser cookies.
+                responseOptions.extractAttachments = true;
                 responseOptions.diagnosticSelectors = Array.isArray(this.backendDefinition.responseDiagnosticSelectors)
                     ? this.backendDefinition.responseDiagnosticSelectors
                     : [];
@@ -187,7 +211,9 @@ class PageInteractor {
         } catch (e) {
             console.warn(`⚠️ [Brain] 互動失敗: ${e.message}`);
 
-            if (retryCount === 0) {
+            const postSendM365Failure = this.backendDefinition.id === 'm365-web'
+                && ['M365_RESPONSE_NOT_FOUND', 'M365_SEND_UNCONFIRMED'].includes(String(e && e.code || ''));
+            if (retryCount === 0 && !postSendM365Failure) {
                 console.log('🩺 [Brain] 啟動 DOM Doctor 進行 Response 診斷...');
                 const healed = await this._healSelector('response', selectors);
                 if (healed) {
@@ -751,6 +777,107 @@ class PageInteractor {
         return false;
     }
 
+    async _waitForM365AttachmentUploadReady(attachment, sendSelector, explicitTimeoutMs = null, safetyOptions = {}) {
+        const configured = Number(explicitTimeoutMs);
+        const timeoutMs = Number.isFinite(configured) && configured > 0
+            ? Math.min(configured, 180000)
+            : 90000;
+        const configuredMinimumWait = Number(safetyOptions.minimumWaitMs);
+        const minimumWaitMs = Number.isFinite(configuredMinimumWait) && configuredMinimumWait >= 0
+            ? configuredMinimumWait
+            : 1500;
+        const configuredStableSamples = Number(safetyOptions.stableSamples);
+        const stableSamplesRequired = Number.isFinite(configuredStableSamples) && configuredStableSamples > 0
+            ? Math.max(1, Math.floor(configuredStableSamples))
+            : 3;
+        const configuredPollInterval = Number(safetyOptions.pollIntervalMs);
+        const pollIntervalMs = Number.isFinite(configuredPollInterval) && configuredPollInterval >= 0
+            ? configuredPollInterval
+            : 350;
+        const startedAt = Date.now();
+        let consecutiveReadySamples = 0;
+        while (Date.now() - startedAt < timeoutMs) {
+            const uploadState = await this.page.evaluate(({ editorSelector, names }) => {
+                const visible = (node) => {
+                    if (!node || !(node instanceof HTMLElement)) return false;
+                    const style = window.getComputedStyle(node);
+                    const rect = node.getBoundingClientRect();
+                    return rect.width > 0 && rect.height > 0 && style.display !== 'none'
+                        && style.visibility !== 'hidden' && style.opacity !== '0';
+                };
+                const editors = Array.from(document.querySelectorAll(editorSelector)).filter(visible);
+                editors.sort((a, b) => {
+                    const ar = a.getBoundingClientRect();
+                    const br = b.getBoundingClientRect();
+                    return (br.bottom - ar.bottom) || (br.left - ar.left);
+                });
+                const composer = editors[0] || null;
+                const root = composer
+                    ? (composer.closest('form') || composer.parentElement?.parentElement || document.body)
+                    : document.body;
+                const text = String(root && root.innerText || '').toLowerCase();
+                const errorText = [
+                    'upload failed', 'failed to upload', '上傳失敗', '無法上傳',
+                    '檔案上傳失敗', 'file is not supported', '不支援此檔案',
+                ].find((value) => text.includes(value)) || '';
+                const progressSelectors = [
+                    '[role="progressbar"]',
+                    '[aria-busy="true"]',
+                    '[aria-label*="uploading" i]',
+                    '[aria-label*="processing" i]',
+                    '[aria-label*="正在上傳"]',
+                    '[aria-label*="處理中"]',
+                    '[data-testid*="progress" i]',
+                    '[class*="upload-progress" i]',
+                    '[class*="uploading" i]',
+                ];
+                const hasVisibleProgress = progressSelectors.some((selector) => {
+                    try { return Array.from(root.querySelectorAll(selector)).some(visible); } catch (_) { return false; }
+                });
+                const hasProgressText = /uploading|preparing file|processing file|正在上傳|上傳中|正在處理附件|準備檔案/.test(text);
+                const bodyText = document.body ? String(document.body.innerText || '') : '';
+                const labelledText = Array.from(document.querySelectorAll('[aria-label], [title]'))
+                    .map((node) => `${node.getAttribute('aria-label') || ''} ${node.getAttribute('title') || ''}`)
+                    .join('\n');
+                const searchableText = `${bodyText}\n${labelledText}`.toLocaleLowerCase();
+                const everyNameVisible = names.every((name) => searchableText.includes(String(name).toLocaleLowerCase()));
+                return {
+                    errorText,
+                    pending: hasVisibleProgress || hasProgressText,
+                    everyNameVisible,
+                };
+            }, {
+                editorSelector: this._getComposerSelectors().join(', '),
+                names: (attachment.files || []).map((file) => String(file.name || '')),
+            }).catch(() => ({ errorText: '', pending: true, everyNameVisible: false }));
+
+            if (uploadState.errorText) {
+                const error = new Error(`Microsoft 365 Copilot 回報附件上傳失敗：${uploadState.errorText}`);
+                error.code = 'M365_ATTACHMENT_UPLOAD_FAILED';
+                throw error;
+            }
+            if (!uploadState.pending && uploadState.everyNameVisible) {
+                const sendTarget = await this._tryClickSendButton(sendSelector);
+                if (sendTarget && sendTarget.clicked) {
+                    consecutiveReadySamples += 1;
+                    const waitedLongEnough = Date.now() - startedAt >= minimumWaitMs;
+                    if (waitedLongEnough && consecutiveReadySamples >= stableSamplesRequired) {
+                        console.log('✅ [PageInteractor] M365 附件已完成 OneDrive 上傳，送出按鈕已連續穩定啟用。');
+                        return;
+                    }
+                } else {
+                    consecutiveReadySamples = 0;
+                }
+            } else {
+                consecutiveReadySamples = 0;
+            }
+            await new Promise(r => setTimeout(r, pollIntervalMs));
+        }
+        const error = new Error('Microsoft 365 Copilot 的附件仍在上傳或送出按鈕尚未啟用；系統已停止，不會按 Enter 或自動重送。');
+        error.code = 'M365_ATTACHMENT_UPLOAD_TIMEOUT';
+        throw error;
+    }
+
     async _waitForSendTarget(sendSelector, timeoutMs = 5000) {
         const startedAt = Date.now();
         let lastTarget = null;
@@ -763,6 +890,10 @@ class PageInteractor {
     }
 
     async _clickSend(sendSelector, options = {}) {
+        const isM365 = this.backendDefinition.id === 'm365-web';
+        const hasM365Attachment = isM365 && options.hasAttachment === true;
+        let usedKeyboardSubmit = false;
+
         // 1. 確保焦點回到底部 Gemini composer，而不是頁面上的舊 editable。
         try {
             const focusedComposer = await this._focusBestComposer(this._getComposerSelectors().join(', '));
@@ -786,38 +917,69 @@ class PageInteractor {
         const sendTarget = await this._waitForSendTarget(sendSelector, sendReadyTimeout);
 
         if (!sendTarget || !sendTarget.clicked) {
+            if (hasM365Attachment) {
+                const sendError = new Error('Microsoft 365 Copilot 的送出按鈕尚未啟用；為避免在附件上傳期間鎖住草稿，系統已停止且不會改按 Enter。');
+                sendError.code = 'M365_SEND_NOT_READY';
+                throw sendError;
+            }
             await this._pressSubmitKeys();
+            usedKeyboardSubmit = true;
             console.warn(`⚠️ [PageInteractor] 找不到可點擊的送出按鈕，已嘗試鍵盤送出。${sendTarget?.diagnostics ? ` 候選: ${sendTarget.diagnostics}` : ''}`);
         } else {
             console.log(`🎯 [PageInteractor] 找到送出候選按鈕 score=${sendTarget.score || 0} label="${sendTarget.label || ''}"`);
             await this._performSendClick(sendTarget);
         }
 
-        const accepted = await this._waitForSendAccepted(sendOptions);
+        let accepted = await this._waitForSendAccepted(sendOptions);
         if (!accepted) {
-            console.warn(`⚠️ [PageInteractor] ${this.backendLabel} 草稿尚未送出，進行第二次送出補強。`);
-            const retryTarget = await this._waitForSendTarget(sendSelector, Math.min(sendReadyTimeout, 5000));
-            if (!retryTarget || !retryTarget.clicked) {
-                await this._pressSubmitKeys();
+            const draftBeforeRetry = await this._inspectComposerDraftState(options.startTag || '').catch(() => null);
+            const currentDraftRemains = draftBeforeRetry
+                ? (options.startTag ? draftBeforeRetry.hasStartTag : draftBeforeRetry.hasDraft)
+                : true;
+
+            // A cleared current envelope is itself an acceptance signal. If the
+            // exact M365 envelope is still visible, use only one bounded retry:
+            // text-only messages may use the original Golem Enter fallback,
+            // while attachment messages must retry the real Send button only.
+            if (isM365 && !currentDraftRemains) {
+                accepted = true;
             } else {
-                console.log(`🎯 [PageInteractor] 第二次送出候選按鈕 score=${retryTarget.score || 0} label="${retryTarget.label || ''}"`);
-                await this._performSendClick(retryTarget);
-                await this._focusBestComposer(this._getComposerSelectors().join(', ')).catch(() => null);
+                console.warn(`⚠️ [PageInteractor] ${this.backendLabel} 草稿尚未送出，進行一次送出補強。`);
+                if (isM365 && !hasM365Attachment && !usedKeyboardSubmit) {
+                    await this._pressSubmitKeys();
+                    usedKeyboardSubmit = true;
+                    console.warn('⌨️ [PageInteractor] M365 純文字草稿仍在，已使用一次 Enter 備援；附件訊息不會走此路徑。');
+                } else {
+                    const retryTarget = await this._waitForSendTarget(sendSelector, Math.min(sendReadyTimeout, 5000));
+                    if (!retryTarget || !retryTarget.clicked) {
+                        if (!isM365) await this._pressSubmitKeys();
+                    } else {
+                        console.log(`🎯 [PageInteractor] 第二次送出候選按鈕 score=${retryTarget.score || 0} label="${retryTarget.label || ''}"`);
+                        await this._performSendClick(retryTarget);
+                        await this._focusBestComposer(this._getComposerSelectors().join(', ')).catch(() => null);
+                    }
+                }
+                accepted = await this._waitForSendAccepted(sendOptions);
             }
-            const retryAccepted = await this._waitForSendAccepted(sendOptions);
-            if (!retryAccepted) {
+            if (!accepted) {
                 const sendError = new Error(`${this.backendLabel} 草稿未送出：已植入文字，但送出按鈕沒有啟用或訊息沒有離開輸入框。`);
-                if (this.backendDefinition.id === 'm365-web') sendError.code = 'M365_SEND_UNCONFIRMED';
+                if (isM365) sendError.code = 'M365_SEND_UNCONFIRMED';
                 throw sendError;
             }
         }
         let draftState = await this._inspectComposerDraftState(options.startTag || '').catch(() => null);
         draftState = draftState || { hasDraft: false, length: 0, hasStartTag: false };
-        if (draftState.hasDraft) {
+        const currentDraftRemains = options.startTag ? draftState.hasStartTag : draftState.hasDraft;
+        if (currentDraftRemains) {
+            if (isM365) {
+                const sendError = new Error(`${this.backendLabel} 草稿未送出：輸入框仍殘留目前信封內容（len=${draftState.length}, startTag=${draftState.hasStartTag}）。`);
+                sendError.code = 'M365_SEND_UNCONFIRMED';
+                throw sendError;
+            }
             console.warn(`⚠️ [PageInteractor] 偵測到草稿仍在輸入框（len=${draftState.length}, startTag=${draftState.hasStartTag}），執行第三次送出補強。`);
             const thirdTarget = await this._tryClickSendButton(sendSelector);
             if (!thirdTarget || !thirdTarget.clicked) {
-                await this._pressSubmitKeys();
+                if (this.backendDefinition.id !== 'm365-web') await this._pressSubmitKeys();
             } else {
                 console.log(`🎯 [PageInteractor] 第三次送出候選按鈕 score=${thirdTarget.score || 0} label="${thirdTarget.label || ''}"`);
                 await this._performSendClick(thirdTarget);
@@ -827,7 +989,6 @@ class PageInteractor {
             draftState = draftState || { hasDraft: false, length: 0, hasStartTag: false };
             if (draftState.hasDraft) {
                 const sendError = new Error(`${this.backendLabel} 草稿未送出：輸入框仍殘留內容（len=${draftState.length}, startTag=${draftState.hasStartTag}）。`);
-                if (this.backendDefinition.id === 'm365-web') sendError.code = 'M365_SEND_UNCONFIRMED';
                 throw sendError;
             }
         }
@@ -1105,6 +1266,8 @@ class PageInteractor {
                     .map((editor) => textOf(editor).trim())
                     .filter(Boolean);
                 const composerTextLength = composerTexts.reduce((max, text) => Math.max(max, text.length), 0);
+                const composerHasStartTag = Boolean(startTag && composerTexts.some((text) => text.includes(startTag)));
+                const composerHasEnvelope = composerHasStartTag || composerTexts.some((text) => /\[\[?BEGIN\s*:/i.test(text));
                 const buttons = Array.from(document.querySelectorAll('button, [role="button"], [aria-label]')).filter(visible);
                 const hasStop = buttons.some((button) => {
                     const label = [
@@ -1176,7 +1339,10 @@ class PageInteractor {
                     (composerLikelyCleared ? 1 : 0);
 
                 return {
+                    composerCount: editors.length,
                     composerTextLength,
+                    composerHasStartTag,
+                    composerHasEnvelope,
                     hasStop,
                     hasDisabledSend,
                     responseChanged,
@@ -1194,7 +1360,10 @@ class PageInteractor {
                     ? this.backendDefinition.responseContainerSelectors
                     : ['model-response', '.model-response-text', '.message-content', '[data-message-id]', '.conversation-turn'],
             }).catch(() => ({
+                composerCount: 0,
                 composerTextLength: 1,
+                composerHasStartTag: Boolean(options.startTag),
+                composerHasEnvelope: Boolean(options.startTag),
                 hasStop: false,
                 hasDisabledSend: false,
                 responseChanged: false,
@@ -1205,7 +1374,10 @@ class PageInteractor {
             }));
 
             const safeState = state || {
+                composerCount: 0,
                 composerTextLength: 1,
+                composerHasStartTag: Boolean(options.startTag),
+                composerHasEnvelope: Boolean(options.startTag),
                 hasStop: false,
                 hasDisabledSend: false,
                 responseChanged: false,
@@ -1214,6 +1386,18 @@ class PageInteractor {
                 composerLikelyCleared: false,
                 matchedSignals: 0
             };
+            if (this.backendDefinition.id === 'm365-web' && options.startTag) {
+                // M365 can expose transient disabled/stop controls that look
+                // like acceptance even when the full Golem envelope remains in
+                // the composer. The current envelope must first disappear.
+                if (safeState.composerHasStartTag || safeState.composerHasEnvelope) {
+                    await new Promise(r => setTimeout(r, 300));
+                    continue;
+                }
+                if (safeState.composerCount > 0 && safeState.composerLikelyCleared) {
+                    return true;
+                }
+            }
             if (safeState.hasStop) {
                 return true;
             }
@@ -1365,6 +1549,177 @@ class PageInteractor {
         } catch (e) {
             console.warn(`⚠️ [PageInteractor] 幽靈掃描發生異常: ${e.message}`);
         }
+    }
+
+    async _attachM365Files(attachment) {
+        const fs = require('fs');
+        const crypto = require('crypto');
+        const files = Array.isArray(attachment && attachment.files) ? attachment.files : [];
+        if (attachment.validatedByM365Harness !== true || files.length === 0 || files.length > 10) {
+            const error = new Error('M365 attachment batch is missing a trusted file manifest.');
+            error.code = 'M365_ATTACHMENT_UNTRUSTED';
+            throw error;
+        }
+
+        const filePaths = [];
+        const fileNames = [];
+        for (const file of files) {
+            const filePath = String(file && file.path || '');
+            const fileName = String(file && file.name || '');
+            if (!filePath || !fileName || !fs.existsSync(filePath)) {
+                const error = new Error('A staged M365 attachment is unavailable.');
+                error.code = 'M365_ATTACHMENT_STAGE_INVALID';
+                throw error;
+            }
+            const stat = fs.lstatSync(filePath);
+            const expectedHash = String(file && file.sha256 || '').toLowerCase();
+            const actualHash = stat.isFile() && !stat.isSymbolicLink()
+                ? crypto.createHash('sha256').update(fs.readFileSync(filePath)).digest('hex')
+                : '';
+            if (!stat.isFile() || stat.isSymbolicLink() || Number(file.size) !== stat.size
+                || !/^[0-9a-f]{64}$/.test(expectedHash) || actualHash !== expectedHash) {
+                const error = new Error('A staged M365 attachment changed before upload.');
+                error.code = 'M365_ATTACHMENT_STAGE_INVALID';
+                throw error;
+            }
+            filePaths.push(filePath);
+            fileNames.push(fileName);
+        }
+
+        const markerSelectors = [
+            '[data-testid*="attachment" i]',
+            '[data-testid*="upload" i]',
+            '[class*="attachment" i]',
+            '[aria-label*="remove attachment" i]',
+            '[aria-label*="移除附件"]',
+            '[aria-label*="移除檔案"]',
+        ];
+        const baseline = await this.page.evaluate(({ names, selectors }) => {
+            const visible = (node) => {
+                if (!node || !(node instanceof HTMLElement)) return false;
+                const style = window.getComputedStyle(node);
+                const rect = node.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0 && style.display !== 'none'
+                    && style.visibility !== 'hidden' && style.opacity !== '0';
+            };
+            const bodyText = document.body ? (document.body.innerText || '') : '';
+            const nameCounts = names.map((name) => bodyText.split(name).length - 1);
+            let markerCount = 0;
+            for (const selector of selectors) {
+                try {
+                    markerCount += Array.from(document.querySelectorAll(selector)).filter(visible).length;
+                } catch (_) { }
+            }
+            return { nameCounts, markerCount };
+        }, { names: fileNames, selectors: markerSelectors });
+
+        let selected = false;
+        const inputs = this.page.locator('input[type="file"]');
+        const inputCount = await inputs.count().catch(() => 0);
+        for (let index = inputCount - 1; index >= 0 && !selected; index -= 1) {
+            const input = inputs.nth(index);
+            const disabled = await input.isDisabled().catch(() => true);
+            if (disabled) continue;
+            try {
+                await input.setInputFiles(filePaths);
+                selected = true;
+            } catch (_) { }
+        }
+
+        if (!selected) {
+            const uploadButtons = this.page.locator([
+                'button[aria-label*="Attach" i]',
+                'button[aria-label*="Upload" i]',
+                'button[title*="Attach" i]',
+                'button[title*="Upload" i]',
+                'button[aria-label*="附加"]',
+                'button[aria-label*="上傳"]',
+                '[role="button"][aria-label*="Attach" i]',
+                '[role="button"][aria-label*="Upload" i]',
+            ].join(', '));
+            const buttonCount = await uploadButtons.count().catch(() => 0);
+            for (let index = buttonCount - 1; index >= 0 && !selected; index -= 1) {
+                const button = uploadButtons.nth(index);
+                if (!await button.isVisible().catch(() => false)) continue;
+                try {
+                    const [chooser] = await Promise.all([
+                        this.page.waitForEvent('filechooser', { timeout: 5000 }),
+                        button.click(),
+                    ]);
+                    await chooser.setFiles(filePaths);
+                    selected = true;
+                } catch (_) { }
+            }
+        }
+
+        // M365 Copilot Chat also accepts pasted files. Preserve the original
+        // Golem clipboard technique as a conservative fallback for one file;
+        // multi-file and folder uploads stay on the native file chooser path.
+        if (!selected && files.length === 1) {
+            const file = files[0];
+            const base64 = fs.readFileSync(file.path).toString('base64');
+            const inputSelector = this.backendDefinition
+                && this.backendDefinition.selectors
+                && this.backendDefinition.selectors.input;
+            selected = await this.page.evaluate(async ({ selector, payload, name, mimeType }) => {
+                let target = null;
+                try { target = document.querySelector(selector); } catch (_) { }
+                if (!target) return false;
+                const bytes = Uint8Array.from(atob(payload), (character) => character.charCodeAt(0));
+                const pastedFile = new File([bytes], name, { type: mimeType || 'application/octet-stream' });
+                const clipboardData = new DataTransfer();
+                clipboardData.items.add(pastedFile);
+                const event = new ClipboardEvent('paste', {
+                    clipboardData,
+                    bubbles: true,
+                    cancelable: true,
+                });
+                target.focus();
+                target.dispatchEvent(event);
+                return true;
+            }, {
+                selector: inputSelector,
+                payload: base64,
+                name: file.name,
+                mimeType: file.mimeType,
+            }).catch(() => false);
+        }
+
+        if (!selected) {
+            const error = new Error('Microsoft 365 Copilot Chat file upload control was not found.');
+            error.code = 'M365_ATTACHMENT_UPLOAD_FAILED';
+            throw error;
+        }
+
+        const confirmed = await this.page.waitForFunction(({ names, selectors, before }) => {
+            const visible = (node) => {
+                if (!node || !(node instanceof HTMLElement)) return false;
+                const style = window.getComputedStyle(node);
+                const rect = node.getBoundingClientRect();
+                return rect.width > 0 && rect.height > 0 && style.display !== 'none'
+                    && style.visibility !== 'hidden' && style.opacity !== '0';
+            };
+            const bodyText = document.body ? (document.body.innerText || '') : '';
+            const allNamesAdded = names.every((name, index) => (
+                bodyText.split(name).length - 1
+            ) > Number(before.nameCounts[index] || 0));
+            let markerCount = 0;
+            for (const selector of selectors) {
+                try {
+                    markerCount += Array.from(document.querySelectorAll(selector)).filter(visible).length;
+                } catch (_) { }
+            }
+            return allNamesAdded || markerCount >= Number(before.markerCount || 0) + names.length;
+        }, { names: fileNames, selectors: markerSelectors, before: baseline }, { timeout: 20000 })
+            .then(() => true)
+            .catch(() => false);
+
+        if (!confirmed) {
+            const error = new Error('Files were selected, but Microsoft 365 Copilot did not visibly confirm every attachment.');
+            error.code = 'M365_ATTACHMENT_NOT_CONFIRMED';
+            throw error;
+        }
+        console.log(`✅ [PageInteractor] M365 已在可見頁面確認 ${fileNames.length} 個附件。`);
     }
 
     /**

@@ -7,6 +7,8 @@ const MCPToolCatalog = require('../mcp/MCPToolCatalog');
 
 const MCP_CONFIG_PATH = path.resolve(process.cwd(), 'data', 'mcp-servers.json');
 const LOCAL_COMMAND_RE = /(terminal|shell|bash|zsh|cmd|命令|指令|終端機|本機|專案|repo|資料夾|檔案|目錄|路徑|安裝|npm|pnpm|yarn|node|python|git|ls|pwd|cd|cat|sed|grep|rg|build|test|lint|run|execute|執行|編譯|啟動|server)/i;
+const LOCAL_ARTIFACT_BUILD_RE = /(?:(?:製作|建立|建置|開發|實作|編寫|撰寫|寫(?:一個|個|出)?|create|build|develop|implement).{0,40}(?:互動(?:式)?(?:網頁|網站)|網頁|網站|web(?:site|page|app)?|html|css|javascript|程式|應用程式|app)|(?:互動(?:式)?(?:網頁|網站)|網頁|網站|web(?:site|page|app)?|html|css|javascript|程式|應用程式|app).{0,40}(?:製作|建立|建置|開發|實作|編寫|撰寫|寫(?:一個|個|出)?|create|build|develop|implement))/i;
+const EXPLICIT_REMOTE_ARTIFACT_TARGET_RE = /(?:在|到|於|透過|使用).{0,8}(?:sharepoint|onedrive|teams|notion|github|slack|microsoft\s*365|\bm365\b|瀏覽器|browser)/i;
 const EXTERNAL_SYSTEM_RE = /(@gmail|@google|calendar|gmail|drive|onedrive|sharepoint|microsoft\s*365|\bm365\b|mcp|devtools|notion|slack|teams|github[^a-z]|telegram|discord|瀏覽器自動化|外部服務|第三方)/i;
 const M365_DATA_RE = /(sharepoint|one\s*drive|onedrive|microsoft\s*365|\bm365\b|\.sharepoint\.(?:com|us|de|cn)|sharepoint-mil\.us)/i;
 const M365_SEARCH_RE = /(搜尋|查找|全文搜尋|全域搜尋|找出.{0,24}(?:檔案|文件)|\bsearch\b|\bfind\b.{0,24}\b(?:files?|documents?)\b)/i;
@@ -164,6 +166,7 @@ function summarizeCatalogDescription(value, maxChars = 180) {
 function isLikelyCommandTask(query) {
     const text = String(query || '');
     if (!text.trim()) return false;
+    if (LOCAL_ARTIFACT_BUILD_RE.test(text) && !EXPLICIT_REMOTE_ARTIFACT_TARGET_RE.test(text)) return true;
     if (!LOCAL_COMMAND_RE.test(text)) return false;
     if (EXTERNAL_SYSTEM_RE.test(text)) return false;
     return true;
@@ -345,11 +348,17 @@ class ToolRouter {
             ? []
             : intentMatchedMcpTools.slice(0, maxMcpTools);
 
+        const commandRecommended = requestClass.shouldRoute && isLikelyCommandTask(query);
+        const localArtifactBuild = commandRecommended
+            && LOCAL_ARTIFACT_BUILD_RE.test(String(query || ''))
+            && !EXPLICIT_REMOTE_ARTIFACT_TARGET_RE.test(String(query || ''));
         const commandLane = {
-            recommended: requestClass.shouldRoute && isLikelyCommandTask(query),
-            reason: requestClass.shouldRoute && isLikelyCommandTask(query)
-                ? 'local_os_or_repo_operation'
-                : 'prefer_skill_or_mcp_or_text',
+            recommended: commandRecommended,
+            reason: localArtifactBuild
+                ? 'local_project_artifact_authoring'
+                : commandRecommended
+                    ? 'local_os_or_repo_operation'
+                    : 'prefer_skill_or_mcp_or_text',
         };
 
         return {
@@ -417,8 +426,13 @@ class ToolRouter {
 
         if (result.commandLane.recommended) {
             lines.push('Relevant command lane:');
-            lines.push('- command: local OS/repo operation detected. For the current Windows harness, inspect its working directory with this exact shell action: {"action":"command","parameter":"echo %CD%"}. Replace the command only when another native operation is required.');
-            lines.push('- The user already requested this read/list/inspect/check operation. Emit the smallest read-only command action now; do not merely say that you could propose it. The local approval gate will ask for confirmation.');
+            if (result.commandLane.reason === 'local_project_artifact_authoring') {
+                lines.push('- command: local project artifact creation or modification detected. Use the assigned project workspace to inspect, create/edit, and verify the real files; do not substitute a long inline draft unless the user explicitly asked only for a snippet.');
+                lines.push('- Exact action shape: {"action":"command","parameter":"<one bounded native command>"}. Emit the smallest appropriate command action now. When the outcome needs dependent inspect/build/verify work, maintain GOLEM_PLAN and issue only its current bounded action.');
+            } else {
+                lines.push('- command: local OS/repo operation detected. For the current Windows harness, inspect its working directory with this exact shell action: {"action":"command","parameter":"echo %CD%"}. Replace the command only when another native operation is required.');
+                lines.push('- The user already requested this read/list/inspect/check operation. Emit the smallest read-only command action now; do not merely say that you could propose it. The local approval gate will ask for confirmation.');
+            }
         }
 
         if (result.skills.length > 0) {

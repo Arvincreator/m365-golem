@@ -22,8 +22,6 @@ const EDITABLE_KEYS = new Set([
     "GOLEM_SLEEP_START", "GOLEM_SLEEP_END", "USER_INTERESTS", "COMMAND_WHITELIST", "CUSTOM_COMMANDS",
     "ENABLE_LOG_NOTIFICATIONS", "ARCHIVE_CHECK_INTERVAL", "ARCHIVE_THRESHOLD_YESTERDAY", "ARCHIVE_THRESHOLD_TODAY",
     "LOG_MAX_SIZE_MB", "LOG_RETENTION_DAYS", "ENABLE_SYSTEM_LOG", "GOLEM_BACKEND", "GOLEM_STRICT_SAFEGUARD",
-    "DIARY_RAW_RETENTION_DAYS", "DIARY_WEEKLY_RETENTION_DAYS", "DIARY_MONTHLY_RETENTION_DAYS", "DIARY_ROTATE_MIN_INTERVAL_MS",
-    "DIARY_BACKUP_MAX_FILES", "DIARY_BACKUP_RETENTION_DAYS",
     "GOLEM_INTERVENTION_LEVEL", "GOLEM_MAX_AUTO_TURNS", "GOLEM_MAX_RESPONSE_WORDS",
     "TG_ENGINE", "CB_TG_TIMEOUT_MS", "CB_TG_RESET_MS", "CB_TG_ERROR_PCT",
     "MULTI_AGENT_WORKER_SEND_TIMEOUT_MS", "MULTI_AGENT_WORKER_IDLE_TIMEOUT_MS", "MULTI_AGENT_WORKER_DRAFT_CHECK_INTERVAL_MS",
@@ -231,62 +229,6 @@ export default function AdvancedTab({ env, logInfo, onChangeEnv }: AdvancedTabPr
                                 placeholder="20"
                                 value={env.ARCHIVE_THRESHOLD_TODAY || ""}
                                 onChange={(val) => onChangeEnv("ARCHIVE_THRESHOLD_TODAY", val)}
-                            />
-                        </div>
-                    </div>
-
-                    <div className="bg-secondary/30 p-5 rounded-xl border border-border">
-                        <h4 className="text-sm font-semibold text-foreground mb-4 flex items-center gap-2">
-                            <RefreshCw className="w-4 h-4 text-rose-300" /> {t("settings.advanced.diaryRotate.title")}
-                        </h4>
-                        <div className="space-y-4">
-                            <SettingField
-                                label={t("settings.advanced.diaryRotate.rawRetention.label")}
-                                keyName="DIARY_RAW_RETENTION_DAYS"
-                                desc={t("settings.advanced.diaryRotate.rawRetention.desc")}
-                                placeholder="7"
-                                value={env.DIARY_RAW_RETENTION_DAYS || ""}
-                                onChange={(val) => onChangeEnv("DIARY_RAW_RETENTION_DAYS", val)}
-                            />
-                            <SettingField
-                                label={t("settings.advanced.diaryRotate.weeklyRetention.label")}
-                                keyName="DIARY_WEEKLY_RETENTION_DAYS"
-                                desc={t("settings.advanced.diaryRotate.weeklyRetention.desc")}
-                                placeholder="365"
-                                value={env.DIARY_WEEKLY_RETENTION_DAYS || ""}
-                                onChange={(val) => onChangeEnv("DIARY_WEEKLY_RETENTION_DAYS", val)}
-                            />
-                            <SettingField
-                                label={t("settings.advanced.diaryRotate.monthlyRetention.label")}
-                                keyName="DIARY_MONTHLY_RETENTION_DAYS"
-                                desc={t("settings.advanced.diaryRotate.monthlyRetention.desc")}
-                                placeholder="1825"
-                                value={env.DIARY_MONTHLY_RETENTION_DAYS || ""}
-                                onChange={(val) => onChangeEnv("DIARY_MONTHLY_RETENTION_DAYS", val)}
-                            />
-                            <SettingField
-                                label={t("settings.advanced.diaryRotate.minInterval.label")}
-                                keyName="DIARY_ROTATE_MIN_INTERVAL_MS"
-                                desc={t("settings.advanced.diaryRotate.minInterval.desc")}
-                                placeholder="300000"
-                                value={env.DIARY_ROTATE_MIN_INTERVAL_MS || ""}
-                                onChange={(val) => onChangeEnv("DIARY_ROTATE_MIN_INTERVAL_MS", val)}
-                            />
-                            <SettingField
-                                label={t("settings.advanced.diaryRotate.backupMax.label")}
-                                keyName="DIARY_BACKUP_MAX_FILES"
-                                desc={t("settings.advanced.diaryRotate.backupMax.desc")}
-                                placeholder="120"
-                                value={env.DIARY_BACKUP_MAX_FILES || ""}
-                                onChange={(val) => onChangeEnv("DIARY_BACKUP_MAX_FILES", val)}
-                            />
-                            <SettingField
-                                label={t("settings.advanced.diaryRotate.backupDays.label")}
-                                keyName="DIARY_BACKUP_RETENTION_DAYS"
-                                desc={t("settings.advanced.diaryRotate.backupDays.desc")}
-                                placeholder="180"
-                                value={env.DIARY_BACKUP_RETENTION_DAYS || ""}
-                                onChange={(val) => onChangeEnv("DIARY_BACKUP_RETENTION_DAYS", val)}
                             />
                         </div>
                     </div>

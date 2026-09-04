@@ -2,9 +2,9 @@ function normalize(value) {
     return String(value || '').toLowerCase();
 }
 
-const EXPLICIT_ACTION_RE = /(幫我|直接|執行|打開|開啟|點擊|輸入|填|建立|新增|儲存|更新|刪除|送出|發送|排程|提醒|查|讀|搜尋|分析|檢查|列出|列舉|取得|下載|上傳|複製|移動|重新命名|改名|簽出|簽入|還原|回收|debug|修|run|execute|open|click|fill|create|save|update|delete|send|schedule|search|inspect|analy[sz]e|check|list|enumerate|download|upload|copy|move|rename|checkout|checkin|restore)/i;
+const EXPLICIT_ACTION_RE = /(幫我|直接|執行|打開|開啟|點擊|輸入|填|建立|建置|製作|開發|實作|編寫|撰寫|新增|儲存|更新|刪除|送出|發送|排程|提醒|查|讀|搜尋|分析|檢查|列出|列舉|取得|下載|上傳|複製|移動|重新命名|改名|簽出|簽入|還原|回收|debug|修|run|execute|open|click|fill|create|build|develop|implement|save|update|delete|send|schedule|search|inspect|analy[sz]e|check|list|enumerate|download|upload|copy|move|rename|checkout|checkin|restore)/i;
 const PASSIVE_RE = /(怎麼|如何|為什麼|解釋|說明|建議|想法|概念|原理|比較|教我|what is|why|explain|suggest|recommend|compare|idea)/i;
-const OPERATIONAL_RE = /(幫我|直接|執行|打開|開啟|點擊|輸入|建立|新增|儲存|更新|刪除|送出|發送|排程|提醒|查|讀|搜尋|分析|檢查|列出|列舉|取得|下載|上傳|複製|移動|重新命名|改名|簽出|簽入|還原|回收|debug|修|run|execute|open|click|fill|create|save|update|delete|send|schedule|search|inspect|check|list|enumerate|download|upload|copy|move|rename|checkout|checkin|restore)/i;
+const OPERATIONAL_RE = /(幫我|直接|執行|打開|開啟|點擊|輸入|建立|建置|製作|開發|實作|編寫|撰寫|新增|儲存|更新|刪除|送出|發送|排程|提醒|查|讀|搜尋|分析|檢查|列出|列舉|取得|下載|上傳|複製|移動|重新命名|改名|簽出|簽入|還原|回收|debug|修|run|execute|open|click|fill|create|build|develop|implement|save|update|delete|send|schedule|search|inspect|check|list|enumerate|download|upload|copy|move|rename|checkout|checkin|restore)/i;
 const TOOL_CAPABILITY_RE = /(你有|有沒有|是否有|可用嗎|能用嗎|支援|available|have|has|enabled|啟用).*(mcp|工具|tool|server|skills?|技能|chrome-devtools|devtools)/i;
 const SKILL_CATALOG_RE = /(?:(?:有哪些|有什麼|列出|顯示|查看|清單|列表|目前|現在).{0,24}(?:skills?|技能)|(?:skills?|技能).{0,24}(?:有哪些|有什麼|可用|啟用|清單|列表|列出|顯示|查看)|\blist\s+(?:available\s+)?skills?\b|\bwhat\s+skills?\b)/i;
 
@@ -119,7 +119,7 @@ class ToolUsePolicy {
             '- 只有在使用者明確要查資料、讀紀錄、操作外部系統、排程、修改或執行專門能力時才使用工具。',
             '- read 類工具可直接使用；action/write/delete/send/publish 類工具若不是使用者明確要求，先詢問確認。',
             '- 高風險或不可逆操作必須先說明影響並等待使用者確認。',
-            '- 工具結果回來後不要自動連續呼叫工具，除非使用者明確要求繼續。'
+            '- 一般工具結果回來後不要自行連續呼叫工具；但若宿主已接受 GOLEM_PLAN，且本輪收到與目前步驟綁定的 host Observation，必須依計畫規則自行輸出下一版計畫與至多一個下一步 Action，不必等待使用者再說「繼續」。'
         ];
     }
 }

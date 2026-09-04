@@ -60,4 +60,32 @@ describe('ConversationManager M365 safe-mode privacy', () => {
 
         expect(manager.getLastUserTurn('m365-poc')).toBeNull();
     });
+
+    test('retains workspace turns in FIFO order when the M365 queue is enabled', async () => {
+        const brain = { chatLogManager: null, isLocalContextEnabled: () => false };
+        const controller = { pendingTasks: new Map() };
+        const ctx = {
+            chatId: 'm365:conversation-1',
+            workspaceConversationId: 'conversation-1',
+            reply: jest.fn().mockResolvedValue(),
+        };
+        manager = new ConversationManager(brain, {}, controller);
+        manager.isProcessing = true;
+
+        await manager.enqueue(ctx, 'FIRST', {
+            bypassDebounce: true,
+            isPriority: false,
+            allowM365Queue: true,
+            autoAppendWhenBusy: true,
+        });
+        await manager.enqueue(ctx, 'SECOND', {
+            bypassDebounce: true,
+            isPriority: false,
+            allowM365Queue: true,
+            autoAppendWhenBusy: true,
+        });
+
+        expect(manager.queue.map((task) => task.text)).toEqual(['FIRST', 'SECOND']);
+        expect(ctx.reply).not.toHaveBeenCalled();
+    });
 });

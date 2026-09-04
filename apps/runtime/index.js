@@ -5,6 +5,7 @@
 const fs_sync = require('fs');
 const path_sync = require('path');
 const { v4: uuidv4 } = require('uuid');
+const { buildM365PlanObservation } = require('../../src/services/M365PlanProtocol');
 
 // ── 首次啟動自動初始化 .env ────────────────────────────────────────────────
 const PROJECT_ROOT = path_sync.resolve(__dirname, '../..');
@@ -83,7 +84,6 @@ const introspection = require('../../src/services/Introspection');
 const ActionQueue = require('../../src/core/ActionQueue'); // ✨ [v9.1] Dual-Queue Architecture
 const PromptShortcutManager = require('../../src/managers/PromptShortcutManager');
 const { normalizeShortcutKey } = PromptShortcutManager;
-const NativeRpgService = require('../../src/services/NativeRpgService');
 
 
 // 🎯 v9.1.5 解耦：不再於啟動時遍歷配置建立 Bot 與實體
@@ -617,8 +617,8 @@ async function handleUnifiedMessage(ctx, forceTargetId = null) {
             return;
         }
         const pocAttachment = ctx.getAttachment ? await ctx.getAttachment() : null;
-        if (pocAttachment) {
-            await ctx.reply('⚠️ M365 Web POC 目前只允許純文字訊息；附件功能尚未通過資料邊界驗證。');
+        if (pocAttachment && pocAttachment.validatedByM365Harness !== true) {
+            await ctx.reply('⚠️ 附件未通過專案、對話、檔案類型與容量驗證，因此不會送到 M365。');
             return;
         }
         const pocText = isExplicitLocalCommand
@@ -633,13 +633,28 @@ async function handleUnifiedMessage(ctx, forceTargetId = null) {
             return;
         }
         await convoManager.enqueue(ctx, pocText, {
-            isPriority: true,
+            // Normal user turns remain FIFO. A user-authorized timeout retry is
+            // placed ahead of later queued turns so the original turn can be
+            // reconciled before the conversation advances.
+            isPriority: Number(ctx.workspaceRetryAttempt || 0) > 0,
             bypassDebounce: true,
-            attachment: null,
+            attachment: pocAttachment,
+            // Attachment batches are temporary. Keep the dashboard request alive
+            // until the visible M365 transport has consumed the staged files.
+            waitForCompletion: Boolean(pocAttachment),
             suppressReply: false,
             forceObserver: false,
             m365Bootstrap: ctx.workspaceBootstrapRequired === true,
             workspaceConversationId: ctx.workspaceConversationId || null,
+            workspaceRunId: ctx.workspaceRunId || null,
+            workspaceStepId: ctx.workspaceStepId || null,
+            workspacePlanId: ctx.workspacePlanId || null,
+            workspacePlanRevision: Number(ctx.workspacePlanRevision || 0),
+            workspacePlanStepId: ctx.workspacePlanStepId || null,
+            workspaceActionId: ctx.workspaceActionId || null,
+            protocolRequestId: ctx.workspaceProtocolRequestId || null,
+            allowM365Queue: true,
+            autoAppendWhenBusy: true,
         });
         return;
     }
@@ -669,24 +684,6 @@ async function handleUnifiedMessage(ctx, forceTargetId = null) {
             console.warn(`[SystemSync] Failed to notify brain: ${err.message}`);
         }
     };
-
-    if (NativeRpgService.isControlCommand(ctx.text)) {
-        const controlReply = await NativeRpgService.handleControlCommand(ctx, brain);
-        if (controlReply) {
-            if (typeof controlReply === 'string') {
-                await ctx.reply(controlReply, { parse_mode: 'Markdown' });
-            } else {
-                await ctx.reply(controlReply.text || '', controlReply.replyOptions || {});
-            }
-            return;
-        }
-    }
-
-    const rpgTurnResult = await NativeRpgService.handleTurn(ctx, brain);
-    if (rpgTurnResult && rpgTurnResult.handled) {
-        await ctx.reply(rpgTurnResult.text, rpgTurnResult.replyOptions || {});
-        return;
-    }
 
     // ✨ Telegram 快捷指令：送出後自動展開為完整 Prompt 內容
     if (ctx.platform === 'telegram' && ctx.text) {
@@ -1078,13 +1075,6 @@ async function handleUnifiedCallback(ctx, actionData) {
             await ctx.reply('⚠️ M365 Web POC 安全模式不執行按鈕動作或既有待核准任務；如需新對話，請明確輸入 /new。');
             return;
         }
-        if (!isM365SafeMode) {
-            const rpgCallback = await NativeRpgService.handleCallback(ctx, actionData, instance.brain);
-            if (rpgCallback && rpgCallback.handled) {
-                await ctx.reply(rpgCallback.text, rpgCallback.replyOptions || {});
-                return;
-            }
-        }
     }
 
     if (actionData === 'DRAFTRECOVER_RETRY') {
@@ -1143,6 +1133,53 @@ async function handleUnifiedCallback(ctx, actionData) {
 
     const { brain, controller, convoManager, actionQueue } = getOrCreateGolem();
     const pendingTasks = controller.pendingTasks;
+    const emitPlanObservation = async (task, status, result) => {
+        const planOptions = task && (task.planDispatchOptions || task.dispatchOptions);
+        if (!planOptions || planOptions.planMode !== true) return false;
+        const planCtx = task.ctx || ctx;
+        let recorded = null;
+        if (typeof planCtx.onGolemObservation === 'function') {
+            recorded = await planCtx.onGolemObservation({
+                runId: planOptions.workspaceRunId,
+                stepId: planOptions.workspaceStepId,
+                actionId: planOptions.workspaceActionId,
+                planStepId: planOptions.workspacePlanStepId,
+                lane: 'command',
+                status,
+                result,
+            });
+        }
+        const nextDepth = Number(planOptions.actionDepth || 0) + 1;
+        const maxDepth = Number(planOptions.maxActionDepth || process.env.GOLEM_MAX_AUTO_TURNS || 5);
+        const feedbackPrompt = buildM365PlanObservation({
+            planId: planOptions.workspacePlanId || recorded?.planId,
+            planRevision: planOptions.workspacePlanRevision || recorded?.planRevision,
+            stepId: planOptions.workspaceStepId,
+            planStepId: planOptions.workspacePlanStepId,
+            actionId: planOptions.workspaceActionId,
+            lane: 'command',
+            status: status === 'succeeded' ? 'succeeded' : 'failed',
+            result,
+        });
+        await convoManager.enqueue(planCtx, feedbackPrompt, {
+            isPriority: true,
+            bypassDebounce: true,
+            isSystemFeedback: true,
+            allowActions: status !== 'denied' && nextDepth < maxDepth,
+            actionDepth: nextDepth,
+            maxActionDepth: maxDepth,
+            maxAutoTurns: maxDepth + 1,
+            planMode: true,
+            workspaceConversationId: planCtx.workspaceConversationId || null,
+            workspaceRunId: planOptions.workspaceRunId,
+            workspaceStepId: planOptions.workspaceStepId,
+            workspacePlanId: planOptions.workspacePlanId || recorded?.planId,
+            workspacePlanRevision: planOptions.workspacePlanRevision || recorded?.planRevision,
+            workspacePlanStepId: planOptions.workspacePlanStepId,
+            workspaceActionId: planOptions.workspaceActionId,
+        });
+        return true;
+    };
     if (actionData === 'SYSTEM_FORCE_UPDATE') return SystemUpgrader.performUpdate(ctx);
     if (actionData === 'SYSTEM_UPDATE_CANCEL') return await ctx.reply("已取消更新操作。");
 
@@ -1295,6 +1332,9 @@ async function handleUnifiedCallback(ctx, actionData) {
         if (task.type === 'M365_ACTION_APPROVAL') {
             pendingTasks.delete(taskId);
             if (action !== 'APPROVE') {
+                await emitPlanObservation(task, 'denied', 'The user denied the proposed tool action.').catch((error) => {
+                    console.error('[GOLEM_PLAN] Failed to record denied action:', error);
+                });
                 await ctx.reply('🛡️ 已拒絕工具動作，沒有執行任何工具。');
                 return;
             }
@@ -1305,24 +1345,39 @@ async function handleUnifiedCallback(ctx, actionData) {
                 return;
             }
 
-            await ctx.reply('✅ 已核准工具動作，正在交給原版 Golem Action Gate 執行。');
+            await ctx.reply('✅ 已核准工具動作，已加入 Action Queue，將依序執行。');
             const approvedPayload = `[GOLEM_ACTION]\n\`\`\`json\n${JSON.stringify(proposedActions, null, 2)}\n\`\`\`\n[/GOLEM_ACTION]`;
             const actionContext = {
                 ...ctx,
+                ...(task.ctx || {}),
                 workspaceRoot: task.ctx && task.ctx.workspaceRoot ? task.ctx.workspaceRoot : ctx.workspaceRoot,
                 preferredMcpServers: task.ctx && Array.isArray(task.ctx.preferredMcpServers) ? task.ctx.preferredMcpServers : [],
                 preferredSkillIds: task.ctx && Array.isArray(task.ctx.preferredSkillIds) ? task.ctx.preferredSkillIds : [],
                 preferredSkillActions: task.ctx && Array.isArray(task.ctx.preferredSkillActions) ? task.ctx.preferredSkillActions : [],
             };
-            await NeuroShunter.dispatch(actionContext, approvedPayload, brain, controller, {
-                ...(task.dispatchOptions || {}),
-                m365ActionApproved: true,
+            await actionQueue.enqueue(actionContext, async () => {
+                await NeuroShunter.dispatch(actionContext, approvedPayload, brain, controller, {
+                    ...(task.dispatchOptions || {}),
+                    m365ActionApproved: true,
+                    actionQueueManaged: true,
+                });
+            }, {
+                isPriority: false,
+                metadata: {
+                    conversationId: actionContext.workspaceConversationId || '',
+                    title: '已核准的 M365 工具動作',
+                    summary: JSON.stringify(proposedActions, null, 2).slice(0, 2000),
+                    actionCount: proposedActions.length,
+                },
             });
             return;
         }
 
         if (action === 'DENY') {
             pendingTasks.delete(taskId);
+            await emitPlanObservation(task, 'denied', 'The user denied the secondary command approval.').catch((error) => {
+                console.error('[GOLEM_PLAN] Failed to record denied secondary approval:', error);
+            });
             await ctx.reply('🛡️ 操作駁回');
         } else if (action === 'APPROVE') {
             const { steps, nextIndex } = task;
@@ -1445,6 +1500,9 @@ async function handleUnifiedCallback(ctx, actionData) {
                     const failedBlocks = observation
                         .split('\n\n----------------\n\n')
                         .filter((block) => block.includes('[Step') && block.includes(' Failed]'));
+                    if (await emitPlanObservation(task, failedBlocks.length > 0 ? 'failed' : 'succeeded', observation)) {
+                        return;
+                    }
                     const currentCorrectionAttempt = Number(task.correctionAttempt || 0);
                     const maxAutoCorrectionAttempts = Number(process.env.GOLEM_MAX_AUTO_CORRECTION_ATTEMPTS || 1);
                     const shouldAutoCorrect = failedBlocks.length > 0 && currentCorrectionAttempt < maxAutoCorrectionAttempts;
@@ -1603,7 +1661,17 @@ async function performCleanup() {
         }
     }
 
-    // 3. 停止 Web Dashboard (釋放 Port)
+    // 3. 關閉 MCP 子程序（包含內建 M365 Session Bridge）
+    try {
+        const MCPManager = require('../../src/mcp/MCPManager');
+        console.log(`🛑 [System] 正在關閉 MCP 背景程序...`);
+        await MCPManager.getInstance().shutdown();
+        console.log(`✅ [System] MCP 背景程序已停止。`);
+    } catch (e) {
+        console.warn(`⚠️ [System] 停止 MCP 背景程序失敗: ${e.message}`);
+    }
+
+    // 4. 停止 Web Dashboard (釋放 Port)
     try {
         const dashboard = require('../../dashboard');
         if (dashboard && typeof dashboard.detach === 'function') {
