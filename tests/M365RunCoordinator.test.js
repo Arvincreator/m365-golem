@@ -184,4 +184,240 @@ describe('M365 durable run coordinator', () => {
         expect(recoveredStep.status).toBe('reconcile_required');
         expect(server.dispatchM365WorkspaceMessage).not.toHaveBeenCalled();
     });
+
+    test('persists a Copilot-authored plan and advances each tool step only after a host Observation', async () => {
+        const firstPlan = {
+            schemaVersion: 'golem_plan/1',
+            planId: null,
+            revision: 1,
+            goal: 'List and summarize the project root.',
+            completionCriteria: 'A host Observation proves the listing and both plan steps are closed.',
+            status: 'running',
+            currentStepId: 'step_1',
+            steps: [
+                { id: 'step_1', title: 'List files', status: 'in_progress', doneWhen: 'Host output contains a listing.' },
+                { id: 'step_2', title: 'Summarize', status: 'pending', doneWhen: 'Summary is returned.' },
+            ],
+            question: '',
+            approvalRequest: '',
+            completionSummary: '',
+        };
+        const accepted = await coordinator.handleAutonomousPlan({
+            conversationId: conversation.id,
+            requestId: 'request-plan-1',
+            plan: firstPlan,
+            actions: [{ action: 'command', parameter: 'dir' }],
+            actionCount: 1,
+        });
+        expect(accepted).toEqual(expect.objectContaining({
+            accepted: true,
+            allowActions: true,
+            planMode: true,
+            planRevision: 1,
+        }));
+        let run = await store.getRun(accepted.runId);
+        let [step] = await store.listRunSteps(run.id);
+        expect(run.status).toBe('RUNNING');
+        expect(step.status).toBe('running');
+
+        await coordinator.recordAutonomousObservation({
+            runId: run.id,
+            stepId: step.id,
+            actionId: accepted.actionId,
+            planStepId: 'step_1',
+            lane: 'command',
+            status: 'succeeded',
+            result: 'file-a.txt',
+        });
+        [step] = await store.listRunSteps(run.id);
+        expect(step.status).toBe('completed');
+
+        const continued = await coordinator.handleAutonomousPlan({
+            conversationId: conversation.id,
+            existingRunId: run.id,
+            requestId: 'request-plan-2',
+            plan: {
+                ...firstPlan,
+                planId: run.id,
+                revision: 2,
+                currentStepId: 'step_2',
+                steps: firstPlan.steps.map((item) => ({
+                    ...item,
+                    status: item.id === 'step_1' ? 'completed' : 'in_progress',
+                })),
+            },
+            actions: [{ action: 'command', parameter: 'type file-a.txt' }],
+            actionCount: 1,
+            isSystemFeedback: true,
+        });
+        expect(continued).toEqual(expect.objectContaining({ accepted: true, allowActions: true, planRevision: 2 }));
+        const runSteps = await store.listRunSteps(run.id);
+        expect(runSteps).toHaveLength(2);
+        expect(runSteps[1].status).toBe('running');
+
+        await coordinator.recordAutonomousObservation({
+            runId: run.id,
+            stepId: runSteps[1].id,
+            actionId: continued.actionId,
+            planStepId: 'step_2',
+            lane: 'command',
+            status: 'succeeded',
+            result: 'Summary: file-a.txt is present.',
+        });
+
+        const completed = await coordinator.handleAutonomousPlan({
+            conversationId: conversation.id,
+            existingRunId: run.id,
+            requestId: 'request-plan-3',
+            plan: {
+                ...firstPlan,
+                planId: run.id,
+                revision: 3,
+                status: 'complete',
+                currentStepId: null,
+                steps: firstPlan.steps.map((item) => ({ ...item, status: 'completed' })),
+                completionSummary: 'The project root was listed and summarized.',
+            },
+            actions: [],
+            actionCount: 0,
+            isSystemFeedback: true,
+        });
+        expect(completed).toEqual(expect.objectContaining({ accepted: true, allowActions: false }));
+        run = await store.getRun(run.id);
+        expect(run.status).toBe('COMPLETED');
+        const events = await store.listRunEvents(run.id);
+        expect(events.filter((event) => event.eventType === 'autonomous_plan_received')).toHaveLength(3);
+        expect(events.filter((event) => event.eventType === 'autonomous_observation_recorded')).toHaveLength(2);
+    });
+
+    test('does not accept another planned action before the current host Observation arrives', async () => {
+        const plan = {
+            schemaVersion: 'golem_plan/1', planId: null, revision: 1,
+            goal: 'Inspect twice.', completionCriteria: 'Two observations are recorded.', status: 'running', currentStepId: 's1',
+            steps: [
+                { id: 's1', title: 'First inspection', status: 'in_progress', doneWhen: 'First Observation.' },
+                { id: 's2', title: 'Second inspection', status: 'pending', doneWhen: 'Second Observation.' },
+            ],
+            question: '', approvalRequest: '', completionSummary: '',
+        };
+        const first = await coordinator.handleAutonomousPlan({
+            conversationId: conversation.id,
+            plan,
+            actions: [{ action: 'command', parameter: 'dir' }],
+            actionCount: 1,
+        });
+        const premature = await coordinator.handleAutonomousPlan({
+            conversationId: conversation.id,
+            existingRunId: first.runId,
+            plan: {
+                ...plan,
+                planId: first.runId,
+                revision: 2,
+                currentStepId: 's2',
+                steps: plan.steps.map((item) => ({
+                    ...item,
+                    status: item.id === 's1' ? 'completed' : 'in_progress',
+                })),
+            },
+            actions: [{ action: 'command', parameter: 'dir /b' }],
+            actionCount: 1,
+            isSystemFeedback: true,
+        });
+
+        expect(premature).toEqual(expect.objectContaining({
+            accepted: false,
+            code: 'M365_PLAN_OBSERVATION_PENDING',
+        }));
+        expect(await store.listRunSteps(first.runId)).toHaveLength(1);
+    });
+
+    test('pauses an active autonomous run when the next plan revision cannot be parsed', async () => {
+        const firstPlan = {
+            schemaVersion: 'golem_plan/1', planId: null, revision: 1,
+            goal: 'Inspect once.', completionCriteria: 'The host observation is recorded.',
+            status: 'running', currentStepId: 's1',
+            steps: [{ id: 's1', title: 'Inspect', status: 'in_progress', doneWhen: 'Observed.' }],
+            question: '', approvalRequest: '', completionSummary: '',
+        };
+        const first = await coordinator.handleAutonomousPlan({
+            conversationId: conversation.id,
+            plan: firstPlan,
+            actions: [{ action: 'command', parameter: 'dir' }],
+            actionCount: 1,
+        });
+        const [step] = await store.listRunSteps(first.runId);
+        await coordinator.recordAutonomousObservation({
+            runId: first.runId,
+            stepId: step.id,
+            actionId: first.actionId,
+            status: 'succeeded',
+            result: 'ok',
+        });
+
+        const rejected = await coordinator.handleAutonomousPlan({
+            conversationId: conversation.id,
+            existingRunId: first.runId,
+            requestId: 'bad-final-plan',
+            planError: { code: 'M365_PLAN_JSON_INVALID', message: 'Malformed final plan.' },
+            actions: [],
+            actionCount: 0,
+            isSystemFeedback: true,
+        });
+
+        expect(rejected).toEqual(expect.objectContaining({
+            accepted: false,
+            runId: first.runId,
+            planRevision: 1,
+        }));
+        expect(await store.getRun(first.runId)).toEqual(expect.objectContaining({
+            status: 'PAUSED',
+            errorCode: 'M365_PLAN_JSON_INVALID',
+        }));
+        const events = await store.listRunEvents(first.runId);
+        expect(events.some((event) => event.eventType === 'autonomous_plan_rejected')).toBe(true);
+
+        await expect(coordinator.completeRun(first.runId, { confirmed: false })).rejects.toEqual(
+            expect.objectContaining({ code: 'M365_RUN_COMPLETION_CONFIRMATION_REQUIRED' })
+        );
+        const completed = await coordinator.completeRun(first.runId, {
+            confirmed: true,
+            note: 'Visible final response and host evidence checked.',
+        });
+        expect(completed.status).toBe('COMPLETED');
+        const completedEvents = await store.listRunEvents(first.runId);
+        expect(completedEvents.some((event) => event.eventType === 'completion_confirmed_by_user')).toBe(true);
+    });
+
+    test('rejects a stale plan revision without creating another action step', async () => {
+        const plan = {
+            schemaVersion: 'golem_plan/1', planId: null, revision: 1,
+            goal: 'Inspect.', completionCriteria: 'Observed.', status: 'running', currentStepId: 's1',
+            steps: [{ id: 's1', title: 'Inspect', status: 'in_progress', doneWhen: 'Observed.' }],
+            question: '', approvalRequest: '', completionSummary: '',
+        };
+        const first = await coordinator.handleAutonomousPlan({
+            conversationId: conversation.id,
+            plan,
+            actions: [{ action: 'command', parameter: 'dir' }],
+            actionCount: 1,
+        });
+        const [step] = await store.listRunSteps(first.runId);
+        await coordinator.recordAutonomousObservation({
+            runId: first.runId,
+            stepId: step.id,
+            actionId: first.actionId,
+            status: 'succeeded',
+            result: 'ok',
+        });
+        const stale = await coordinator.handleAutonomousPlan({
+            conversationId: conversation.id,
+            existingRunId: first.runId,
+            plan: { ...plan, planId: first.runId },
+            actions: [{ action: 'command', parameter: 'dir' }],
+            actionCount: 1,
+            isSystemFeedback: true,
+        });
+        expect(stale).toEqual(expect.objectContaining({ accepted: false, code: 'M365_PLAN_REVISION_MISMATCH' }));
+        expect(await store.listRunSteps(first.runId)).toHaveLength(1);
+    });
 });

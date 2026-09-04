@@ -4,6 +4,7 @@ const MCPManager   = require('../../mcp/MCPManager');
 const MCPCallValidator = require('../../mcp/MCPCallValidator');
 const MCPToolCatalog = require('../../mcp/MCPToolCatalog');
 const ExampleResolver = require('../../managers/ExampleResolver');
+const { buildM365PlanObservation } = require('../../services/M365PlanProtocol');
 
 class SkillHandler {
     static _resolveActionArgs(act = {}) {
@@ -187,6 +188,61 @@ class SkillHandler {
 
         const sendFeedback = async (message, hintMeta = {}) => {
             const currentActionDepth = Number(dispatchOptions.actionDepth || 0);
+            if (dispatchOptions.planMode === true) {
+                const observationStatus = hintMeta.status
+                    || (SkillHandler._looksLikeFailure(message) ? 'failed' : 'succeeded');
+                let recorded = null;
+                if (typeof ctx.onGolemObservation === 'function') {
+                    recorded = await ctx.onGolemObservation({
+                        runId: dispatchOptions.workspaceRunId,
+                        stepId: dispatchOptions.workspaceStepId,
+                        actionId: dispatchOptions.workspaceActionId,
+                        planStepId: dispatchOptions.workspacePlanStepId,
+                        lane: hintMeta.lane || 'skill',
+                        status: observationStatus,
+                        result: message,
+                    });
+                }
+                const nextDepth = currentActionDepth + 1;
+                const maxDepth = Number(dispatchOptions.maxActionDepth || process.env.GOLEM_MAX_AUTO_TURNS || 5);
+                const mayContinue = nextDepth < maxDepth
+                    && !['PAUSED', 'CANCELED', 'COMPLETED', 'RECONCILE_REQUIRED'].includes(recorded?.run?.status);
+                const feedbackPrompt = buildM365PlanObservation({
+                    planId: dispatchOptions.workspacePlanId || recorded?.planId,
+                    planRevision: dispatchOptions.workspacePlanRevision || recorded?.planRevision,
+                    stepId: dispatchOptions.workspaceStepId,
+                    planStepId: dispatchOptions.workspacePlanStepId,
+                    actionId: dispatchOptions.workspaceActionId,
+                    lane: hintMeta.lane || 'skill',
+                    status: observationStatus,
+                    result: message,
+                });
+                const planOptions = {
+                    isPriority: true,
+                    bypassDebounce: true,
+                    isSystemFeedback: true,
+                    allowActions: mayContinue,
+                    actionDepth: nextDepth,
+                    maxActionDepth: maxDepth,
+                    maxAutoTurns: maxDepth + 1,
+                    planMode: true,
+                    workspaceConversationId: ctx.workspaceConversationId || null,
+                    workspaceRunId: dispatchOptions.workspaceRunId,
+                    workspaceStepId: dispatchOptions.workspaceStepId,
+                    workspacePlanId: dispatchOptions.workspacePlanId || recorded?.planId,
+                    workspacePlanRevision: dispatchOptions.workspacePlanRevision || recorded?.planRevision,
+                    workspacePlanStepId: dispatchOptions.workspacePlanStepId,
+                    workspaceActionId: dispatchOptions.workspaceActionId,
+                };
+                if (convoManager) {
+                    await convoManager.enqueue(ctx, feedbackPrompt, planOptions);
+                } else if (brain && typeof brain.sendMessage === 'function') {
+                    brain.sendMessage(feedbackPrompt, false, planOptions).catch((error) => {
+                        console.warn('[SkillHandler] Fallback plan Observation error:', error);
+                    });
+                }
+                return;
+            }
             const canAutoRetryByDepth = currentActionDepth < 1;
             const resolvedExampleText = await SkillHandler._resolveExampleText(brain, {
                 ...hintMeta,

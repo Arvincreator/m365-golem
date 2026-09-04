@@ -11,6 +11,7 @@ const COMMAND_DEFS = require('../../src/config/commands');
 const { v4: uuidv4 } = require('uuid');
 const fs = require('fs');
 const path = require('path');
+const { buildM365PlanObservation } = require('../../src/services/M365PlanProtocol');
 
 const MCP_CONFIG_PATH = path.resolve(process.cwd(), 'data', 'mcp-servers.json');
 
@@ -63,7 +64,7 @@ function sanitizeReply(text) {
         .replace(/\[{1,2}\s*(?:BEGIN|END)\s*:[^\]\n\r]+?\]{1,2}/gi, '')
         .replace(/\[\s*(?:BEGIN|END)\s*:[^\]\n\r]+?\]\]/gi, '')
         .replace(/\[\[?\s*(?:BEGIN|END)\s*:[^\]\n\r]+?\]?\]?/gi, '')
-        .replace(/\[\/?GOLEM_(?:MEMORY|ACTION|REPLY)\]/gi, '')
+        .replace(/\[\/?GOLEM_(?:MEMORY|PROJECT_MEMORY|USER_MEMORY|ACTION|PLAN|REPLY)\]/gi, '')
         .trim();
 }
 
@@ -114,6 +115,88 @@ class NeuroShunter {
             act.command ||
             (act.parameters && typeof act.parameters === 'object' && act.parameters.command)
         );
+    }
+
+    static _isPlanCheckpointAction(act) {
+        return normalizeToken(act && act.action) === 'plan-checkpoint';
+    }
+
+    static async _executePlanCheckpoint(ctx, act, brain, controller, options = {}) {
+        const summary = String(act.summary || '').trim();
+        const evidence = Array.isArray(act.evidence) ? act.evidence.map((item) => String(item).trim()) : [];
+        const result = JSON.stringify({
+            type: 'native_copilot_checkpoint',
+            summary,
+            evidence,
+        }, null, 2);
+        if (typeof ctx.onGolemObservation !== 'function') {
+            await ctx.reply('⚠️ 原生步驟已完成，但宿主無法記錄計畫檢查點；自主計畫已安全暫停。');
+            return;
+        }
+        const recorded = await ctx.onGolemObservation({
+            runId: options.workspaceRunId,
+            stepId: options.workspaceStepId,
+            actionId: options.workspaceActionId,
+            planStepId: options.workspacePlanStepId,
+            lane: 'plan_checkpoint',
+            status: 'succeeded',
+            result,
+        });
+
+        const nextDepth = Number(options.actionDepth || 0) + 1;
+        const maxDepth = Number(options.maxActionDepth || CONFIG.MAX_AUTO_TURNS || 5);
+        const mayContinue = nextDepth < maxDepth
+            && !['PAUSED', 'CANCELED', 'COMPLETED', 'RECONCILE_REQUIRED'].includes(recorded?.run?.status);
+        const feedbackPrompt = buildM365PlanObservation({
+            planId: options.workspacePlanId || recorded?.planId,
+            planRevision: options.workspacePlanRevision || recorded?.planRevision,
+            stepId: options.workspaceStepId,
+            planStepId: options.workspacePlanStepId,
+            actionId: options.workspaceActionId,
+            lane: 'plan_checkpoint',
+            status: 'succeeded',
+            result,
+        });
+        const feedbackOptions = {
+            isPriority: true,
+            bypassDebounce: true,
+            isSystemFeedback: true,
+            allowActions: mayContinue,
+            actionDepth: nextDepth,
+            maxActionDepth: maxDepth,
+            maxAutoTurns: maxDepth + 1,
+            planMode: true,
+            workspaceConversationId: ctx.workspaceConversationId || null,
+            workspaceRunId: options.workspaceRunId,
+            workspaceStepId: options.workspaceStepId,
+            workspacePlanId: options.workspacePlanId || recorded?.planId,
+            workspacePlanRevision: options.workspacePlanRevision || recorded?.planRevision,
+            workspacePlanStepId: options.workspacePlanStepId,
+            workspaceActionId: options.workspaceActionId,
+        };
+
+        let convoManager = controller && controller.convoManager;
+        if (!convoManager) {
+            try {
+                const getOrCreate =
+                    (typeof global.getOrCreateGolem === 'function' && global.getOrCreateGolem)
+                    || require('../../index').getOrCreateGolem;
+                convoManager = getOrCreate(controller && controller.golemId).convoManager;
+            } catch (error) {
+                console.warn('[NeuroShunter] Unable to resolve the conversation queue for plan_checkpoint:', error.message);
+            }
+        }
+
+        if (convoManager && typeof convoManager.enqueue === 'function') {
+            await convoManager.enqueue(ctx, feedbackPrompt, feedbackOptions);
+            return;
+        }
+        if (brain && typeof brain.sendMessage === 'function') {
+            const finalResponse = await brain.sendMessage(feedbackPrompt, false, feedbackOptions);
+            await this.dispatch(ctx, finalResponse, brain, controller, feedbackOptions);
+            return;
+        }
+        await ctx.reply('⚠️ 原生步驟已完成，但找不到可用的對話佇列；自主計畫已停在目前檢查點。');
     }
 
     static _tryRecoverSlashAction(act) {
@@ -224,16 +307,60 @@ class NeuroShunter {
 
         const parsed = ResponseParser.parse(textToParse);
         let shouldSuppressReply = options.suppressReply === true;
-        const isSystemFeedback = options.isSystemFeedback === true;
-        const allowActions = options.allowActions === true;
-        const actionDepth = Number(options.actionDepth || 0);
-        const maxActionDepth = Math.max(1, Number(options.maxActionDepth || CONFIG.MAX_AUTO_TURNS || 5));
         const localContextEnabled = !brain || typeof brain.isLocalContextEnabled !== 'function'
             ? true
             : brain.isLocalContextEnabled();
         const runtimeActionsEnabled = !brain || typeof brain.areActionsEnabled !== 'function'
             ? true
             : brain.areActionsEnabled();
+
+        if (runtimeActionsEnabled && typeof ctx?.onGolemProtocolResponse === 'function') {
+            try {
+                const protocolResult = await ctx.onGolemProtocolResponse({
+                    rawResponse: textToParse,
+                    parsed,
+                    actionCount: parsed.actions.length,
+                    isSystemFeedback: options.isSystemFeedback === true,
+                });
+                if (protocolResult && protocolResult.planMode) {
+                    options = {
+                        ...options,
+                        planMode: true,
+                        allowActions: protocolResult.allowActions === true,
+                        maxActionDepth: Number(protocolResult.maxActionDepth || options.maxActionDepth || CONFIG.MAX_AUTO_TURNS || 5),
+                        workspaceRunId: protocolResult.runId || options.workspaceRunId || null,
+                        workspaceStepId: protocolResult.stepId || options.workspaceStepId || null,
+                        workspacePlanId: protocolResult.planId || options.workspacePlanId || null,
+                        workspacePlanRevision: protocolResult.planRevision ?? options.workspacePlanRevision ?? 0,
+                        workspacePlanStepId: protocolResult.planStepId || options.workspacePlanStepId || null,
+                        workspaceActionId: protocolResult.actionId || options.workspaceActionId || null,
+                    };
+                    if (protocolResult.accepted === false) parsed.actions = [];
+                    if (protocolResult.warning) {
+                        parsed.reply = `${parsed.reply || ''}\n\n${protocolResult.warning}`.trim();
+                    }
+                }
+            } catch (error) {
+                console.error('[NeuroShunter] GOLEM_PLAN host callback failed:', error);
+                if (parsed.plan || parsed.planError) {
+                    parsed.actions = [];
+                    parsed.reply = `${parsed.reply || ''}\n\n⚠️ 自主計畫已暫停：本機持久化或狀態驗證失敗。`.trim();
+                }
+            }
+        } else if (parsed.plan || parsed.planError) {
+            parsed.actions = [];
+            parsed.reply = `${parsed.reply || ''}\n\n⚠️ 自主計畫已暫停：目前沒有可用的本機計畫控制器。`.trim();
+        }
+
+        if (options.planMode === true && parsed.actions.length > 0 && !parsed.plan && options.m365ActionApproved !== true) {
+            parsed.actions = [];
+            parsed.reply = `${parsed.reply || ''}\n\n⚠️ 自主計畫已暫停：後續工具動作缺少同版本 GOLEM_PLAN。`.trim();
+        }
+
+        const isSystemFeedback = options.isSystemFeedback === true;
+        const allowActions = options.allowActions === true;
+        const actionDepth = Number(options.actionDepth || 0);
+        const maxActionDepth = Math.max(1, Number(options.maxActionDepth || CONFIG.MAX_AUTO_TURNS || 5));
 
         if (!runtimeActionsEnabled && parsed.actions.length > 0) {
             console.warn(`🛡️ [NeuroShunter] 此後端的自動動作已停用，已忽略 ${parsed.actions.length} 個模型提議動作。`);
@@ -245,6 +372,9 @@ class NeuroShunter {
             parsed.avoidMemory = null;
         }
 
+        const hostCheckpointOnly = options.planMode === true
+            && parsed.actions.length > 0
+            && parsed.actions.every((action) => this._isPlanCheckpointAction(action));
         const needsM365Approval = runtimeActionsEnabled
             && parsed.actions.length > 0
             && brain
@@ -252,7 +382,8 @@ class NeuroShunter {
             && brain.webBackend.id === 'm365-web'
             && brain.webBackend.safeMode
             && process.env.GOLEM_AUTO_APPROVE_ALL !== 'true'
-            && options.m365ActionApproved !== true;
+            && options.m365ActionApproved !== true
+            && !hostCheckpointOnly;
 
         if (needsM365Approval) {
             if (controller && controller.pendingTasks) {
@@ -271,6 +402,13 @@ class NeuroShunter {
                         preferredSkillIds: Array.isArray(options.preferredSkillIds) ? options.preferredSkillIds : [],
                         preferredSkillActions: Array.isArray(options.preferredSkillActions) ? options.preferredSkillActions : [],
                         preferredMcpServers: Array.isArray(options.preferredMcpServers) ? options.preferredMcpServers : [],
+                        planMode: options.planMode === true,
+                        workspaceRunId: options.workspaceRunId || null,
+                        workspaceStepId: options.workspaceStepId || null,
+                        workspacePlanId: options.workspacePlanId || null,
+                        workspacePlanRevision: Number(options.workspacePlanRevision || 0),
+                        workspacePlanStepId: options.workspacePlanStepId || null,
+                        workspaceActionId: options.workspaceActionId || null,
                     },
                 });
                 const compactActions = JSON.stringify(parsed.actions, null, 2).slice(0, 6000);
@@ -335,6 +473,7 @@ class NeuroShunter {
                     {
                         conversationId: ctx.workspaceConversationId,
                         requestId: ctx.workspaceRequestId,
+                        workspacePath: ctx.workspaceRoot,
                     }
                 );
                 console.log(`[GOLEM_PROJECT_MEMORY] updated=${result.results.filter((item) => item.changed).length} project=${ctx.workspaceProjectId}`);
@@ -512,7 +651,11 @@ class NeuroShunter {
             for (const originalAct of parsed.actions) {
                 let act = originalAct;
 
-                if (!ActionExecutionGate.validate(act, { activeTools: turnActiveTools }).ok) {
+                const gateOptions = {
+                    activeTools: turnActiveTools,
+                    planMode: options.planMode === true,
+                };
+                if (!ActionExecutionGate.validate(act, gateOptions).ok) {
                     const slashRecovery = this._tryRecoverSlashAction(act);
                     if (slashRecovery && slashRecovery.action) {
                         console.log(slashRecovery.note);
@@ -520,7 +663,7 @@ class NeuroShunter {
                     }
                 }
 
-                const gate = ActionExecutionGate.validate(act, { activeTools: turnActiveTools });
+                const gate = ActionExecutionGate.validate(act, gateOptions);
                 if (!gate.ok) {
                     rejectedActions.push({ action: act, error: gate.error, code: gate.code });
                     continue;
@@ -529,6 +672,9 @@ class NeuroShunter {
                     act.action = gate.normalizedAction;
                 }
                 switch (act.action) {
+                    case 'plan_checkpoint':
+                        await this._executePlanCheckpoint(ctx, act, brain, controller, options);
+                        break;
                     case 'multi_agent':
                         await MultiAgentHandler.execute(ctx, act, controller, brain);
                         break;
@@ -540,7 +686,14 @@ class NeuroShunter {
                         const isSkillHandled = await SkillHandler.execute(ctx, act, brain, controller, {
                             actionDepth,
                             maxActionDepth,
-                            allowActions
+                            allowActions,
+                            planMode: options.planMode === true,
+                            workspaceRunId: options.workspaceRunId || null,
+                            workspaceStepId: options.workspaceStepId || null,
+                            workspacePlanId: options.workspacePlanId || null,
+                            workspacePlanRevision: Number(options.workspacePlanRevision || 0),
+                            workspacePlanStepId: options.workspacePlanStepId || null,
+                            workspaceActionId: options.workspaceActionId || null,
                         });
                         if (!isSkillHandled) {
                             // 若不是已知框架 Action 和非動態技能，則視為底層 Shell 指令
@@ -594,7 +747,51 @@ class NeuroShunter {
 
                 // 透過 convoManager 注入 [System Observation]（讓 Golem 的下一輪能看到）
                 // ActionGate 回灌後允許進行修正重試（受 actionDepth/maxActionDepth 保護）。
-                if (controller && controller.convoManager) {
+                if (options.planMode === true) {
+                    let recorded = null;
+                    if (typeof ctx.onGolemObservation === 'function') {
+                        recorded = await ctx.onGolemObservation({
+                            runId: options.workspaceRunId,
+                            stepId: options.workspaceStepId,
+                            actionId: options.workspaceActionId,
+                            planStepId: options.workspacePlanStepId,
+                            lane: 'action_gate',
+                            status: 'failed',
+                            result: observationText,
+                        });
+                    }
+                    const nextDepth = actionDepth + 1;
+                    const planObservation = buildM365PlanObservation({
+                        planId: options.workspacePlanId || recorded?.planId,
+                        planRevision: options.workspacePlanRevision || recorded?.planRevision,
+                        stepId: options.workspaceStepId,
+                        planStepId: options.workspacePlanStepId,
+                        actionId: options.workspaceActionId,
+                        lane: 'action_gate',
+                        status: 'failed',
+                        result: observationText,
+                    });
+                    if (controller && controller.convoManager) {
+                        await controller.convoManager.enqueue(ctx, planObservation, {
+                            isPriority: true,
+                            bypassDebounce: true,
+                            isSystemFeedback: true,
+                            suppressReply: false,
+                            allowActions: nextDepth < maxActionDepth,
+                            actionDepth: nextDepth,
+                            maxActionDepth,
+                            maxAutoTurns: maxActionDepth + 1,
+                            planMode: true,
+                            workspaceConversationId: ctx.workspaceConversationId || null,
+                            workspaceRunId: options.workspaceRunId,
+                            workspaceStepId: options.workspaceStepId,
+                            workspacePlanId: options.workspacePlanId || recorded?.planId,
+                            workspacePlanRevision: options.workspacePlanRevision || recorded?.planRevision,
+                            workspacePlanStepId: options.workspacePlanStepId,
+                            workspaceActionId: options.workspaceActionId,
+                        });
+                    }
+                } else if (controller && controller.convoManager) {
                     await controller.convoManager.enqueue(ctx, observationText, {
                         isPriority: true,
                         bypassDebounce: true,
@@ -641,7 +838,15 @@ class NeuroShunter {
                 await CommandHandler.execute(ctx, normalActions, controller, brain, (c, r, b, ctrl) => this.dispatch(c, r, b, ctrl, options), {
                     actionDepth,
                     maxActionDepth,
-                    allowActions
+                    allowActions,
+                    actionQueueManaged: options.actionQueueManaged === true,
+                    planMode: options.planMode === true,
+                    workspaceRunId: options.workspaceRunId || null,
+                    workspaceStepId: options.workspaceStepId || null,
+                    workspacePlanId: options.workspacePlanId || null,
+                    workspacePlanRevision: Number(options.workspacePlanRevision || 0),
+                    workspacePlanStepId: options.workspacePlanStepId || null,
+                    workspaceActionId: options.workspaceActionId || null,
                 });
             }
         }

@@ -76,8 +76,12 @@ describe('built-in M365 Session Bridge distribution', () => {
         expect(packageJson.scripts['install:m365']).toContain('install-m365-golem.ps1');
         expect(packageJson.scripts['bridge:install']).toContain('install-m365-session-bridge.ps1');
         expect(packageJson.scripts['unix:setup']).toBeUndefined();
-        expect(read('Start-M365-POC.bat')).toContain('integrations\\m365-session-bridge\\apps\\mcp-server\\dist\\index.js');
+        expect(read('Start-Golem.bat')).toContain('integrations\\m365-session-bridge\\apps\\mcp-server\\dist\\index.js');
         expect(read('Install-M365-Golem.bat')).toContain('install-m365-golem.ps1');
+        expect(fs.existsSync(path.join(ROOT, 'scripts', 'select-workspace-folder.ps1'))).toBe(true);
+        const releaseBuilder = read('scripts/build-m365-release.ps1');
+        expect(releaseBuilder).toContain("'scripts/select-workspace-folder.ps1'");
+        expect(releaseBuilder).toMatch(/\$Required\s*=\s*@\([\s\S]*'scripts\/select-workspace-folder\.ps1'/);
         expect(read('00-安裝前請先閱讀.txt')).toContain('Get-ChildItem -Recurse -File | Unblock-File');
         expect(read('README.md')).toContain('先對 ZIP 按右鍵 → 內容 → 解除封鎖');
         expect(read('jest.config.cjs')).toContain('<rootDir>/integrations/m365-session-bridge/');

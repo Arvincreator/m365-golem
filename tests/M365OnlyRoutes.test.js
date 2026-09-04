@@ -32,6 +32,7 @@ describe('M365-only API surface', () => {
 
     test.each([
         ['GET', '/api/m365/workspace/status'],
+        ['POST', '/api/m365/workspace/pick-folder'],
         ['POST', '/api/projects'],
         ['PATCH', '/api/projects/project-1'],
         ['GET', '/api/projects/project-1/conversations'],

@@ -1,6 +1,9 @@
 'use strict';
 
+const crypto = require('crypto');
 const express = require('express');
+const LocalWorkspacePicker = require('../../src/services/LocalWorkspacePicker');
+const { getM365AttachmentService } = require('../../src/services/M365AttachmentService');
 const {
     acquireM365DispatchLease,
     activateM365Conversation,
@@ -11,6 +14,24 @@ const {
     releaseM365DispatchLease,
 } = require('../../src/services/M365WorkspaceService');
 const { getM365RunCoordinator } = require('../../src/services/M365RunCoordinator');
+const { getClientIp, isLocalIp } = require('../server/security');
+
+const LOCAL_BROWSER_HOSTS = new Set(['localhost', '127.0.0.1', '[::1]']);
+const LOCAL_BROWSER_PORTS = new Set(['3000', '3001']);
+
+function isLocalBrowserRequest(req) {
+    if (!isLocalIp(getClientIp(req))) return false;
+    const source = String(req.headers.origin || req.headers.referer || '').trim();
+    if (!source) return false;
+    try {
+        const url = new URL(source);
+        return ['http:', 'https:'].includes(url.protocol)
+            && LOCAL_BROWSER_HOSTS.has(url.hostname)
+            && LOCAL_BROWSER_PORTS.has(url.port);
+    } catch (_) {
+        return false;
+    }
+}
 
 function statusForError(error) {
     if (Number.isInteger(error && error.statusCode)) return error.statusCode;
@@ -76,17 +97,141 @@ module.exports = function registerM365WorkspaceRoutes(server) {
         }
     });
 
+    router.post('/api/m365/workspace/pick-folder', async (req, res) => {
+        if (!isLocalBrowserRequest(req)) {
+            return res.status(403).json({
+                success: false,
+                error: 'M365_FOLDER_PICKER_LOCAL_ONLY',
+                message: 'The folder picker can only be opened from the local M365 Golem interface.',
+            });
+        }
+        try {
+            if (!server.localWorkspacePicker) server.localWorkspacePicker = new LocalWorkspacePicker();
+            const result = await server.localWorkspacePicker.selectFolder({
+                description: req.body && req.body.description,
+                initialPath: req.body && req.body.initialPath,
+            });
+            return res.json({ success: true, ...result });
+        } catch (error) {
+            return sendError(res, error);
+        }
+    });
+
+    router.post('/api/m365/attachments/batches', async (req, res) => {
+        if (!isLocalBrowserRequest(req)) {
+            return res.status(403).json({
+                success: false,
+                error: 'M365_ATTACHMENT_LOCAL_ONLY',
+                message: 'Attachments can only be staged from the local M365 Golem interface.',
+            });
+        }
+        try {
+            const projectId = String(req.body && req.body.projectId || '').trim();
+            const conversationId = String(req.body && req.body.conversationId || '').trim();
+            const store = await getM365WorkspaceStore(server);
+            const conversation = await store.getConversation(conversationId);
+            if (conversation.projectId !== projectId) {
+                const error = new Error('The selected conversation does not belong to the selected project.');
+                error.code = 'M365_PROJECT_CONVERSATION_MISMATCH';
+                error.statusCode = 409;
+                throw error;
+            }
+            const batch = getM365AttachmentService(server).createBatch({ projectId, conversationId });
+            return res.status(201).json({ success: true, ...batch });
+        } catch (error) {
+            return sendError(res, error);
+        }
+    });
+
+    router.post('/api/m365/attachments/batches/:batchId/files', async (req, res) => {
+        if (!isLocalBrowserRequest(req)) {
+            return res.status(403).json({
+                success: false,
+                error: 'M365_ATTACHMENT_LOCAL_ONLY',
+                message: 'Attachments can only be staged from the local M365 Golem interface.',
+            });
+        }
+        try {
+            const projectId = String(req.body && req.body.projectId || '').trim();
+            const conversationId = String(req.body && req.body.conversationId || '').trim();
+            const store = await getM365WorkspaceStore(server);
+            const conversation = await store.getConversation(conversationId);
+            if (conversation.projectId !== projectId) {
+                const error = new Error('The selected conversation does not belong to the selected project.');
+                error.code = 'M365_PROJECT_CONVERSATION_MISMATCH';
+                error.statusCode = 409;
+                throw error;
+            }
+            const staged = getM365AttachmentService(server).stageFile(
+                req.params.batchId,
+                { projectId, conversationId },
+                {
+                    fileName: req.body && req.body.fileName,
+                    base64Data: req.body && req.body.base64Data,
+                }
+            );
+            return res.status(201).json({ success: true, ...staged });
+        } catch (error) {
+            return sendError(res, error);
+        }
+    });
+
+    router.post('/api/m365/attachments/batches/:batchId/cancel', async (req, res) => {
+        if (!isLocalBrowserRequest(req)) {
+            return res.status(403).json({
+                success: false,
+                error: 'M365_ATTACHMENT_LOCAL_ONLY',
+                message: 'Attachments can only be removed from the local M365 Golem interface.',
+            });
+        }
+        try {
+            const projectId = String(req.body && req.body.projectId || '').trim();
+            const conversationId = String(req.body && req.body.conversationId || '').trim();
+            const removed = getM365AttachmentService(server).cleanupBatch(
+                req.params.batchId,
+                { projectId, conversationId }
+            );
+            return res.json({ success: true, removed });
+        } catch (error) {
+            return sendError(res, error);
+        }
+    });
+
     router.post('/api/projects', async (req, res) => {
+        let project = null;
         try {
             const store = await getM365WorkspaceStore(server);
-            const project = await store.createProject({
-                name: req.body.name,
-                description: req.body.description,
-                instructions: req.body.instructions,
+            const workspaceService = getM365ProjectWorkspaceService(server);
+            const input = req.body || {};
+            const projectId = crypto.randomUUID();
+            const workspacePlan = workspaceService.planProjectWorkspace(projectId, {
+                workspaceMode: input.workspaceMode,
+                workspacePath: input.workspacePath,
+                workspaceFolderName: input.workspaceFolderName,
+                projectName: input.name,
             });
-            const workspace = getM365ProjectWorkspaceService(server).ensureProject(project.id);
+            project = await store.createProject({
+                id: projectId,
+                name: input.name,
+                description: input.description,
+                instructions: input.instructions,
+                workspaceMode: workspacePlan.mode,
+                workspacePath: workspacePlan.workspacePathForStorage,
+            });
+            const workspace = workspaceService.ensureProject(project.id, {
+                workspacePath: workspacePlan.workspacePathForStorage,
+                createWorkspaceRoot: !workspacePlan.rootExisted,
+            });
             return res.status(201).json({ success: true, project, workspace });
         } catch (error) {
+            if (project) {
+                try {
+                    const store = await getM365WorkspaceStore(server);
+                    await store.removeProjectAfterFailedCreation(project.id);
+                } catch (rollbackError) {
+                    console.error(`[M365 Workspace] Failed to roll back project ${project.id}:`, rollbackError);
+                }
+            }
             return sendError(res, error);
         }
     });
@@ -115,7 +260,9 @@ module.exports = function registerM365WorkspaceRoutes(server) {
         try {
             const store = await getM365WorkspaceStore(server);
             const project = await store.getProject(req.params.projectId);
-            const workspace = getM365ProjectWorkspaceService(server).ensureProject(project.id);
+            const workspace = getM365ProjectWorkspaceService(server).ensureProject(project.id, {
+                workspacePath: project.workspacePath,
+            });
             return res.json({ success: true, workspace });
         } catch (error) {
             return sendError(res, error);
@@ -325,7 +472,18 @@ module.exports = function registerM365WorkspaceRoutes(server) {
                 store.listApprovals(req.params.runId),
                 store.getLatestCheckpoint(req.params.runId),
             ]);
-            return res.json({ success: true, run, steps, events, approvals, checkpoint });
+            const latestPlanEvent = [...events].reverse().find((event) => event.eventType === 'autonomous_plan_received');
+            const createdEvent = events.find((event) => event.eventType === 'run_created');
+            return res.json({
+                success: true,
+                run,
+                steps,
+                events,
+                approvals,
+                checkpoint,
+                plan: latestPlanEvent?.payload?.plan || null,
+                origin: createdEvent?.payload?.origin || 'user',
+            });
         } catch (error) {
             return sendError(res, error);
         }
@@ -381,6 +539,16 @@ module.exports = function registerM365WorkspaceRoutes(server) {
         }
     });
 
+    router.post('/api/runs/:runId/complete', async (req, res) => {
+        try {
+            const coordinator = await getM365RunCoordinator(server);
+            const run = await coordinator.completeRun(req.params.runId, req.body || {});
+            return res.json({ success: true, run });
+        } catch (error) {
+            return sendError(res, error);
+        }
+    });
+
     router.post('/api/runs/:runId/reconcile', async (req, res) => {
         try {
             const coordinator = await getM365RunCoordinator(server);
@@ -404,4 +572,4 @@ module.exports = function registerM365WorkspaceRoutes(server) {
     return router;
 };
 
-module.exports._private = { sendError, statusForError };
+module.exports._private = { isLocalBrowserRequest, sendError, statusForError };

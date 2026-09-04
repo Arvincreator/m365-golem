@@ -7,125 +7,12 @@ const SkillArchitect = require('../managers/SkillArchitect');
 const wikiSkill = require('../skills/modules/wiki/index.js');
 const { toolsetManager, SCENE_TOOLSETS } = require('../managers/ToolsetManager');
 const { hookSystem } = require('./HookSystem'); // ⚡ [OpenHarness-inspired]
-const { buildFreshStockSnapshotInjection } = require('../services/StockDashboardSnapshot');
-const { buildFreshCryptoSnapshotInjection } = require('../services/CryptoDashboardSnapshot');
 const fs = require('fs');
 
 // ✨ [v9.1 Addon] 初始化技能架構師 (Web Gemini Mode)
 // 注意：這裡不傳入 Model，因為我們將在 NodeRouter 中傳入 Web Brain
 const architect = new SkillArchitect();
 console.log("🏗️ [SkillArchitect] 技能架構師已就緒 (Web Mode)");
-
-const STOCK_NAME_SYMBOLS = {
-    '台積電': '2330.TW',
-    'tsmc': 'TSM',
-    '鴻海': '2317.TW',
-    '富士康': '2317.TW',
-    '聯發科': '2454.TW',
-    '聯電': '2303.TW',
-    '元大台灣50': '0050.TW',
-    '台灣50': '0050.TW',
-    '元大高股息': '0056.TW',
-    '高股息': '0056.TW',
-    '中華電': '2412.TW',
-    '富邦金': '2881.TW',
-    '國泰金': '2882.TW',
-    '中信金': '2891.TW',
-};
-const TAIWAN_SYMBOL_RE = /^\d{4,6}[A-Z]{0,3}$/;
-const STOCK_SYMBOL_STOP_WORDS = new Set([
-    'BOARD',
-    'STOCK',
-    'STOCKS',
-    'DASHBOARD',
-    'MARKET',
-    'ANALYSIS',
-    'DATA',
-    'LIVE',
-    'SIDE',
-    'RANGE',
-    'JSON',
-    'TRUE',
-    'FALSE',
-    'NULL',
-    'SOURCE',
-    'STATUS',
-]);
-
-function normalizeStockSymbol(input) {
-    const value = String(input || '').trim().toUpperCase();
-    if (!value) return '';
-    if (TAIWAN_SYMBOL_RE.test(value)) return `${value}.TW`;
-    return value.replace(/[^A-Z0-9.^=-]/g, '').slice(0, 24);
-}
-
-function extractStockSymbolsFromText(text) {
-    const found = new Set();
-    const lower = String(text || '').toLowerCase();
-    Object.entries(STOCK_NAME_SYMBOLS).forEach(([name, symbol]) => {
-        if (lower.includes(name.toLowerCase())) found.add(symbol);
-    });
-    const symbolMatches = String(text || '').match(/\b[A-Z]{1,5}\b|\b\d{4,6}[A-Z]{0,3}(?:\.(?:TW|TWO))?\b/gi) || [];
-    symbolMatches
-        .map(normalizeStockSymbol)
-        .filter((symbol) => {
-            if (!symbol) return false;
-            const displaySymbol = symbol.replace(/\.(TW|TWO)$/i, '');
-            if (STOCK_SYMBOL_STOP_WORDS.has(displaySymbol)) return false;
-            if (/^(19|20)\d{2}$/.test(displaySymbol)) return false;
-            return true;
-        })
-        .forEach((symbol) => found.add(symbol));
-    return Array.from(found).slice(0, 8);
-}
-
-const CRYPTO_NAME_SYMBOLS = {
-    '比特幣': 'BTC-USDT',
-    'bitcoin': 'BTC-USDT',
-    '以太幣': 'ETH-USDT',
-    'ethereum': 'ETH-USDT',
-    'solana': 'SOL-USDT',
-    '狗狗幣': 'DOGE-USDT',
-    '瑞波': 'XRP-USDT',
-};
-const CRYPTO_QUOTE_SUFFIXES = ['USDT', 'USDC', 'USD', 'BTC', 'ETH'];
-const CRYPTO_SYMBOL_STOP_WORDS = new Set(['CRYPTO', 'BOARD', 'DASHBOARD', 'MARKET', 'ANALYSIS', 'LIVE']);
-
-function normalizeCryptoSymbol(input) {
-    const value = String(input || '').trim().toUpperCase().replace(/\s+/g, '');
-    if (!value) return '';
-    const pair = value.replace('/', '-');
-    if (/^[A-Z0-9]{2,12}-[A-Z0-9]{2,8}$/.test(pair)) {
-        return pair.endsWith('-USD') ? pair.replace(/-USD$/, '-USDT') : pair;
-    }
-    for (const quote of CRYPTO_QUOTE_SUFFIXES) {
-        if (value.endsWith(quote) && value.length > quote.length + 1) {
-            const base = value.slice(0, -quote.length);
-            if (/^[A-Z0-9]{2,12}$/.test(base)) return `${base}-${quote}`;
-        }
-    }
-    if (/^[A-Z0-9]{2,12}$/.test(value)) return `${value}-USDT`;
-    return '';
-}
-
-function extractCryptoSymbolsFromText(text) {
-    const found = new Set();
-    const source = String(text || '');
-    const lower = source.toLowerCase();
-    Object.entries(CRYPTO_NAME_SYMBOLS).forEach(([name, symbol]) => {
-        if (lower.includes(name.toLowerCase())) found.add(symbol);
-    });
-    const symbolMatches = source.match(/\b[A-Z]{2,12}(?:[-/](?:USDT|USDC|USD|BTC|ETH))?\b/gi) || [];
-    symbolMatches
-        .map(normalizeCryptoSymbol)
-        .filter((symbol) => {
-            if (!symbol) return false;
-            const [base] = symbol.split('-');
-            return !CRYPTO_SYMBOL_STOP_WORDS.has(base);
-        })
-        .forEach((symbol) => found.add(symbol));
-    return Array.from(found).slice(0, 10);
-}
 
 function hasExampleSection(promptText) {
     const text = String(promptText || '');
@@ -1032,63 +919,6 @@ class NodeRouter {
         }
 
         if (text.startsWith('/patch') || text.includes('優化代碼')) return false;
-
-        const wantsStockDashboard =
-            /^\/(stockboard|stock-dashboard|stocks?)(\s|$)/i.test(text) ||
-            /(分析|研究|評估|看看|幫我看).{0,24}(股票|股價|台股|美股|個股|台積電|鴻海|聯發科|NVDA|AAPL|TSM|\d{4,6})/i.test(text) ||
-            /(股票|股價|台股|美股|個股|台積電|鴻海|聯發科|NVDA|AAPL|TSM|\d{4,6}).{0,24}(分析|研究|評估|能不能|可不可以|追|買|賣)/i.test(text) ||
-            /(股市|股票|行情).{0,8}(看板|dashboard)/i.test(text) ||
-            /(看板|dashboard).{0,8}(股市|股票|行情)/i.test(text) ||
-            /stock\s+dashboard/i.test(text);
-
-        if (wantsStockDashboard) {
-            const userRequest = text.replace(/^\/(stockboard|stock-dashboard|stocks?)\s*/i, '').trim() || '請分析目前股市看板。';
-            const symbols = extractStockSymbolsFromText(userRequest);
-            const enrichedText = [
-                userRequest,
-                '',
-                await buildFreshStockSnapshotInjection({
-                    trigger: 'telegram-stock-dashboard-command',
-                    symbols: symbols.length ? symbols : undefined,
-                    selectedSymbol: symbols[0],
-                }),
-                '',
-                '請輸出：市場概況、主要強弱標的、技術指標重點、兩週內中文優先新聞脈絡、風險提醒、接下來可觀察的價位或事件。不要做保證式投資建議。',
-            ].join('\n');
-            if (typeof ctx.setTextOverride === 'function') {
-                ctx.setTextOverride(enrichedText);
-            } else {
-                ctx.textOverride = enrichedText;
-            }
-            return false;
-        }
-
-        const wantsCryptoDashboard =
-            /^\/(cryptoboard|crypto-dashboard|cryptos?|coinboard)(\s|$)/i.test(text) ||
-            /(分析|研究|評估|看看|幫我看).{0,24}(加密貨幣|幣圈|虛擬貨幣|比特幣|以太幣|BTC|ETH|SOL|XRP|DOGE)/i.test(text) ||
-            /(加密貨幣|幣圈|虛擬貨幣|比特幣|以太幣|BTC|ETH|SOL|XRP|DOGE).{0,24}(分析|研究|評估|能不能|可不可以|追|買|賣)/i.test(text) ||
-            /(幣市|加密貨幣|crypto).{0,8}(看板|dashboard)/i.test(text) ||
-            /(看板|dashboard).{0,8}(幣市|加密貨幣|crypto)/i.test(text) ||
-            /crypto\s+dashboard/i.test(text);
-
-        if (wantsCryptoDashboard) {
-            const userRequest = text.replace(/^\/(cryptoboard|crypto-dashboard|cryptos?|coinboard)\s*/i, '').trim() || '請分析目前加密貨幣看板。';
-            const symbols = extractCryptoSymbolsFromText(userRequest);
-            const enrichedText = [
-                userRequest,
-                '',
-                await buildFreshCryptoSnapshotInjection({
-                    trigger: 'telegram-crypto-dashboard-command',
-                    symbols: symbols.length ? symbols : undefined,
-                    selectedSymbol: symbols[0],
-                }),
-                '',
-                '請輸出：幣市概況、主要強弱幣對、技術指標重點、兩週內中文優先新聞脈絡、風險提醒、接下來可觀察的價位或事件。不要做保證式投資建議。',
-            ].join('\n');
-            if (typeof ctx.setTextOverride === 'function') ctx.setTextOverride(enrichedText);
-            else ctx.textOverride = enrichedText;
-            return false;
-        }
 
         // ── /wiki 指令 ───────────────────────────────────────────
         if (text.startsWith('/wiki')) {

@@ -104,6 +104,35 @@ describe('ToolRouter', () => {
         expect(hint).toContain('do not merely say that you could propose it');
     });
 
+    test('routes an autonomous interactive webpage build to the local artifact command lane', () => {
+        const router = new ToolRouter({
+            activeScene: 'coding',
+            activeTools: ['chrome-devtools']
+        });
+        const query = '那你分步驟幫我製作有互動能力的網頁';
+
+        const result = router.route(query);
+        const hint = router.buildRoutingHint(query);
+
+        expect(result.commandLane).toEqual(expect.objectContaining({
+            recommended: true,
+            reason: 'local_project_artifact_authoring',
+        }));
+        expect(hint).toContain('local project artifact creation or modification detected');
+        expect(hint).toContain('maintain GOLEM_PLAN');
+        expect(hint).not.toContain('Emit the smallest read-only command action now');
+    });
+
+    test('does not treat opening or explaining a webpage as local artifact authoring', () => {
+        const router = new ToolRouter({
+            activeScene: 'coding',
+            activeTools: ['chrome-devtools']
+        });
+
+        expect(router.route('幫我開啟這個網頁').commandLane.recommended).toBe(false);
+        expect(router.route('請解釋互動式網頁是什麼').commandLane.recommended).toBe(false);
+    });
+
     test('uses vector matches and includes the selected skill usage guide', async () => {
         const toolVectorIndex = {
             search: jest.fn().mockResolvedValue([{ id: 'reference-files', score: 0.9 }])

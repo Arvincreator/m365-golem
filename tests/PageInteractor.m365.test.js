@@ -1,3 +1,6 @@
+const fs = require('fs');
+const os = require('os');
+const path = require('path');
 const PageInteractor = require('../src/core/PageInteractor');
 const { getWebBackendDefinition } = require('../src/core/web_backends');
 const { ResponseExtractor } = require('../packages/protocol');
@@ -29,7 +32,7 @@ describe('PageInteractor M365 safety behavior', () => {
         expect(page.evaluate).not.toHaveBeenCalled();
     });
 
-    test('reuses the original Golem send reinforcement when the first M365 click leaves the draft in place', async () => {
+    test('does not duplicate-submit when the current M365 envelope already cleared', async () => {
         const page = { mouse: { click: jest.fn() } };
         const interactor = new PageInteractor(page, {}, definition);
         jest.spyOn(interactor, '_focusBestComposer').mockResolvedValue(null);
@@ -57,8 +60,8 @@ describe('PageInteractor M365 safety behavior', () => {
             startTag: '[[BEGIN:test]]',
         })).resolves.toBeUndefined();
 
-        expect(interactor._tryClickSendButton).toHaveBeenCalledTimes(2);
-        expect(interactor._performSendClick).toHaveBeenCalledTimes(2);
+        expect(interactor._tryClickSendButton).toHaveBeenCalledTimes(1);
+        expect(interactor._performSendClick).toHaveBeenCalledTimes(1);
         expect(keyboardFallback).not.toHaveBeenCalled();
     });
 
@@ -175,6 +178,11 @@ describe('PageInteractor M365 safety behavior', () => {
         });
         jest.spyOn(interactor, '_performSendClick').mockResolvedValue();
         jest.spyOn(interactor, '_waitForSendAccepted').mockResolvedValue(false);
+        jest.spyOn(interactor, '_inspectComposerDraftState').mockResolvedValue({
+            hasDraft: true,
+            hasStartTag: true,
+            length: 8900,
+        });
         jest.spyOn(interactor, '_pressSubmitKeys').mockResolvedValue();
 
         await expect(interactor._clickSend('button[aria-label="Send"]', {
@@ -182,8 +190,40 @@ describe('PageInteractor M365 safety behavior', () => {
             startTag: '[[BEGIN:test]]',
         })).rejects.toMatchObject({ code: 'M365_SEND_UNCONFIRMED' });
 
-        expect(interactor._tryClickSendButton).toHaveBeenCalledTimes(2);
-        expect(interactor._performSendClick).toHaveBeenCalledTimes(2);
+        expect(interactor._tryClickSendButton).toHaveBeenCalledTimes(1);
+        expect(interactor._performSendClick).toHaveBeenCalledTimes(1);
+        expect(interactor._pressSubmitKeys).toHaveBeenCalledTimes(1);
+    });
+
+    test('uses one Enter fallback when a text-only M365 envelope remains after the Send click', async () => {
+        const page = { mouse: { click: jest.fn() } };
+        const interactor = new PageInteractor(page, {}, definition);
+        jest.spyOn(interactor, '_focusBestComposer').mockResolvedValue(null);
+        jest.spyOn(interactor, '_waitForSendTarget').mockResolvedValue({
+            clicked: true,
+            score: 150,
+            label: 'Submit message',
+            x: 10,
+            y: 10,
+        });
+        jest.spyOn(interactor, '_performSendClick').mockResolvedValue();
+        jest.spyOn(interactor, '_waitForSendAccepted')
+            .mockResolvedValueOnce(false)
+            .mockResolvedValueOnce(true);
+        jest.spyOn(interactor, '_inspectComposerDraftState')
+            .mockResolvedValueOnce({ hasDraft: true, hasStartTag: true, length: 8900 })
+            .mockResolvedValueOnce({ hasDraft: false, hasStartTag: false, length: 0 });
+        jest.spyOn(interactor, '_moveWindowToBottom').mockResolvedValue();
+        const keyboardFallback = jest.spyOn(interactor, '_pressSubmitKeys').mockResolvedValue();
+
+        await expect(interactor._clickSend('button[aria-label="Send"]', {
+            payloadLength: 8900,
+            startTag: '[[BEGIN:test]]',
+            hasAttachment: false,
+        })).resolves.toBeUndefined();
+
+        expect(interactor._performSendClick).toHaveBeenCalledTimes(1);
+        expect(keyboardFallback).toHaveBeenCalledTimes(1);
     });
 
     test('stops instead of sending into a busy M365 conversation', async () => {
@@ -245,5 +285,118 @@ describe('PageInteractor M365 safety behavior', () => {
             'old reply',
             expect.objectContaining({ stableFallbackThreshold: 10 })
         );
+    });
+
+    test('uses the visible M365 file input and requires attachment confirmation', async () => {
+        const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), 'm365-interactor-attachment-'));
+        const filePath = path.join(tempDir, 'evidence.txt');
+        fs.writeFileSync(filePath, 'evidence', 'utf8');
+        const setInputFiles = jest.fn().mockResolvedValue();
+        const fileInput = {
+            isDisabled: jest.fn().mockResolvedValue(false),
+            setInputFiles,
+        };
+        const page = {
+            evaluate: jest.fn().mockResolvedValue({ nameCounts: [0], markerCount: 0 }),
+            locator: jest.fn((selector) => {
+                if (selector === 'input[type="file"]') {
+                    return { count: jest.fn().mockResolvedValue(1), nth: jest.fn(() => fileInput) };
+                }
+                return { count: jest.fn().mockResolvedValue(0), nth: jest.fn() };
+            }),
+            waitForFunction: jest.fn().mockResolvedValue({}),
+        };
+        const interactor = new PageInteractor(page, {}, definition);
+
+        try {
+            await expect(interactor._attachM365Files({
+                validatedByM365Harness: true,
+                files: [{
+                    name: 'evidence.txt',
+                    path: filePath,
+                    size: 8,
+                    sha256: require('crypto').createHash('sha256').update('evidence').digest('hex'),
+                }],
+            })).resolves.toBeUndefined();
+        } finally {
+            fs.rmSync(tempDir, { recursive: true, force: true });
+        }
+
+        expect(setInputFiles).toHaveBeenCalledWith([filePath]);
+        expect(page.waitForFunction).toHaveBeenCalled();
+    });
+
+    test('requires consecutive stable M365 upload-ready samples before sending an attachment', async () => {
+        const page = {
+            evaluate: jest.fn()
+                .mockResolvedValueOnce({ errorText: '', pending: true, everyNameVisible: true })
+                .mockResolvedValue({ errorText: '', pending: false, everyNameVisible: true }),
+        };
+        const interactor = new PageInteractor(page, {}, definition);
+        const sendTarget = jest.spyOn(interactor, '_tryClickSendButton').mockResolvedValue({
+            clicked: true,
+            score: 150,
+            label: 'Send message',
+        });
+
+        await expect(interactor._waitForM365AttachmentUploadReady({
+            files: [{ name: 'evidence.txt' }],
+        }, 'button[aria-label="Send"]', 1000, {
+            minimumWaitMs: 0,
+            stableSamples: 3,
+            pollIntervalMs: 1,
+        })).resolves.toBeUndefined();
+
+        expect(page.evaluate).toHaveBeenCalledTimes(4);
+        expect(sendTarget).toHaveBeenCalledTimes(3);
+    });
+
+    test('stops on an M365 attachment upload error before looking for the send button', async () => {
+        const page = {
+            evaluate: jest.fn().mockResolvedValue({
+                errorText: '上傳失敗',
+                pending: false,
+                everyNameVisible: true,
+            }),
+        };
+        const interactor = new PageInteractor(page, {}, definition);
+        const sendTarget = jest.spyOn(interactor, '_tryClickSendButton');
+
+        await expect(interactor._waitForM365AttachmentUploadReady({
+            files: [{ name: 'evidence.txt' }],
+        }, 'button[aria-label="Send"]', 1000, {
+            minimumWaitMs: 0,
+            stableSamples: 1,
+            pollIntervalMs: 1,
+        })).rejects.toMatchObject({ code: 'M365_ATTACHMENT_UPLOAD_FAILED' });
+
+        expect(sendTarget).not.toHaveBeenCalled();
+    });
+
+    test('never falls back to Enter when an M365 attachment send button is not ready', async () => {
+        const page = { mouse: { click: jest.fn() } };
+        const interactor = new PageInteractor(page, {}, definition);
+        jest.spyOn(interactor, '_focusBestComposer').mockResolvedValue(null);
+        jest.spyOn(interactor, '_waitForSendTarget').mockResolvedValue({
+            clicked: false,
+            reason: 'send-button-not-ready',
+        });
+        const keyboardFallback = jest.spyOn(interactor, '_pressSubmitKeys').mockResolvedValue();
+
+        await expect(interactor._clickSend('button[aria-label="Send"]', {
+            payloadLength: 20,
+            sendReadyTimeoutMs: 1,
+            hasAttachment: true,
+        })).rejects.toMatchObject({ code: 'M365_SEND_NOT_READY' });
+
+        expect(keyboardFallback).not.toHaveBeenCalled();
+    });
+
+    test('rejects attachment manifests that did not pass the local harness boundary', async () => {
+        const interactor = new PageInteractor({}, {}, definition);
+        await expect(interactor._attachM365Files({
+            validatedByM365Harness: false,
+            files: [{ name: 'untrusted.txt', path: 'C:\\untrusted.txt', size: 1 }],
+        })).rejects.toMatchObject({ code: 'M365_ATTACHMENT_UNTRUSTED' });
     });
 });
