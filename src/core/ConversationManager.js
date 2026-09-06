@@ -56,6 +56,9 @@ class ConversationManager {
         }
         this.userBuffers.clear();
         this.lastUserTurnByChat.clear();
+        for (const task of this.queue) {
+            this._settleQueueCompletion(task && task.completion);
+        }
         this.queue.length = 0;
         if (this._healthCheckInterval) {
             clearInterval(this._healthCheckInterval);
@@ -86,9 +89,16 @@ class ConversationManager {
             ? this.brain.isLocalContextEnabled()
             : true;
 
-        // Safe mode holds only the active request. It does not retain extra queued prompts
-        // or create approval tasks that contain their text.
-        if (!localContextEnabled && (this.isProcessing || this.queue.length > 0 || this.userBuffers.size > 0)) {
+        // Visible M365 workspace requests may use the same in-memory FIFO as the
+        // original Golem. They are already persisted in the encrypted workspace
+        // store before entering this queue, so the UI can remain writable while
+        // Edge handles the preceding turn.
+        const m365WorkspaceQueueEnabled = !localContextEnabled
+            && options.allowM365Queue === true
+            && Boolean(ctx && ctx.workspaceConversationId);
+        if (!localContextEnabled
+            && !m365WorkspaceQueueEnabled
+            && (this.isProcessing || this.queue.length > 0 || this.userBuffers.size > 0)) {
             if (ctx && typeof ctx.reply === 'function') {
                 await ctx.reply('⚠️ M365 Web POC 正在處理上一則訊息；安全模式不保存額外待處理內容，請稍後重新送出。');
             }
@@ -104,9 +114,24 @@ class ConversationManager {
             // 🎯 [v9.1.15] Reset or increment auto turn count
             if (options.isSystemFeedback) {
                 this.autoTurnCount++;
-                console.log(`🔄 [Dialogue Queue] 自動模式回合數: ${this.autoTurnCount}/${ConfigManager.CONFIG.MAX_AUTO_TURNS || 5}`);
+                console.log(`🔄 [Dialogue Queue] 自動模式回合數: ${this.autoTurnCount}/${Number(options.maxAutoTurns || ConfigManager.CONFIG.MAX_AUTO_TURNS || 5)}`);
             } else {
                 this.autoTurnCount = 0;
+            }
+
+            if (options.waitForCompletion === true) {
+                const queueOptions = { ...options };
+                delete queueOptions.waitForCompletion;
+                return new Promise((resolve) => {
+                    this._commitDirectly(
+                        ctx,
+                        text,
+                        options.isPriority,
+                        options.attachment,
+                        queueOptions,
+                        { resolve, settled: false }
+                    );
+                });
             }
 
             this._commitDirectly(ctx, text, options.isPriority, options.attachment, options);
@@ -138,10 +163,16 @@ class ConversationManager {
         console.log(`[QueueState] queue=${this.queue.length} processing=${this.isProcessing ? 1 : 0} reason=${reason}`);
     }
 
-    _commitDirectly(ctx, text, isPriority, attachment = null, options = {}) {
+    _settleQueueCompletion(completion) {
+        if (!completion || completion.settled) return;
+        completion.settled = true;
+        completion.resolve();
+    }
+
+    _commitDirectly(ctx, text, isPriority, attachment = null, options = {}, completion = null) {
         // ✨ [v9.1 插隊系統：大腦層擴充]
         // 如果不是特急件 (isPriority=false)，且隊列中已有任務 (長度 >= 1)，則觸發詢問
-        if (!isPriority && this.queue.length >= 1) {
+        if (!isPriority && this.queue.length >= 1 && options.autoAppendWhenBusy !== true) {
             const approvalId = uuidv4();
 
             // 將對話任務暫存在 Controller 的 pendingTasks
@@ -151,6 +182,7 @@ class ConversationManager {
                 text,
                 attachment,
                 options, // 🎯 [v9.1.13] 攜帶附加選項
+                completion,
                 timestamp: Date.now()
             });
 
@@ -189,7 +221,7 @@ class ConversationManager {
                         } catch (e) { console.warn("無法更新 Dialogue Timeout 訊息:", e.message); }
 
                         // 超時後強制以一般優先級入隊
-                        this._actualCommit(ctx, text, false, attachment);
+                        this._actualCommit(ctx, text, false, attachment, options, completion);
                     }
                 }, 30000);
             });
@@ -197,15 +229,15 @@ class ConversationManager {
         }
 
         // 正常入隊
-        this._actualCommit(ctx, text, isPriority, attachment, options);
+        this._actualCommit(ctx, text, isPriority, attachment, options, completion);
     }
 
-    _actualCommit(ctx, text, isPriority, attachment = null, options = {}) {
+    _actualCommit(ctx, text, isPriority, attachment = null, options = {}, completion = null) {
         console.log(`📦 [Dialogue Queue] 加入隊列 (Direct) ${isPriority ? '[💥VIP 插隊中]' : ''} - 準備交由大腦處理`);
         if (isPriority) {
-            this.queue.unshift({ ctx, text, attachment, options }); // Priority goes to the front of the line
+            this.queue.unshift({ ctx, text, attachment, options, completion }); // Priority goes to the front of the line
         } else {
-            this.queue.push({ ctx, text, attachment, options });
+            this.queue.push({ ctx, text, attachment, options, completion });
         }
         this._logQueueState(isPriority ? 'enqueue_priority' : 'enqueue_normal');
         this._processQueue();
@@ -226,13 +258,18 @@ class ConversationManager {
         if (this.isProcessing || this.queue.length === 0) return;
 
         // 🎯 [v9.1.15] Enforce Max Auto Turns limit
-        const maxTurns = ConfigManager.CONFIG.MAX_AUTO_TURNS || 5;
+        const nextTask = this.queue[0];
+        const maxTurns = Math.max(1, Number(nextTask?.options?.maxAutoTurns || ConfigManager.CONFIG.MAX_AUTO_TURNS || 5));
         if (this.autoTurnCount >= maxTurns) {
             const lastTask = this.queue[0];
             if (lastTask && lastTask.options && lastTask.options.isSystemFeedback) {
                 console.warn(`🛑 [Dialogue Queue] 已達到自動模式回合上限 (${maxTurns})，停止自動循環。`);
                 this.queue.shift(); // Remove the system feedback task
-                await lastTask.ctx.reply(`⚠️ **自動執行已中止**\n已達到連續自動執行上限 (\`${maxTurns}\` 回合)。為了安全起見，請手動介入確認或重新下達指令。`, { parse_mode: 'Markdown' });
+                try {
+                    await lastTask.ctx.reply(`⚠️ **自動執行已中止**\n已達到連續自動執行上限 (\`${maxTurns}\` 回合)。為了安全起見，請手動介入確認或重新下達指令。`, { parse_mode: 'Markdown' });
+                } finally {
+                    this._settleQueueCompletion(lastTask.completion);
+                }
                 this.autoTurnCount = 0; // Reset for next user interaction
                 this._processQueue();
                 return;
@@ -255,6 +292,9 @@ class ConversationManager {
 
         try {
             console.log(`🚀 [Dialogue Queue:${this.golemId}] 從隊列取出，開始處理對話...`);
+            if (task.ctx && typeof task.ctx.onTransportStart === 'function') {
+                await task.ctx.onTransportStart();
+            }
             const isSystemFeedback = task.options && task.options.isSystemFeedback === true;
             const localContextEnabled = typeof this.brain.isLocalContextEnabled === 'function'
                 ? this.brain.isLocalContextEnabled()
@@ -353,6 +393,9 @@ class ConversationManager {
                 preferredSkillIds: task.ctx && Array.isArray(task.ctx.preferredSkillIds) ? task.ctx.preferredSkillIds : [],
                 preferredSkillActions: task.ctx && Array.isArray(task.ctx.preferredSkillActions) ? task.ctx.preferredSkillActions : [],
                 preferredMcpServers: task.ctx && Array.isArray(task.ctx.preferredMcpServers) ? task.ctx.preferredMcpServers : [],
+                onSendAccepted: task.ctx && typeof task.ctx.onTransportAccepted === 'function'
+                    ? task.ctx.onTransportAccepted
+                    : undefined,
                 toolRoutingQuery: task.ctx && typeof task.ctx.toolRoutingQuery === 'string'
                     ? task.ctx.toolRoutingQuery
                     : task.text,
@@ -408,9 +451,17 @@ class ConversationManager {
                 allowActions: task.options.allowActions === true,
                 actionDepth: Number(task.options.actionDepth || 0),
                 maxActionDepth: Number(task.options.maxActionDepth || ConfigManager.CONFIG.MAX_AUTO_TURNS || 5),
+                actionQueueManaged: task.options.actionQueueManaged === true,
                 preferredSkillIds: task.ctx && Array.isArray(task.ctx.preferredSkillIds) ? task.ctx.preferredSkillIds : [],
                 preferredSkillActions: task.ctx && Array.isArray(task.ctx.preferredSkillActions) ? task.ctx.preferredSkillActions : [],
-                preferredMcpServers: task.ctx && Array.isArray(task.ctx.preferredMcpServers) ? task.ctx.preferredMcpServers : []
+                preferredMcpServers: task.ctx && Array.isArray(task.ctx.preferredMcpServers) ? task.ctx.preferredMcpServers : [],
+                planMode: task.options.planMode === true,
+                workspaceRunId: task.options.workspaceRunId || task.ctx?.workspaceRunId || null,
+                workspaceStepId: task.options.workspaceStepId || task.ctx?.workspaceStepId || null,
+                workspacePlanId: task.options.workspacePlanId || task.ctx?.workspacePlanId || null,
+                workspacePlanRevision: Number(task.options.workspacePlanRevision || task.ctx?.workspacePlanRevision || 0),
+                workspacePlanStepId: task.options.workspacePlanStepId || task.ctx?.workspacePlanStepId || null,
+                workspaceActionId: task.options.workspaceActionId || task.ctx?.workspaceActionId || null
             });
         } catch (e) {
             console.error(`❌ [Dialogue Queue:${this.golemId}] 處理失敗:`, e);
@@ -426,6 +477,7 @@ class ConversationManager {
                 await task.ctx.reply(`⚠️ 系統暫時無法回應，請稍後再試。`);
             }
         } finally {
+            this._settleQueueCompletion(task.completion);
             this.isProcessing = false;
             this._logQueueState('process_done');
             

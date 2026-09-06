@@ -53,6 +53,11 @@ class WebServer {
             ? Math.floor(uploadMaxBytesRaw)
             : 8 * 1024 * 1024;
 
+        const m365AttachmentBytesRaw = Number(process.env.M365_ATTACHMENT_MAX_FILE_BYTES || 25 * 1024 * 1024);
+        this.maxM365AttachmentBytes = Number.isFinite(m365AttachmentBytesRaw) && m365AttachmentBytesRaw > 0
+            ? Math.min(Math.floor(m365AttachmentBytesRaw), 50 * 1024 * 1024)
+            : 25 * 1024 * 1024;
+
         const bodyLimitMbRaw = Number(process.env.DASHBOARD_API_BODY_LIMIT_MB || 5);
         const baseBodyLimitMb = Number.isFinite(bodyLimitMbRaw) && bodyLimitMbRaw > 0
             ? Math.min(bodyLimitMbRaw, 25)
@@ -65,11 +70,20 @@ class WebServer {
             ? Math.min(backupBodyLimitMbRaw, 256)
             : 120;
         const backupBodyLimit = `${backupBodyLimitMb}mb`;
+        const attachmentBodyLimitMb = Math.min(
+            72,
+            Math.max(2, Math.ceil((this.maxM365AttachmentBytes * 1.4) / (1024 * 1024)) + 1)
+        );
+        const attachmentBodyLimit = `${attachmentBodyLimitMb}mb`;
 
         // Backup restore payload can be much larger than normal API requests.
         // Apply a wider limit only for backup endpoints to reduce global attack surface.
         this.app.use('/api/system/backup', express.json({ limit: backupBodyLimit }));
         this.app.use('/api/system/backup', express.urlencoded({ limit: backupBodyLimit, extended: true }));
+
+        // M365 attachments are uploaded one file per explicit local request. Keep
+        // this larger JSON limit scoped to the staging endpoint instead of all APIs.
+        this.app.use('/api/m365/attachments', express.json({ limit: attachmentBodyLimit }));
 
         this.app.use(express.json({ limit: bodyLimit }));
         this.app.use(express.urlencoded({ limit: bodyLimit, extended: true }));
@@ -78,32 +92,16 @@ class WebServer {
         this.server.timeout = 300000;
 
         this.app.use((req, res, next) => {
-            const rpgSources = [
-                'https://cdn.tailwindcss.com',
-                'https://unpkg.com',
-                'https://cdnjs.cloudflare.com',
-                'https://www.gstatic.com',
-                'https://fonts.googleapis.com',
-                'https://fonts.gstatic.com',
-            ].join(' ');
-            const rpgConnectSources = [
-                'https://www.googleapis.com',
-                'https://firebaseinstallations.googleapis.com',
-                'https://identitytoolkit.googleapis.com',
-                'https://firestore.googleapis.com',
-                'https://securetoken.googleapis.com',
-                'https://*.googleapis.com',
-            ].join(' ');
-            const connectSrc = this.allowRemote ? '* ws: wss:' : `'self' ws: wss: ${rpgConnectSources}`;
+            const connectSrc = this.allowRemote ? '* ws: wss:' : "'self' ws: wss:";
             res.setHeader(
                 'Content-Security-Policy',
                 [
                     "default-src 'self'",
                     `connect-src ${connectSrc}`,
-                    `script-src 'self' 'unsafe-inline' 'unsafe-eval' ${rpgSources}`,
-                    `style-src 'self' 'unsafe-inline' ${rpgSources}`,
-                    `font-src 'self' data: ${rpgSources}`,
-                    "img-src 'self' data: blob: *",
+                    "script-src 'self' 'unsafe-inline' 'unsafe-eval'",
+                    "style-src 'self' 'unsafe-inline'",
+                    "font-src 'self' data:",
+                    "img-src 'self' data: blob:",
                     "frame-src 'self'",
                 ].join('; ') + ';'
             );
@@ -231,10 +229,14 @@ class WebServer {
         this.app.use((err, req, res, next) => {
             if (!err) return next();
             if (err.type === 'entity.too.large') {
+                const isAttachmentRequest = String(req.originalUrl || req.url || '')
+                    .startsWith('/api/m365/attachments');
                 return res.status(413).json({
                     success: false,
-                    error: 'Payload too large',
-                    message: 'Backup file is too large for current server limit.',
+                    error: isAttachmentRequest ? 'M365_ATTACHMENT_TOO_LARGE' : 'PAYLOAD_TOO_LARGE',
+                    message: isAttachmentRequest
+                        ? '附件超過目前允許的單檔大小，尚未傳送至 Microsoft 365。'
+                        : 'Request payload is too large for the current server limit.',
                     limit: err.limit || null
                 });
             }

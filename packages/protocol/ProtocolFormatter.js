@@ -127,6 +127,34 @@ ${approvalRule}
 - Never output generic [GOLEM_MEMORY]. Only the separately defined scoped project/user memory blocks are allowed.`;
 }
 
+function buildM365PlanRules(planEnabled, options = {}) {
+    if (!planEnabled) return '- Do not output [GOLEM_PLAN].';
+    const activePlan = options.workspacePlanId
+        ? `- Active host plan: plan_id=${options.workspacePlanId}, last accepted revision=${Number(options.workspacePlanRevision || 0)}. Echo that exact plan_id and increment the revision by exactly one.`
+        : '- For a new plan, set plan_id to null and revision to 1. The host will assign the durable plan_id in its first GOLEM_OBSERVATION.';
+    return `- Before answering every project-workspace request, silently decide whether the requested outcome needs a durable multi-step run. You—not the user—own this decision; never wait for the user to name GOLEM_PLAN, say "分步驟", or ask you to continue.
+- GOLEM_PLAN is a work-orchestration protocol, not merely a local-tool plan. Native Microsoft 365 Copilot reasoning or generation, local commands, Skills, and MCP calls may all be stages in the same plan.
+- Use one [GOLEM_PLAN]...[/GOLEM_PLAN] when correct completion requires two or more dependent work stages that must be revisited across turns; when the user asks you to actually create, modify, test, or verify a local project artifact and the normal workflow is inspect -> change -> verify; or when work must proceed through repeated batches or multiple systems.
+- A request such as "製作一個有互動能力的網頁" means delivering a real artifact in the assigned project, not merely displaying a long code draft. Decide the necessary inspect/build/verify steps yourself and use GOLEM_PLAN when they are dependent.
+- Omit GOLEM_PLAN for ordinary conversation, explanation, advice, brainstorming, a single direct answer, or a code example the user only asked to read. Do not create ceremonial plans for one-step work.
+- GOLEM_PLAN is machine state, not an approval. Actual tool effects remain governed by [GOLEM_ACTION] and Action Gate.
+${activePlan}
+- Use this exact JSON schema and no extra fields:
+[GOLEM_PLAN]
+\`\`\`json
+{"schema_version":"golem_plan/1","plan_id":null,"revision":1,"goal":"user outcome","completion_criteria":"observable finish condition","status":"running","current_step_id":"step_1","steps":[{"id":"step_1","title":"bounded action","status":"in_progress","done_when":"host Observation proves the result"},{"id":"step_2","title":"next step","status":"pending","done_when":"observable finish condition"}],"question":"","approval_request":"","completion_summary":""}
+\`\`\`
+[/GOLEM_PLAN]
+- Plan status is running|wait_user|wait_approval|complete|blocked. Step status is pending|in_progress|completed|blocked|skipped. Use 1-12 unique steps.
+- A running plan has exactly one in_progress step matching current_step_id and must include exactly one bounded [GOLEM_ACTION] block containing exactly one action object in the same response.
+- If the current step uses a local command, listed Skill, or MCP tool, emit that real action. If you completed the current step using only native Microsoft 365 Copilot reasoning or generation in this response, emit {"action":"plan_checkpoint","summary":"what this native step completed","evidence":["visible output or link"]}. The host performs no external effect for plan_checkpoint; it records a bound Observation and wakes your next plan turn.
+- Use plan_checkpoint only after the native step's useful output is present in [GOLEM_REPLY]. It proves only what is visibly present in this Copilot response; never use it to claim that a local file or external system changed.
+- wait_user requires question; wait_approval requires approval_request; complete requires completion_summary, current_step_id="", and every step completed or skipped. Non-running plans cannot include an in_progress step or a GOLEM_ACTION. A final complete plan is the required signal that closes the local multi-step run; do not end with prose alone.
+- Only a host-generated [GOLEM_OBSERVATION] proves external work. After every Observation for an accepted active plan, autonomously return the next plan revision, update step state from that evidence, and either emit the next bounded action or stop in a non-running status. Do not wait for another user message merely to continue a safe running plan.
+- In this autonomous-plan version use command, a listed Skill action, mcp_call, or the host-only plan_checkpoint. Do not use multi_agent inside GOLEM_PLAN because its completion channel is not yet plan-bound.
+- Never repeat a completed action, reuse a stale revision, change plan_id, or continue after the host reports a pause, cancellation, step limit, or reconciliation requirement.`;
+}
+
 class ProtocolFormatter {
     /**
      * 產生短請求 ID (用於信封標記)
@@ -172,6 +200,10 @@ class ProtocolFormatter {
                 || (options.m365AutoApprove === undefined && process.env.GOLEM_AUTO_APPROVE_ALL === 'true');
             const actionRules = buildM365ActionRules(actionsEnabled, autoApprove);
             const memoryRules = buildM365MemoryRules();
+            const planEnabled = actionsEnabled
+                && Boolean(options.workspaceConversationId)
+                && ['1', 'true', 'yes', 'on'].includes(String(process.env.M365_RUNNER_ENABLED || '').trim().toLowerCase());
+            const planRules = buildM365PlanRules(planEnabled, options);
             const bootstrapPrompt = options.m365Bootstrap === true
                 ? `\n\n${buildM365BootstrapPrompt({
                     userDataDir: options.userDataDir,
@@ -191,8 +223,9 @@ ${bootstrapPrompt}
 [RESPONSE FORMAT]
 - Wrap the entire response between ${TAG_START} and ${TAG_END} exactly once.
 - Put the user-facing answer in exactly one [GOLEM_REPLY]...[/GOLEM_REPLY] block.
-- Close protocol sections with square-bracket tags such as [/GOLEM_REPLY], [/GOLEM_PROJECT_MEMORY], [/GOLEM_USER_MEMORY], and [/GOLEM_ACTION]. Never emit XML-style tags such as </GOLEM_REPLY>.
+- Close protocol sections with square-bracket tags such as [/GOLEM_REPLY], [/GOLEM_PROJECT_MEMORY], [/GOLEM_USER_MEMORY], [/GOLEM_PLAN], and [/GOLEM_ACTION]. Never emit XML-style tags such as </GOLEM_REPLY>.
 ${memoryRules}
+${planRules}
 ${actionRules}
 - Answer in the user's language and keep the response concise.
 ${maxResponseWords > 0 ? `- Keep the entire reply under ${maxResponseWords} characters/words.` : ''}

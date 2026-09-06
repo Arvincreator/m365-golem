@@ -81,6 +81,84 @@ describe('M365 project memory', () => {
         }])).toThrow(expect.objectContaining({ code: 'M365_PROJECT_MEMORY_SENSITIVE' }));
     });
 
+    test('creates and uses a user-selected project folder as the shell and memory workspace', () => {
+        const selectedParent = path.join(tempDir, 'selected-parent');
+        fs.mkdirSync(selectedParent);
+        const plan = service.planProjectWorkspace('custom-project', {
+            workspaceMode: 'create',
+            workspacePath: selectedParent,
+            workspaceFolderName: 'Annual Review',
+            projectName: 'Annual Review',
+        });
+
+        expect(plan).toEqual(expect.objectContaining({
+            mode: 'create',
+            rootPath: path.join(selectedParent, 'Annual Review'),
+            workspacePathForStorage: path.join(selectedParent, 'Annual Review'),
+            rootExisted: false,
+        }));
+
+        const workspace = service.ensureProject('custom-project', {
+            workspacePath: plan.rootPath,
+            createWorkspaceRoot: true,
+        });
+        expect(workspace.rootPath).toBe(path.join(selectedParent, 'Annual Review'));
+        expect(fs.existsSync(path.join(workspace.rootPath, 'AGENTS.md'))).toBe(true);
+        expect(fs.existsSync(path.join(workspace.rootPath, '.golem', 'project-memory.json'))).toBe(true);
+        expect(fs.existsSync(path.join(workspace.rootPath, 'references'))).toBe(true);
+        expect(fs.existsSync(path.join(workspace.rootPath, 'outputs'))).toBe(true);
+
+        service.applyMemoryOperations('custom-project', [{
+            operation: 'upsert',
+            kind: 'rule',
+            content: 'Keep this rule inside the selected project folder.',
+        }], { workspacePath: plan.rootPath });
+        expect(fs.readFileSync(path.join(workspace.rootPath, 'AGENTS.md'), 'utf8'))
+            .toContain('Keep this rule inside the selected project folder.');
+        expect(fs.existsSync(path.join(tempDir, 'custom-project'))).toBe(false);
+    });
+
+    test('links an empty existing folder but never overwrites a foreign AGENTS.md', () => {
+        const linkedFolder = path.join(tempDir, 'linked-folder');
+        fs.mkdirSync(linkedFolder);
+        const linkedPlan = service.planProjectWorkspace('linked-project', {
+            workspaceMode: 'existing',
+            workspacePath: linkedFolder,
+        });
+        service.ensureProject('linked-project', { workspacePath: linkedPlan.rootPath });
+        expect(fs.readFileSync(path.join(linkedFolder, 'AGENTS.md'), 'utf8'))
+            .toContain('Project workspace: linked-project');
+
+        const protectedFolder = path.join(tempDir, 'protected-folder');
+        fs.mkdirSync(protectedFolder);
+        const originalAgents = '# Existing repository rules\n\nDo not overwrite this file.\n';
+        fs.writeFileSync(path.join(protectedFolder, 'AGENTS.md'), originalAgents, 'utf8');
+
+        expect(() => service.planProjectWorkspace('other-project', {
+            workspaceMode: 'existing',
+            workspacePath: protectedFolder,
+        })).toThrow(expect.objectContaining({ code: 'M365_PROJECT_AGENTS_CONFLICT', statusCode: 409 }));
+        expect(fs.readFileSync(path.join(protectedFolder, 'AGENTS.md'), 'utf8')).toBe(originalAgents);
+        expect(fs.existsSync(path.join(protectedFolder, '.golem'))).toBe(false);
+    });
+
+    test('rejects a drive root as a project workspace', () => {
+        expect(() => service.planProjectWorkspace('root-project', {
+            workspaceMode: 'existing',
+            workspacePath: path.parse(tempDir).root,
+        })).toThrow(expect.objectContaining({ code: 'M365_PROJECT_WORKSPACE_PATH_INVALID' }));
+    });
+
+    test('does not silently recreate a custom workspace that was moved or deleted', () => {
+        const missingRoot = path.join(tempDir, 'moved-workspace');
+        expect(() => service.ensureProject('moved-project', { workspacePath: missingRoot }))
+            .toThrow(expect.objectContaining({
+                code: 'M365_PROJECT_WORKSPACE_NOT_FOUND',
+                statusCode: 404,
+            }));
+        expect(fs.existsSync(missingRoot)).toBe(false);
+    });
+
     test('uses a project-local LanceDB index for semantic retrieval when an embedder is available', async () => {
         const projectRoot = path.join(tempDir, 'vector-project');
         fs.mkdirSync(projectRoot, { recursive: true });

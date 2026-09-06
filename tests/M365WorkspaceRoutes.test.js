@@ -5,6 +5,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const ConfigManager = require('../src/config');
+const M365AttachmentService = require('../src/services/M365AttachmentService');
 const registerM365WorkspaceRoutes = require('../web-dashboard/routes/api.m365-workspace');
 
 describe('M365 workspace routes', () => {
@@ -34,7 +35,20 @@ describe('M365 workspace routes', () => {
         process.env.M365_WORKSPACE_DB_PATH = path.join(tempDir, 'workspace.sqlite');
         process.env.M365_PROJECTS_ROOT = path.join(tempDir, 'projects');
 
-        serverContext = { m365DispatchLease: null };
+        serverContext = {
+            m365DispatchLease: null,
+            m365AttachmentService: new M365AttachmentService({
+                rootDir: path.join(tempDir, 'attachments'),
+                maxFileBytes: 1024,
+                maxTotalBytes: 2048,
+            }),
+            localWorkspacePicker: {
+                selectFolder: jest.fn(async () => ({
+                    cancelled: false,
+                    path: path.join(tempDir, 'picked-folder'),
+                })),
+            },
+        };
         const app = express();
         app.use(express.json());
         app.use(registerM365WorkspaceRoutes(serverContext));
@@ -63,6 +77,7 @@ describe('M365 workspace routes', () => {
             ...options,
             headers: {
                 'content-type': 'application/json',
+                origin: 'http://localhost:3000',
                 ...(options.headers || {}),
             },
         });
@@ -83,6 +98,151 @@ describe('M365 workspace routes', () => {
         });
         expect(JSON.stringify(body)).not.toContain(process.env.M365_DATA_ENCRYPTION_KEY);
         expect(JSON.stringify(body)).not.toContain(tempDir);
+    });
+
+    test('opens the local-only folder picker through a user-initiated endpoint', async () => {
+        const result = await request('/api/m365/workspace/pick-folder', {
+            method: 'POST',
+            body: JSON.stringify({ description: 'Choose a workspace' }),
+        });
+        expect(result.response.status).toBe(200);
+        expect(result.body).toEqual({
+            success: true,
+            cancelled: false,
+            path: path.join(tempDir, 'picked-folder'),
+        });
+        expect(serverContext.localWorkspacePicker.selectFolder).toHaveBeenCalledWith({
+            description: 'Choose a workspace',
+            initialPath: undefined,
+        });
+
+        const denied = await fetch(`${baseUrl}/api/m365/workspace/pick-folder`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', origin: 'https://example.com' },
+            body: '{}',
+        });
+        expect(denied.status).toBe(403);
+        await expect(denied.json()).resolves.toEqual(expect.objectContaining({
+            error: 'M365_FOLDER_PICKER_LOCAL_ONLY',
+        }));
+    });
+
+    test('stages and cancels attachments only for the bound local project conversation', async () => {
+        const projectResult = await request('/api/projects', {
+            method: 'POST',
+            body: JSON.stringify({ name: 'Attachment Project' }),
+        });
+        const projectId = projectResult.body.project.id;
+        const conversationResult = await request(`/api/projects/${encodeURIComponent(projectId)}/conversations`, {
+            method: 'POST',
+            body: JSON.stringify({ title: 'Attachment Conversation' }),
+        });
+        const conversationId = conversationResult.body.conversation.id;
+
+        const created = await request('/api/m365/attachments/batches', {
+            method: 'POST',
+            body: JSON.stringify({ projectId, conversationId }),
+        });
+        expect(created.response.status).toBe(201);
+
+        const staged = await request(`/api/m365/attachments/batches/${created.body.batchId}/files`, {
+            method: 'POST',
+            body: JSON.stringify({
+                projectId,
+                conversationId,
+                fileName: 'source.txt',
+                base64Data: Buffer.from('local source').toString('base64'),
+            }),
+        });
+        expect(staged.response.status).toBe(201);
+        expect(staged.body.file).toEqual(expect.objectContaining({ name: 'source.txt', size: 12 }));
+
+        const mismatch = await request(`/api/m365/attachments/batches/${created.body.batchId}/files`, {
+            method: 'POST',
+            body: JSON.stringify({
+                projectId: 'different-project',
+                conversationId,
+                fileName: 'other.txt',
+                base64Data: Buffer.from('x').toString('base64'),
+            }),
+        });
+        expect(mismatch.response.status).toBe(409);
+
+        const cancelled = await request(`/api/m365/attachments/batches/${created.body.batchId}/cancel`, {
+            method: 'POST',
+            body: JSON.stringify({ projectId, conversationId }),
+        });
+        expect(cancelled.response.status).toBe(200);
+        expect(cancelled.body.removed).toBe(true);
+
+        const denied = await fetch(`${baseUrl}/api/m365/attachments/batches`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json', origin: 'https://example.com' },
+            body: JSON.stringify({ projectId, conversationId }),
+        });
+        expect(denied.status).toBe(403);
+    });
+
+    test('creates and links user-selected workspaces without overwriting existing instructions', async () => {
+        const createParent = path.join(tempDir, 'user-selected');
+        fs.mkdirSync(createParent);
+        const created = await request('/api/projects', {
+            method: 'POST',
+            body: JSON.stringify({
+                name: 'Selected Workspace Project',
+                workspaceMode: 'create',
+                workspacePath: createParent,
+                workspaceFolderName: 'Customer A',
+            }),
+        });
+        const createdRoot = path.join(createParent, 'Customer A');
+        expect(created.response.status).toBe(201);
+        expect(created.body.project).toEqual(expect.objectContaining({
+            workspaceMode: 'create',
+            workspacePath: createdRoot,
+        }));
+        expect(created.body.workspace.rootPath).toBe(createdRoot);
+        expect(fs.existsSync(path.join(createdRoot, 'AGENTS.md'))).toBe(true);
+        expect(fs.existsSync(path.join(createdRoot, 'references'))).toBe(true);
+        expect(fs.existsSync(path.join(createdRoot, 'outputs'))).toBe(true);
+
+        const linkedRoot = path.join(tempDir, 'linked-existing');
+        fs.mkdirSync(linkedRoot);
+        fs.writeFileSync(path.join(linkedRoot, 'source.txt'), 'original source', 'utf8');
+        const linked = await request('/api/projects', {
+            method: 'POST',
+            body: JSON.stringify({
+                name: 'Linked Workspace Project',
+                workspaceMode: 'existing',
+                workspacePath: linkedRoot,
+            }),
+        });
+        expect(linked.response.status).toBe(201);
+        expect(linked.body.project).toEqual(expect.objectContaining({
+            workspaceMode: 'existing',
+            workspacePath: linkedRoot,
+        }));
+        expect(fs.readFileSync(path.join(linkedRoot, 'source.txt'), 'utf8')).toBe('original source');
+
+        const protectedRoot = path.join(tempDir, 'protected-existing');
+        fs.mkdirSync(protectedRoot);
+        const protectedAgents = '# User-owned instructions\n';
+        fs.writeFileSync(path.join(protectedRoot, 'AGENTS.md'), protectedAgents, 'utf8');
+        const rejected = await request('/api/projects', {
+            method: 'POST',
+            body: JSON.stringify({
+                name: 'Must Not Exist',
+                workspaceMode: 'existing',
+                workspacePath: protectedRoot,
+            }),
+        });
+        expect(rejected.response.status).toBe(409);
+        expect(rejected.body.error).toBe('M365_PROJECT_AGENTS_CONFLICT');
+        expect(fs.readFileSync(path.join(protectedRoot, 'AGENTS.md'), 'utf8')).toBe(protectedAgents);
+        const projects = await request('/api/projects');
+        expect(projects.body.projects).not.toEqual(expect.arrayContaining([
+            expect.objectContaining({ name: 'Must Not Exist' }),
+        ]));
     });
 
     test('creates a project, multiple conversations, and a review-gated run', async () => {

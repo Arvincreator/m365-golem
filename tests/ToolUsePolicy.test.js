@@ -40,4 +40,21 @@ describe('ToolUsePolicy', () => {
         expect(decision.risk).toBe('high');
         expect(decision.requiresConfirmation).toBe(true);
     });
+
+    test('treats artifact authoring verbs as explicit operations', () => {
+        const policy = new ToolUsePolicy();
+
+        expect(policy.classifyRequest('製作一個有互動能力的網頁')).toEqual(expect.objectContaining({
+            explicitAction: true,
+            shouldRoute: true,
+        }));
+    });
+
+    test('allows an accepted GOLEM_PLAN to continue from its bound host Observation', () => {
+        const rules = new ToolUsePolicy().buildRules().join('\n');
+
+        expect(rules).toContain('宿主已接受 GOLEM_PLAN');
+        expect(rules).toContain('host Observation');
+        expect(rules).toContain('不必等待使用者再說「繼續」');
+    });
 });

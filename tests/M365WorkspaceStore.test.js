@@ -98,6 +98,53 @@ describe('M365WorkspaceStore', () => {
         await expect(store.listProjects()).rejects.toMatchObject({ code: 'M365_DATA_DECRYPT_FAILED' });
     });
 
+    test('encrypts and restores the per-project workspace location', async () => {
+        const workspacePath = path.join(tempDir, 'client-workspace');
+        const project = await store.createProject({
+            name: 'Client Workspace',
+            workspaceMode: 'existing',
+            workspacePath,
+        });
+
+        expect(project).toEqual(expect.objectContaining({
+            workspaceMode: 'existing',
+            workspacePath,
+        }));
+
+        await store.close();
+        const rawDatabase = fs.readFileSync(dbPath).toString('utf8');
+        expect(rawDatabase).not.toContain(workspacePath);
+
+        store = new M365WorkspaceStore({ dbPath, encryptionKey: makeKey(7) });
+        await expect(store.getProject(project.id)).resolves.toEqual(expect.objectContaining({
+            workspaceMode: 'existing',
+            workspacePath,
+        }));
+    });
+
+    test('upgrades an existing version-one database without losing its projects', async () => {
+        const legacyProject = await store.createProject({ name: 'Legacy Project' });
+        await store._run('DELETE FROM schema_migrations WHERE version = 2');
+        await store._run('ALTER TABLE projects DROP COLUMN workspace_path_tag');
+        await store._run('ALTER TABLE projects DROP COLUMN workspace_path_iv');
+        await store._run('ALTER TABLE projects DROP COLUMN workspace_path_ciphertext');
+        await store._run('ALTER TABLE projects DROP COLUMN workspace_mode');
+        await store.close();
+
+        store = new M365WorkspaceStore({ dbPath, encryptionKey: makeKey(7) });
+        await expect(store.getProject(legacyProject.id)).resolves.toEqual(expect.objectContaining({
+            name: 'Legacy Project',
+            workspaceMode: 'managed',
+            workspacePath: null,
+        }));
+        const custom = await store.createProject({
+            name: 'Custom After Upgrade',
+            workspaceMode: 'existing',
+            workspacePath: path.join(tempDir, 'custom-after-upgrade'),
+        });
+        expect(custom.workspaceMode).toBe('existing');
+    });
+
     test('stores a bound M365 conversation locator without treating it as credentials', async () => {
         const project = await store.createProject({ name: 'M365 Binding' });
         const conversation = await store.createConversation(project.id, { title: 'Bound chat' });

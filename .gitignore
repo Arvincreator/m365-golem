@@ -111,6 +111,7 @@ notebooklm_venv
 .golem/
 skills.db
 web-dashboard/tsconfig.tsbuildinfo
+release/
 
 # Built-in M365 Session Bridge: only reproducible source is tracked.
 integrations/m365-session-bridge/node_modules/

@@ -53,14 +53,15 @@ describe('PageInteractor Improvements', () => {
         expect(mockKeyboard.press).toHaveBeenCalledWith('Backspace');
     });
 
-    test('_clickSend should use Enter and click with ARIA labels', async () => {
+    test('_clickSend falls back to Enter when no clickable send target is available', async () => {
         const selector = '.send-button';
         interactor._waitForSendAccepted = jest.fn().mockResolvedValue(true);
+        interactor._waitForSendTarget = jest.fn().mockResolvedValue({ clicked: false });
         
         await interactor._clickSend(selector);
 
         expect(mockKeyboard.press).toHaveBeenCalledWith('Enter');
-        expect(mockPage.evaluate).toHaveBeenCalledWith(expect.any(Function), selector);
+        expect(interactor._waitForSendTarget).toHaveBeenCalledWith(selector, expect.any(Number));
     });
 
     test('_moveWindowToBottom should skip in headless mode', async () => {

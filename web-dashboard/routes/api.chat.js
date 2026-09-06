@@ -2,6 +2,7 @@ const express = require('express');
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
+const { NeuroShunter, ProtocolFormatter, ResponseExtractor } = require('../../packages/protocol');
 const {
     acquireM365DispatchLease,
     activateM365Conversation,
@@ -15,6 +16,7 @@ const {
 } = require('../../src/services/M365WorkspaceService');
 const { getM365RunCoordinator } = require('../../src/services/M365RunCoordinator');
 const { stripM365RunControl } = require('../../src/services/M365RunControlParser');
+const { getM365AttachmentService } = require('../../src/services/M365AttachmentService');
 const ReferenceFileService = require('../../src/services/ReferenceFileService');
 const SkillPackageRegistry = require('../../src/managers/SkillPackageRegistry');
 const EnvManager = require('../../src/utils/EnvManager');
@@ -226,6 +228,26 @@ function workspaceErrorStatus(error) {
     return 500;
 }
 
+function appendVisibleDownloadLinks(text, attachments) {
+    const body = String(text || '').trim();
+    const links = [];
+    const seen = new Set();
+    for (const item of Array.isArray(attachments) ? attachments : []) {
+        const url = String(item && item.url || '').trim();
+        if (!/^https:\/\//i.test(url) || seen.has(url) || body.includes(url)) continue;
+        seen.add(url);
+        const label = String(item && item.name || '下載檔案')
+            .replace(/[\r\n]/g, ' ')
+            .replace(/[\[\]]/g, '')
+            .trim()
+            .slice(0, 180) || '下載檔案';
+        links.push(`- [${label}](${url})`);
+    }
+    return links.length > 0
+        ? `${body}\n\nM365 產生的檔案：\n${links.join('\n')}`.trim()
+        : body;
+}
+
 const M365_PENDING_ACTION_TTL_MS = 5 * 60 * 1000;
 
 function pendingActionConversationId(task) {
@@ -291,6 +313,10 @@ function pendingActionView(id, task) {
 
 module.exports = function(server) {
     const router = express.Router();
+    const pendingResponses = server.m365PendingResponses instanceof Map
+        ? server.m365PendingResponses
+        : new Map();
+    server.m365PendingResponses = pendingResponses;
     const resolveConvoManager = (instance) => {
         // Backward/forward compatibility:
         // - newer core uses "convoManager"
@@ -379,7 +405,14 @@ module.exports = function(server) {
         let transportErrorHandled = false;
         let transportFailureCode = '';
         let transportAmbiguous = false;
+        let transportPending = false;
+        let sendAccepted = false;
         let persistenceWarning = null;
+        let attachmentService = null;
+        let attachmentBatchIdForCleanup = '';
+        let attachmentBindingForCleanup = null;
+        let attachmentCleaned = false;
+        let retainAttachmentForRecovery = false;
         try {
             const {
                 golemId,
@@ -388,21 +421,31 @@ module.exports = function(server) {
                 conversationId,
                 runId,
                 stepId,
+                planId,
+                planRevision,
                 requestId: suppliedRequestId,
                 attachment: attachmentData,
+                attachmentBatchId,
                 responseMode,
                 selectedMcpServers,
                 selectedSkillIds,
                 referenceFileIds,
             } = req.body;
-            if (!golemId || (!message && !attachmentData)) {
+            if (!golemId || (!message && !attachmentData && !attachmentBatchId)) {
                 return res.status(400).json({ error: 'Missing golemId, message or attachment' });
             }
             const m365SafeMode = isM365SafeMode();
             const workspaceEnabled = isM365WorkspaceEnabled();
             if (m365SafeMode && attachmentData) {
                 return res.status(400).json({
-                    error: 'M365 Web POC currently accepts text only. Attachments are disabled pending data-boundary review.'
+                    error: 'M365_ATTACHMENT_LEGACY_REJECTED',
+                    message: 'Use the project-bound M365 attachment staging flow.'
+                });
+            }
+            if (attachmentBatchId && !workspaceEnabled) {
+                return res.status(400).json({
+                    error: 'M365_ATTACHMENT_WORKSPACE_REQUIRED',
+                    message: 'Attachments require an active M365 project conversation.',
                 });
             }
 
@@ -427,12 +470,13 @@ module.exports = function(server) {
                 finalMimeType = mimeMap[ext] || 'application/octet-stream';
             }
 
-            const attachment = attachmentData ? {
+            let attachment = attachmentData ? {
                 isNative: true,
                 path: attachmentData.path,
                 url: attachmentData.url,
                 mimeType: finalMimeType || 'application/octet-stream'
             } : null;
+            let attachmentNames = [];
 
             if (attachment && attachment.path) {
                 const uploadRoot = path.resolve(process.cwd(), 'data', 'temp_uploads');
@@ -448,7 +492,10 @@ module.exports = function(server) {
             const requestId = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(String(suppliedRequestId || ''))
                 ? String(suppliedRequestId)
                 : crypto.randomUUID();
-            let effectiveMessage = String(message || '');
+            const protocolRequestId = requestId.replace(/-/g, '').slice(0, 12);
+            const userMessage = String(message || '').trim()
+                || (attachmentBatchId ? '請閱讀並分析本輪上傳的附件。' : '');
+            let effectiveMessage = userMessage;
             let workspaceProject = null;
             let workspaceContextIncluded = false;
             let composerContext = null;
@@ -475,7 +522,22 @@ module.exports = function(server) {
                 }
                 workspaceProject = await workspaceStore.getProject(workspaceConversation.projectId);
                 projectWorkspaceService = getM365ProjectWorkspaceService(server);
-                projectWorkspace = projectWorkspaceService.ensureProject(workspaceProject.id);
+                projectWorkspace = projectWorkspaceService.ensureProject(workspaceProject.id, {
+                    workspacePath: workspaceProject.workspacePath,
+                });
+                if (attachmentBatchId) {
+                    attachmentService = getM365AttachmentService(server);
+                    attachmentBindingForCleanup = {
+                        projectId: workspaceProject.id,
+                        conversationId,
+                    };
+                    attachment = attachmentService.resolveBatch(
+                        attachmentBatchId,
+                        attachmentBindingForCleanup
+                    );
+                    attachmentBatchIdForCleanup = String(attachmentBatchId);
+                    attachmentNames = attachment.files.map((file) => file.name);
+                }
                 composerContext = await resolveComposerContext({
                     responseMode,
                     selectedMcpServers,
@@ -493,19 +555,20 @@ module.exports = function(server) {
                 relevantProjectMemories = typeof projectWorkspaceService.getRelevantMemories === 'function'
                     ? await projectWorkspaceService.getRelevantMemories(
                         workspaceProject.id,
-                        message,
-                        { embedder: projectMemoryEmbedder, limit: 8 }
+                        userMessage,
+                        {
+                            workspacePath: workspaceProject.workspacePath,
+                            embedder: projectMemoryEmbedder,
+                            limit: 8,
+                        }
                     )
                     : (Array.isArray(projectWorkspace.memoryEntries) ? projectWorkspace.memoryEntries.slice(0, 8) : []);
-                lease = acquireM365DispatchLease(server, {
-                    projectId: workspaceConversation.projectId,
-                    conversationId,
-                    requestId,
-                });
-                await activateM365Conversation(golemId, workspaceConversation);
+                const promptMessage = attachmentNames.length > 0
+                    ? `${userMessage}\n\n[本輪已附加檔案]\n${attachmentNames.map((name) => `- ${name}`).join('\n')}`
+                    : userMessage;
                 effectiveMessage = buildM365WorkspacePrompt(
                     workspaceProject,
-                    message,
+                    promptMessage,
                     requestId,
                     workspaceContextIncluded,
                     composerContext,
@@ -514,41 +577,80 @@ module.exports = function(server) {
                 workspaceUserMessage = await workspaceStore.addMessage(conversationId, {
                     role: 'user',
                     source: 'user',
-                    content: message,
+                    content: attachmentNames.length > 0
+                        ? `${userMessage}\n\n📎 ${attachmentNames.join('、')}`
+                        : userMessage,
                     requestId,
                     runId: runId || null,
                     stepId: stepId || null,
-                    deliveryState: 'dispatch_started',
+                    deliveryState: 'local',
                 });
             }
 
             const releaseLease = () => {
-                if (lease) releaseM365DispatchLease(server, lease.token);
+                if (!lease) return;
+                releaseM365DispatchLease(server, lease.token);
+                lease = null;
             };
 
-            const mockContext = {
+            const cleanupAttachmentBatch = () => {
+                if (attachmentCleaned || !attachmentService || !attachmentBatchIdForCleanup) return;
+                attachmentService.cleanupBatch(attachmentBatchIdForCleanup, attachmentBindingForCleanup);
+                attachmentCleaned = true;
+            };
+
+            let mockContext = null;
+            mockContext = {
                 platform: 'web',
                 isAdmin: true,
-                text: message,
+                text: userMessage,
                 textOverride: workspaceEnabled ? effectiveMessage : undefined,
                 messageTime: Date.now(),
                 senderName: 'User',
                 replyToName: '',
                 chatId: workspaceEnabled ? `m365:${conversationId}` : 'web-dashboard',
                 workspaceRequestId: requestId,
+                workspaceProtocolRequestId: protocolRequestId,
+                workspaceRetryAttempt: 0,
                 workspaceProjectId: workspaceConversation ? workspaceConversation.projectId : null,
                 workspaceConversationId: conversationId || null,
                 workspaceBootstrapRequired: workspaceEnabled && workspaceContextIncluded,
                 workspaceRunId: runId || null,
                 workspaceStepId: stepId || null,
+                workspacePlanId: planId || runId || null,
+                workspacePlanRevision: Number(planRevision || 0),
                 workspaceRoot: projectWorkspace ? projectWorkspace.rootPath : null,
                 m365ProjectWorkspaceService: projectWorkspaceService,
-                toolRoutingQuery: String(message || ''),
+                toolRoutingQuery: userMessage,
                 preferredMcpServers: composerContext ? composerContext.selectedMcpServers.map((item) => item.name) : [],
                 preferredSkillIds: composerContext ? composerContext.selectedSkills.map((item) => item.id) : [],
                 preferredSkillActions: composerContext ? composerContext.selectedSkills.map((item) => item.action) : [],
-                onTransportComplete: workspaceEnabled ? async () => {
+                onTransportStart: workspaceEnabled ? async () => {
+                    const queueWaitStartedAt = Date.now();
+                    const queueWaitTimeoutMs = 15 * 60 * 1000;
+                    while (server.m365DispatchLease) {
+                        if (Date.now() - queueWaitStartedAt >= queueWaitTimeoutMs) {
+                            const busyError = new Error('M365 可見瀏覽器長時間忙碌，這則排隊訊息尚未送出。');
+                            busyError.code = 'M365_UI_BUSY';
+                            throw busyError;
+                        }
+                        await new Promise((resolve) => setTimeout(resolve, 400));
+                    }
+                    lease = acquireM365DispatchLease(server, {
+                        projectId: workspaceConversation.projectId,
+                        conversationId,
+                        requestId,
+                    });
+                    await activateM365Conversation(golemId, workspaceConversation);
+                    await workspaceStore.updateMessageDeliveryState(workspaceUserMessage.id, 'dispatch_started');
+                } : undefined,
+                onTransportAccepted: workspaceEnabled ? async () => {
+                    sendAccepted = true;
                     await workspaceStore.updateMessageDeliveryState(workspaceUserMessage.id, 'confirmed');
+                } : undefined,
+                onTransportComplete: workspaceEnabled ? async () => {
+                    pendingResponses.delete(requestId);
+                    transportPending = false;
                     try {
                         workspaceConversation = await captureM365ConversationBinding(
                             workspaceStore,
@@ -565,12 +667,69 @@ module.exports = function(server) {
                             workspaceProject.contextVersion || 1
                         );
                     }
+                    cleanupAttachmentBatch();
+                    releaseLease();
                 } : undefined,
                 onTransportError: workspaceEnabled ? async (error) => {
-                    transportFailed = true;
                     transportErrorHandled = true;
                     const code = String(error && error.code || '');
                     transportFailureCode = code;
+                    if (code === 'M365_RESPONSE_NOT_FOUND' && sendAccepted) {
+                        transportPending = true;
+                        transportFailed = false;
+                        retainAttachmentForRecovery = Number(mockContext.workspaceRetryAttempt || 0) < 1;
+                        await workspaceStore.updateMessageDeliveryState(workspaceUserMessage.id, 'confirmed');
+                        pendingResponses.set(requestId, {
+                            requestId,
+                            protocolRequestId,
+                            golemId,
+                            projectId: workspaceConversation.projectId,
+                            conversationId,
+                            timedOutAt: Date.now(),
+                            retryCount: Number(mockContext.workspaceRetryAttempt || 0),
+                            ctx: mockContext,
+                            conversation: workspaceConversation,
+                            complete: async (response) => {
+                                transportPending = false;
+                                transportFailed = false;
+                                retainAttachmentForRecovery = false;
+                                await mockContext.onTransportComplete(response);
+                                const instance = typeof index.getOrCreateGolem === 'function'
+                                    ? index.getOrCreateGolem(golemId)
+                                    : null;
+                                if (!instance || !instance.controller) {
+                                    const recoveryError = new Error('The Golem action runtime is not ready.');
+                                    recoveryError.code = 'M365_ACTION_RUNTIME_NOT_READY';
+                                    throw recoveryError;
+                                }
+                                await NeuroShunter.dispatch(mockContext, response, instance.brain, instance.controller, {
+                                    suppressReply: false,
+                                    allowActions: false,
+                                    preferredMcpServers: mockContext.preferredMcpServers,
+                                    preferredSkillIds: mockContext.preferredSkillIds,
+                                    preferredSkillActions: mockContext.preferredSkillActions,
+                                });
+                            },
+                            retry: async () => {
+                                mockContext.workspaceRetryAttempt = 1;
+                                transportPending = false;
+                                transportFailed = false;
+                                transportErrorHandled = false;
+                                sendAccepted = false;
+                                await workspaceStore.updateMessageDeliveryState(workspaceUserMessage.id, 'local');
+                                dashboardMessageHandler(mockContext, golemId).catch(async (retryError) => {
+                                    if (!transportErrorHandled) {
+                                        await mockContext.onTransportError(retryError).catch(() => undefined);
+                                    }
+                                    await mockContext.reply(`⚠️ ${retryError.message || '再次傳送失敗。'}`).catch(() => undefined);
+                                });
+                            },
+                            cleanup: cleanupAttachmentBatch,
+                        });
+                        releaseLease();
+                        return;
+                    }
+                    transportFailed = true;
                     const clearlyPreDispatch = new Set([
                         'M365_HUMAN_LOGIN_REQUIRED',
                         'M365_TENANT_BLOCKED',
@@ -579,6 +738,12 @@ module.exports = function(server) {
                         'M365_UNEXPECTED_HOST',
                         'M365_INSECURE_URL',
                         'M365_ATTACHMENT_DISABLED',
+                        'M365_ATTACHMENT_UNTRUSTED',
+                        'M365_ATTACHMENT_UPLOAD_FAILED',
+                        'M365_ATTACHMENT_UPLOAD_TIMEOUT',
+                        'M365_ATTACHMENT_NOT_CONFIRMED',
+                        'M365_ATTACHMENT_STAGE_INVALID',
+                        'M365_SEND_NOT_READY',
                         'BROWSER_PROFILE_IN_USE',
                     ]).has(code);
                     const state = clearlyPreDispatch ? 'failed' : 'ambiguous';
@@ -587,10 +752,57 @@ module.exports = function(server) {
                     if (state === 'ambiguous') {
                         await markConversationReconcileRequired(workspaceStore, conversationId);
                     }
+                    retainAttachmentForRecovery = false;
+                    cleanupAttachmentBatch();
+                    releaseLease();
                 } : undefined,
                 onPersistenceError: workspaceEnabled ? async (error) => {
                     persistenceWarning = error;
                     await markConversationReconcileRequired(workspaceStore, conversationId).catch(() => undefined);
+                } : undefined,
+                onGolemProtocolResponse: workspaceEnabled ? async ({ rawResponse, parsed, actionCount, isSystemFeedback }) => {
+                    const coordinator = await getM365RunCoordinator(server);
+                    if (parsed && (parsed.plan || parsed.planError)) {
+                        const planResult = await coordinator.handleAutonomousPlan({
+                            conversationId,
+                            requestId,
+                            existingRunId: mockContext.workspaceRunId || null,
+                            plan: parsed.plan || null,
+                            planError: parsed.planError || null,
+                            actionCount: Number(actionCount || 0),
+                            actions: Array.isArray(parsed.actions) ? parsed.actions : [],
+                            isSystemFeedback: isSystemFeedback === true,
+                        });
+                        if (planResult && planResult.runId) mockContext.workspaceRunId = planResult.runId;
+                        if (planResult && planResult.stepId) mockContext.workspaceStepId = planResult.stepId;
+                        if (planResult && planResult.planId) mockContext.workspacePlanId = planResult.planId;
+                        if (planResult && planResult.planRevision !== undefined) mockContext.workspacePlanRevision = planResult.planRevision;
+                        if (planResult && planResult.planStepId) mockContext.workspacePlanStepId = planResult.planStepId;
+                        if (planResult && planResult.actionId) mockContext.workspaceActionId = planResult.actionId;
+                        return planResult;
+                    }
+                    if (mockContext.workspaceRunId && mockContext.workspaceStepId && /\[GOLEM_RUN\]/i.test(String(rawResponse || ''))) {
+                        await coordinator.handleStepResponse({
+                            runId: mockContext.workspaceRunId,
+                            stepId: mockContext.workspaceStepId,
+                            responseText: rawResponse,
+                            transportFailed,
+                            transportAmbiguous,
+                            transportErrorCode: transportFailureCode,
+                        });
+                    }
+                    return null;
+                } : undefined,
+                onGolemObservation: workspaceEnabled ? async (observation) => {
+                    const coordinator = await getM365RunCoordinator(server);
+                    const recorded = await coordinator.recordAutonomousObservation({
+                        ...observation,
+                        runId: observation.runId || mockContext.workspaceRunId,
+                        stepId: observation.stepId || mockContext.workspaceStepId,
+                    });
+                    mockContext.workspacePlanId = recorded.planId;
+                    mockContext.workspacePlanRevision = recorded.planRevision;
+                    return recorded;
                 } : undefined,
                 reply: async (text, options) => {
                     let payloadType = 'agent';
@@ -602,16 +814,19 @@ module.exports = function(server) {
                     }
 
                     try {
-                        const displayText = runId ? (stripM365RunControl(text) || String(text || '')) : text;
+                        const activeRunId = mockContext.workspaceRunId || runId || null;
+                        const activeStepId = mockContext.workspaceStepId || stepId || null;
+                        const rawDisplayText = activeRunId ? (stripM365RunControl(text) || String(text || '')) : text;
+                        const displayText = appendVisibleDownloadLinks(rawDisplayText, options && options.attachments);
                         if (workspaceEnabled) {
                             await workspaceStore.addMessage(conversationId, {
-                                role: transportFailed ? 'system' : 'assistant',
-                                source: transportFailed ? 'system' : 'm365',
+                                role: transportFailed || transportPending ? 'system' : 'assistant',
+                                source: transportFailed || transportPending ? 'system' : 'm365',
                                 content: displayText,
                                 requestId,
-                                runId: runId || null,
-                                stepId: stepId || null,
-                                deliveryState: transportFailed ? 'failed' : 'response_confirmed',
+                                runId: activeRunId,
+                                stepId: activeStepId,
+                                deliveryState: transportFailed ? 'failed' : (transportPending ? 'local' : 'response_confirmed'),
                             });
                         }
 
@@ -627,23 +842,6 @@ module.exports = function(server) {
                             requestId,
                             transient: m365SafeMode && !workspaceEnabled,
                         });
-
-                        if (workspaceEnabled && runId && stepId) {
-                            try {
-                                const coordinator = await getM365RunCoordinator(server);
-                                await coordinator.handleStepResponse({
-                                    runId,
-                                    stepId,
-                                    responseText: text,
-                                    transportFailed,
-                                    transportAmbiguous,
-                                    transportErrorCode: transportFailureCode,
-                                });
-                            } catch (runError) {
-                                console.error('[M365RunCoordinator] Failed to process step response:', runError);
-                                persistenceWarning = runError;
-                            }
-                        }
 
                         if (persistenceWarning) {
                             server.broadcastLog({
@@ -669,14 +867,14 @@ module.exports = function(server) {
 
             server.broadcastLog({
                 time: new Date().toLocaleTimeString(),
-                msg: `[User] ${message || (attachment ? '[圖片]' : '')}`,
+                msg: `[User] ${userMessage}${attachmentNames.length > 0 ? ` [附件 ${attachmentNames.length} 個]` : ''}`,
                 type: 'agent',
-                raw: `[User] ${message || '[圖片]'}`,
+                raw: `[User] ${userMessage}${attachmentNames.length > 0 ? `\n附件：${attachmentNames.join('、')}` : ''}`,
                 golemId,
                 projectId: workspaceConversation ? workspaceConversation.projectId : null,
                 conversationId: conversationId || null,
                 requestId,
-                attachment: attachment ? { url: attachment.url, mimeType: attachment.mimeType } : null,
+                attachment: attachmentNames.length > 0 ? { names: attachmentNames } : null,
                 transient: m365SafeMode && !workspaceEnabled,
             });
 
@@ -692,24 +890,34 @@ module.exports = function(server) {
                 transient: true,
             });
 
-            dashboardMessageHandler(mockContext, golemId).catch(async (error) => {
-                console.error('[WebServer] Direct chat error:', error);
-                if (workspaceEnabled && !transportErrorHandled) {
-                    await mockContext.onTransportError(error).catch(() => undefined);
-                }
-                if (workspaceEnabled && runId && stepId) {
-                    const coordinator = await getM365RunCoordinator(server).catch(() => null);
-                    if (coordinator) {
-                        await coordinator.handleDispatchError({
-                            runId,
-                            stepId,
-                            error,
-                            ambiguous: transportAmbiguous,
-                        }).catch(() => undefined);
+            dashboardMessageHandler(mockContext, golemId)
+                .catch(async (error) => {
+                    console.error('[WebServer] Direct chat error:', error);
+                    if (workspaceEnabled && !transportErrorHandled) {
+                        await mockContext.onTransportError(error).catch(() => undefined);
                     }
-                }
-                releaseLease();
-            });
+                    if (workspaceEnabled && runId && stepId) {
+                        const coordinator = await getM365RunCoordinator(server).catch(() => null);
+                        if (coordinator) {
+                            await coordinator.handleDispatchError({
+                                runId,
+                                stepId,
+                                error,
+                                ambiguous: transportAmbiguous,
+                            }).catch(() => undefined);
+                        }
+                    }
+                    releaseLease();
+                })
+                .finally(() => {
+                    if (!retainAttachmentForRecovery && attachmentService && attachmentBatchIdForCleanup) {
+                        try {
+                            cleanupAttachmentBatch();
+                        } catch (cleanupError) {
+                            console.warn('[M365Attachment] Failed to clean staged batch:', cleanupError.message);
+                        }
+                    }
+                });
 
             return res.json({
                 success: true,
@@ -720,6 +928,16 @@ module.exports = function(server) {
             });
         } catch (error) {
             if (lease) releaseM365DispatchLease(server, lease.token);
+            if (attachmentService && attachmentBatchIdForCleanup) {
+                try {
+                    attachmentService.cleanupBatch(
+                        attachmentBatchIdForCleanup,
+                        attachmentBindingForCleanup
+                    );
+                } catch (cleanupError) {
+                    console.warn('[M365Attachment] Failed to clean rejected batch:', cleanupError.message);
+                }
+            }
             console.error('Failed to send chat message:', error);
             const status = workspaceErrorStatus(error);
             return res.status(status).json({
@@ -763,6 +981,106 @@ module.exports = function(server) {
     });
 
     router.post('/api/chat', handleChatPost);
+
+    router.get('/api/chat/pending-responses', (req, res) => {
+        if (!requireLocalActionRequest(req, res)) return;
+        const conversationId = String(req.query.conversationId || '').trim();
+        const now = Date.now();
+        const items = [];
+        for (const [requestId, item] of pendingResponses.entries()) {
+            if (!item || now - Number(item.timedOutAt || 0) > 30 * 60 * 1000) {
+                try { item && item.cleanup && item.cleanup(); } catch (_) { }
+                pendingResponses.delete(requestId);
+                continue;
+            }
+            if (String(item.conversationId || '') !== conversationId) continue;
+            items.push({
+                requestId,
+                conversationId: item.conversationId,
+                retryCount: Number(item.retryCount || 0),
+                timedOutAt: Number(item.timedOutAt || 0),
+                status: Number(item.retryCount || 0) >= 1 ? 'manual_check_required' : 'needs_recheck',
+            });
+        }
+        items.sort((left, right) => left.timedOutAt - right.timedOutAt);
+        return res.json({ success: true, items });
+    });
+
+    router.post('/api/chat/pending-responses/:requestId/recheck', async (req, res) => {
+        try {
+            if (!requireLocalActionRequest(req, res)) return;
+            const requestId = String(req.params.requestId || '');
+            const conversationId = String(req.body && req.body.conversationId || '').trim();
+            const item = pendingResponses.get(requestId);
+            if (!item) {
+                return res.status(404).json({
+                    success: false,
+                    error: 'M365_PENDING_RESPONSE_NOT_FOUND',
+                    message: '這一輪已完成、已失效，或不再需要確認。',
+                });
+            }
+            if (String(item.conversationId) !== conversationId) {
+                return res.status(409).json({
+                    success: false,
+                    error: 'M365_PENDING_RESPONSE_CONVERSATION_MISMATCH',
+                    message: '這個逾時項目屬於另一個專案對話。',
+                });
+            }
+            if (server.m365DispatchLease) {
+                return res.json({ success: true, status: 'queue_busy' });
+            }
+
+            const store = await getM365WorkspaceStore(server);
+            const conversation = await store.getConversation(conversationId);
+            await activateM365Conversation(item.golemId, conversation);
+            const brain = resolveM365Brain(item.golemId);
+            if (!brain || !brain.page || !brain.selectors || !brain.selectors.response) {
+                const error = new Error('M365 browser runtime is not ready.');
+                error.code = 'M365_RUNTIME_NOT_READY';
+                throw error;
+            }
+            const startTag = ProtocolFormatter.buildStartTag(item.protocolRequestId);
+            const endTag = ProtocolFormatter.buildEndTag(item.protocolRequestId);
+            const inspection = await ResponseExtractor.inspectExistingResponse(
+                brain.page,
+                brain.selectors.response,
+                startTag,
+                endTag,
+                {
+                    responseContainerSelectors: brain.webBackend && brain.webBackend.responseContainerSelectors,
+                    stopSelectors: brain.webBackend && brain.webBackend.stopSelectors,
+                }
+            );
+            if (inspection.found) {
+                await item.complete({
+                    text: inspection.text,
+                    attachments: inspection.attachments || [],
+                    status: inspection.status || 'ENVELOPE_COMPLETE',
+                });
+                pendingResponses.delete(requestId);
+                return res.json({ success: true, status: 'recovered' });
+            }
+            if (inspection.busy) {
+                return res.json({ success: true, status: 'still_generating' });
+            }
+            if (Number(item.retryCount || 0) >= 1) {
+                return res.json({ success: true, status: 'manual_check_required' });
+            }
+
+            pendingResponses.delete(requestId);
+            item.retryCount = 1;
+            await item.retry();
+            return res.json({ success: true, status: 'retried' });
+        } catch (error) {
+            console.error('Failed to recheck pending M365 response:', error);
+            return res.status(workspaceErrorStatus(error)).json({
+                success: false,
+                error: String(error && error.code || 'M365_RESPONSE_RECHECK_FAILED'),
+                message: String(error && error.message || '目前無法再次確認 M365 回覆。'),
+            });
+        }
+    });
+
     server.dispatchM365WorkspaceMessage = (body) => new Promise((resolve, reject) => {
         let statusCode = 200;
         let settled = false;
@@ -912,7 +1230,7 @@ module.exports = function(server) {
                 return res.status(400).json({ success: false, error: 'conversationId required' });
             }
             if (!areM365ActionsEnabled()) {
-                return res.json({ success: true, actionsEnabled: false, items: [] });
+                return res.json({ success: true, actionsEnabled: false, items: [], executionQueue: [] });
             }
 
             const index = require('../../index.js');
@@ -920,18 +1238,20 @@ module.exports = function(server) {
                 ? index.getOrCreateGolem(golemId)
                 : null;
             const pendingTasks = instance && instance.controller && instance.controller.pendingTasks;
-            if (!pendingTasks) {
-                return res.json({ success: true, actionsEnabled: true, items: [] });
-            }
+            const executionQueue = instance && instance.actionQueue && typeof instance.actionQueue.getSnapshot === 'function'
+                ? instance.actionQueue.getSnapshot({ conversationId })
+                : [];
 
             const items = [];
-            for (const [id, task] of pendingTasks.entries()) {
-                if (pendingActionConversationId(task) !== conversationId) continue;
-                if (!pendingActionDecision(task, 'approved')) continue;
-                items.push(pendingActionView(id, task));
+            if (pendingTasks) {
+                for (const [id, task] of pendingTasks.entries()) {
+                    if (pendingActionConversationId(task) !== conversationId) continue;
+                    if (!pendingActionDecision(task, 'approved')) continue;
+                    items.push(pendingActionView(id, task));
+                }
             }
             items.sort((left, right) => left.requestedAt - right.requestedAt);
-            return res.json({ success: true, actionsEnabled: true, items });
+            return res.json({ success: true, actionsEnabled: true, items, executionQueue });
         } catch (error) {
             console.error('Failed to list pending M365 actions:', error);
             return res.status(workspaceErrorStatus(error)).json({

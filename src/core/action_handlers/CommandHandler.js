@@ -1,4 +1,5 @@
 const { v4: uuidv4 } = require('uuid');
+const { buildM365PlanObservation } = require('../../services/M365PlanProtocol');
 
 class CommandHandler {
     static async execute(ctx, normalActions, controller, brain, dispatchFn, dispatchOptions = {}) {
@@ -21,6 +22,59 @@ class CommandHandler {
             console.warn('[CommandHandler] 無法取得雙產線系統，退回單產線模式', e.message);
         }
 
+        const sendPlanObservation = async (status, result, lane = 'command') => {
+            if (dispatchOptions.planMode !== true) return false;
+            let recorded = null;
+            if (typeof ctx.onGolemObservation === 'function') {
+                recorded = await ctx.onGolemObservation({
+                    runId: dispatchOptions.workspaceRunId,
+                    stepId: dispatchOptions.workspaceStepId,
+                    actionId: dispatchOptions.workspaceActionId,
+                    planStepId: dispatchOptions.workspacePlanStepId,
+                    lane,
+                    status,
+                    result,
+                });
+            }
+            const nextDepth = Number(dispatchOptions.actionDepth || 0) + 1;
+            const maxDepth = Number(dispatchOptions.maxActionDepth || process.env.GOLEM_MAX_AUTO_TURNS || 5);
+            const mayContinue = nextDepth < maxDepth && !['PAUSED', 'CANCELED', 'COMPLETED', 'RECONCILE_REQUIRED'].includes(recorded?.run?.status);
+            const feedbackPrompt = buildM365PlanObservation({
+                planId: dispatchOptions.workspacePlanId || recorded?.planId,
+                planRevision: dispatchOptions.workspacePlanRevision || recorded?.planRevision,
+                stepId: dispatchOptions.workspaceStepId,
+                planStepId: dispatchOptions.workspacePlanStepId,
+                actionId: dispatchOptions.workspaceActionId,
+                lane,
+                status,
+                result,
+            });
+            const feedbackOptions = {
+                isPriority: true,
+                bypassDebounce: true,
+                isSystemFeedback: true,
+                allowActions: mayContinue,
+                actionDepth: nextDepth,
+                maxActionDepth: maxDepth,
+                maxAutoTurns: maxDepth + 1,
+                planMode: true,
+                workspaceConversationId: ctx.workspaceConversationId || null,
+                workspaceRunId: dispatchOptions.workspaceRunId,
+                workspaceStepId: dispatchOptions.workspaceStepId,
+                workspacePlanId: dispatchOptions.workspacePlanId || recorded?.planId,
+                workspacePlanRevision: dispatchOptions.workspacePlanRevision || recorded?.planRevision,
+                workspacePlanStepId: dispatchOptions.workspacePlanStepId,
+                workspaceActionId: dispatchOptions.workspaceActionId,
+            };
+            if (convoManager) {
+                await convoManager.enqueue(ctx, feedbackPrompt, feedbackOptions);
+            } else if (brain && typeof brain.sendMessage === 'function') {
+                const finalRes = await brain.sendMessage(feedbackPrompt, false, feedbackOptions);
+                await dispatchFn(ctx, finalRes, brain, controller);
+            }
+            return true;
+        };
+
         const runLogic = async () => {
             let result;
             try {
@@ -28,14 +82,25 @@ class CommandHandler {
             } catch (err) {
                 console.error('[CommandHandler] runSequence 拋出例外:', err);
                 await ctx.reply(`❌ **指令執行失敗**\n\`\`\`\n${err.message}\n\`\`\``, { parse_mode: 'Markdown' });
+                await sendPlanObservation('failed', `Command execution threw an error: ${err.message}`).catch((feedbackError) => {
+                    console.error('[CommandHandler] Failed to record plan Observation:', feedbackError);
+                });
                 return;
             }
 
-            if (!result) return;
+            if (!result) {
+                if (dispatchOptions.planMode === true) {
+                    await ctx.reply('⚠️ 工具沒有回傳可驗證的 Observation；自主計畫已停在目前步驟。');
+                    await sendPlanObservation('failed', 'The command executor returned no Observation.');
+                }
+                return;
+            }
 
             // 1. 處理需要外部審批的情況
             if (typeof result === 'object') {
                 if (result.status === 'PENDING_APPROVAL') {
+                    const pendingTask = controller?.pendingTasks?.get(result.approvalId);
+                    if (pendingTask) pendingTask.planDispatchOptions = { ...dispatchOptions };
                     const cmdBlock = result.cmd ? `\n\`\`\`shell\n${result.cmd}\n\`\`\`` : "";
                     await ctx.reply(
                         `⚠️ ${result.riskLevel === 'DANGER' ? '🔴 危險指令' : '🟡 警告'}${cmdBlock}\n\n${result.reason}`,
@@ -64,6 +129,15 @@ class CommandHandler {
                     .filter(block => block.includes('[Step') && block.includes(' Failed]'));
                 const currentCorrectionAttempt = Number(dispatchOptions.correctionAttempt || 0);
                 const maxAutoCorrectionAttempts = Number(process.env.GOLEM_MAX_AUTO_CORRECTION_ATTEMPTS || 1);
+
+                if (dispatchOptions.planMode === true) {
+                    const hasFailure = failedSteps.length > 0;
+                    if (hasFailure) {
+                        await ctx.reply(`❌ 工具步驟執行失敗；結果已回傳給 Golem 修訂計畫。`);
+                    }
+                    await sendPlanObservation(hasFailure ? 'failed' : 'succeeded', result);
+                    return;
+                }
 
                 if (failedSteps.length > 0) {
                     const errorSummary = failedSteps.map(block => {
@@ -173,7 +247,7 @@ class CommandHandler {
             }
         };
 
-        if (actionQueue) {
+        if (actionQueue && dispatchOptions.actionQueueManaged !== true) {
             // ✨ [v9.1] 由於 DialogueQueue 已建立插隊防護，直接正常排隊即可
             await actionQueue.enqueue(ctx, runLogic, { isPriority: false });
         } else {

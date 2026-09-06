@@ -85,4 +85,85 @@ describe('CommandHandler', () => {
             expect.anything()
         );
     });
+
+    test('plan mode records a bound host Observation and queues the next revision', async () => {
+        mockController.runSequence.mockResolvedValue('[Step 1 Success]\nResult:\nfile-a.txt');
+        mockCtx.workspaceConversationId = 'conversation-1';
+        mockCtx.onGolemObservation = jest.fn().mockResolvedValue({
+            planId: 'run-1',
+            planRevision: 1,
+            run: { status: 'RUNNING' },
+        });
+
+        await CommandHandler.execute(
+            mockCtx,
+            [{ action: 'command', parameter: 'dir' }],
+            mockController,
+            mockBrain,
+            mockDispatchFn,
+            {
+                planMode: true,
+                workspaceRunId: 'run-1',
+                workspaceStepId: 'host-step-1',
+                workspacePlanId: 'run-1',
+                workspacePlanRevision: 1,
+                workspacePlanStepId: 'step_1',
+                workspaceActionId: 'action-1',
+                actionDepth: 0,
+                maxActionDepth: 6,
+            }
+        );
+
+        expect(mockCtx.onGolemObservation).toHaveBeenCalledWith(expect.objectContaining({
+            runId: 'run-1',
+            stepId: 'host-step-1',
+            actionId: 'action-1',
+            planStepId: 'step_1',
+            lane: 'command',
+            status: 'succeeded',
+        }));
+        expect(mockConvoManager.enqueue).toHaveBeenCalledWith(
+            mockCtx,
+            expect.stringContaining('[GOLEM_OBSERVATION]'),
+            expect.objectContaining({
+                isSystemFeedback: true,
+                allowActions: true,
+                planMode: true,
+                workspacePlanRevision: 1,
+            })
+        );
+    });
+
+    test('plan mode fails closed when the command executor returns no Observation', async () => {
+        mockController.runSequence.mockResolvedValue('');
+        mockCtx.onGolemObservation = jest.fn().mockResolvedValue({
+            planId: 'run-1',
+            planRevision: 1,
+            run: { status: 'RUNNING' },
+        });
+
+        await CommandHandler.execute(
+            mockCtx,
+            [{ action: 'command', parameter: 'dir' }],
+            mockController,
+            mockBrain,
+            mockDispatchFn,
+            {
+                planMode: true,
+                workspaceRunId: 'run-1',
+                workspaceStepId: 'host-step-1',
+                workspacePlanId: 'run-1',
+                workspacePlanRevision: 1,
+                workspacePlanStepId: 'step_1',
+                workspaceActionId: 'action-1',
+                maxActionDepth: 6,
+            }
+        );
+
+        expect(mockCtx.onGolemObservation).toHaveBeenCalledWith(expect.objectContaining({
+            status: 'failed',
+            result: 'The command executor returned no Observation.',
+        }));
+        expect(mockCtx.reply).toHaveBeenCalledWith(expect.stringContaining('沒有回傳可驗證的 Observation'));
+    });
 });

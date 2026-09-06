@@ -13,6 +13,8 @@ export type M365Project = {
     name: string;
     description: string;
     instructions: string;
+    workspaceMode: "managed" | "create" | "existing";
+    workspacePath: string | null;
     status: "active" | "archived";
     retentionMode: string;
     contextVersion: number;
@@ -123,6 +125,25 @@ export type M365Approval = {
     decidedAt: string | null;
 };
 
+export type M365AutonomousPlan = {
+    schemaVersion: "golem_plan/1";
+    planId: string;
+    revision: number;
+    goal: string;
+    completionCriteria: string;
+    status: "running" | "wait_user" | "wait_approval" | "complete" | "blocked";
+    currentStepId: string | null;
+    steps: Array<{
+        id: string;
+        title: string;
+        status: "pending" | "in_progress" | "completed" | "blocked" | "skipped";
+        doneWhen: string;
+    }>;
+    question: string;
+    approvalRequest: string;
+    completionSummary: string;
+};
+
 export type M365RunDetail = {
     run: M365Run;
     steps: M365RunStep[];
@@ -134,6 +155,8 @@ export type M365RunDetail = {
         createdAt: string;
     }>;
     approvals: M365Approval[];
+    plan: M365AutonomousPlan | null;
+    origin: "copilot" | "user" | string;
     checkpoint: {
         id: string;
         runId: string;

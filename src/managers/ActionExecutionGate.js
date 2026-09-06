@@ -89,6 +89,43 @@ class ActionExecutionGate {
             return { ok: true, lane: 'command', normalizedAction };
         }
 
+        if (normalizedAction === 'plan-checkpoint') {
+            if (options.planMode !== true) {
+                return {
+                    ok: false,
+                    code: 'M365_PLAN_CHECKPOINT_OUTSIDE_PLAN',
+                    error: 'plan_checkpoint is valid only inside an accepted GOLEM_PLAN.',
+                };
+            }
+            const summary = String(action.summary || '').trim();
+            const evidence = action.evidence === undefined ? [] : action.evidence;
+            if (!summary || summary.length > 4000) {
+                return {
+                    ok: false,
+                    code: 'M365_PLAN_CHECKPOINT_SUMMARY_INVALID',
+                    error: 'plan_checkpoint requires a non-empty summary of at most 4000 characters.',
+                };
+            }
+            if (!Array.isArray(evidence)
+                || evidence.length > 10
+                || evidence.some((item) => typeof item !== 'string' || !item.trim() || item.length > 2000)) {
+                return {
+                    ok: false,
+                    code: 'M365_PLAN_CHECKPOINT_EVIDENCE_INVALID',
+                    error: 'plan_checkpoint evidence must be an array of up to 10 non-empty strings.',
+                };
+            }
+            const unknownFields = Object.keys(action).filter((key) => !['action', 'summary', 'evidence'].includes(key));
+            if (unknownFields.length > 0) {
+                return {
+                    ok: false,
+                    code: 'M365_PLAN_CHECKPOINT_FIELDS_INVALID',
+                    error: `plan_checkpoint contains unsupported fields: ${unknownFields.join(', ')}.`,
+                };
+            }
+            return { ok: true, lane: 'host', normalizedAction: 'plan_checkpoint' };
+        }
+
         if (normalizedAction === 'mcp-call') {
             // Auto-normalize alias: mcp-call -> mcp_call
             if (!hasValidMcpShape(action)) {

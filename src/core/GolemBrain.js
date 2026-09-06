@@ -722,9 +722,10 @@ class GolemBrain {
         this.backend = ConfigManager.CONFIG.GOLEM_BACKEND || this.backend || 'gemini';
         this._refreshWebBackendDefinition();
 
-        if (this.webBackend && this.webBackend.id === 'm365-web' && options.attachment) {
-            const attachmentError = new Error('M365 Web POC 目前只允許純文字訊息；附件功能尚未通過資料邊界驗證。');
-            attachmentError.code = 'M365_ATTACHMENT_DISABLED';
+        if (this.webBackend && this.webBackend.id === 'm365-web' && options.attachment
+            && options.attachment.validatedByM365Harness !== true) {
+            const attachmentError = new Error('M365 附件必須經過專案綁定、類型與容量驗證後才能送出。');
+            attachmentError.code = 'M365_ATTACHMENT_UNTRUSTED';
             throw attachmentError;
         }
 
@@ -762,7 +763,10 @@ class GolemBrain {
             await this.setupCDP();
 
             const attachment = options.attachment || null;
-            const reqId = ProtocolFormatter.generateReqId();
+            const requestedProtocolId = String(options.protocolRequestId || '')
+                .replace(/[^a-zA-Z0-9_-]/g, '')
+                .slice(0, 16);
+            const reqId = requestedProtocolId || ProtocolFormatter.generateReqId();
             const startTag = ProtocolFormatter.buildStartTag(reqId);
             const endTag = ProtocolFormatter.buildEndTag(reqId);
             const routedText = this.webBackend && this.webBackend.safeMode && !this.areActionsEnabled()
@@ -848,7 +852,14 @@ class GolemBrain {
 
         // 📥 [v9.1.10] 處理 Gemini 回傳的附件，下載至本地伺服器
         if (this.webBackend && this.webBackend.id === 'm365-web') {
-            result.attachments = [];
+            result.attachments = (Array.isArray(result.attachments) ? result.attachments : [])
+                .filter((item) => item && /^https:\/\//i.test(String(item.url || '')))
+                .map((item) => ({
+                    url: String(item.url),
+                    name: String(item.name || '下載檔案').replace(/[\r\n]/g, ' ').slice(0, 240),
+                    mimeType: String(item.mimeType || 'application/octet-stream'),
+                    isRemote: true,
+                }));
         } else if (result.attachments && result.attachments.length > 0) {
             const { downloadFile } = require('../utils/HttpUtils');
             const path = require('path');
@@ -902,7 +913,8 @@ class GolemBrain {
             if (code === 'M365_INSECURE_URL') return 'insecure_url';
             if (code === 'M365_SEND_UNCONFIRMED') return 'send_unconfirmed';
             if (code === 'BROWSER_PROFILE_IN_USE') return 'profile_in_use';
-            if (code === 'M365_ATTACHMENT_DISABLED' || code === 'M365_POC_FEATURE_DISABLED') return 'poc_scope_blocked';
+            if (code.startsWith('M365_ATTACHMENT_') || code === 'M365_SEND_NOT_READY'
+                || code === 'M365_POC_FEATURE_DISABLED') return 'poc_scope_blocked';
             if (/timeout|等待回應超時|timed out|navigation timeout/.test(message)) return 'timeout';
             if (/login|sign in|not logged|auth|unauthorized|403|forbidden/.test(message)) return 'auth_required';
             if (/429|rate limit|too many requests|quota|captcha/.test(message)) return 'rate_limited';

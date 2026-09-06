@@ -720,6 +720,17 @@ class MCPManager extends EventEmitter {
         }
     }
 
+    async shutdown() {
+        if (this._loadingPromise) {
+            await this._loadingPromise.catch(() => {});
+        }
+        const clientNames = Array.from(this._clients.keys());
+        await Promise.allSettled(clientNames.map((name) => this._stopClient(name)));
+        this._clients.clear();
+        this._loaded = false;
+        this._loadingPromise = null;
+    }
+
     _appendLog(entry) {
         this._logs.push(entry);
         if (this._logs.length > MAX_LOG) this._logs.shift();

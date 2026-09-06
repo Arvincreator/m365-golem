@@ -22,6 +22,7 @@
     "runtime:all": "node scripts/runtime-check.js all",
     "install:m365": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-m365-golem.ps1",
     "install:m365:plan": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-m365-golem.ps1 -PlanOnly",
+    "package:windows": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/build-m365-release.ps1",
     "bridge:install": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-m365-session-bridge.ps1",
     "bridge:plan": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/install-m365-session-bridge.ps1 -PlanOnly",
     "bridge:build": "npm --prefix integrations/m365-session-bridge run build",

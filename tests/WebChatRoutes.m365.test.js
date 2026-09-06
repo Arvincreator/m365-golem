@@ -35,7 +35,7 @@ describe('web chat routes in M365 safe mode', () => {
         }
     });
 
-    test('blocks attachments before message dispatch', async () => {
+    test('blocks legacy unbound attachments before message dispatch', async () => {
         const response = await fetch(`${baseUrl}/api/chat`, {
             method: 'POST',
             headers: { 'content-type': 'application/json' },
@@ -48,7 +48,7 @@ describe('web chat routes in M365 safe mode', () => {
 
         expect(response.status).toBe(400);
         await expect(response.json()).resolves.toEqual(expect.objectContaining({
-            error: expect.stringContaining('text only'),
+            error: 'M365_ATTACHMENT_LEGACY_REJECTED',
         }));
     });
 

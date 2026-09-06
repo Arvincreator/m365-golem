@@ -35,7 +35,7 @@ function extractErrorMessage(payload: unknown, fallback: string): string {
     if (typeof payload === "string" && payload.trim()) return payload;
     if (!payload || typeof payload !== "object") return fallback;
     const obj = payload as Record<string, unknown>;
-    const candidates = [obj.error, obj.message, obj.detail];
+    const candidates = [obj.message, obj.error, obj.detail];
     for (const candidate of candidates) {
         if (typeof candidate === "string" && candidate.trim()) return candidate;
     }

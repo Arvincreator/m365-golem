@@ -65,6 +65,23 @@ describe('ResponseParser M365 reply-only envelope', () => {
         ]);
     });
 
+    test('parses the exact M365 virtualized code chrome around a one-line action', () => {
+        const parsed = ResponseParser.parse(
+            '[[BEGIN:chrome]]\n' +
+            '[GOLEM_REPLY]正在等待核准。[/GOLEM_REPLY]\n' +
+            '[GOLEM_ACTION]\n' +
+            'JSON\n' +
+            '1\n' +
+            '[{"action":"command","parameter":"echo %CD%"}]\n' +
+            '[/GOLEM_ACTION] [[END:chrome]]'
+        );
+
+        expect(parsed.reply).toBe('正在等待核准。');
+        expect(parsed.actions).toEqual([
+            { action: 'command', parameter: 'echo %CD%' },
+        ]);
+    });
+
     test('does not remove standalone numbers unless they form an M365 gutter sequence', () => {
         const candidate = '1\n[\n3\n{"action":"command","parameter":"echo 7"}\n]';
 

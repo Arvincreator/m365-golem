@@ -91,6 +91,150 @@ describe('NeuroShunter M365 safety gates', () => {
         expect(CommandHandler.execute).not.toHaveBeenCalled();
     });
 
+    test('binds a Copilot-authored plan step to the pending Action Gate item', async () => {
+        const onGolemProtocolResponse = jest.fn().mockResolvedValue({
+            accepted: true,
+            allowActions: true,
+            planMode: true,
+            runId: 'run-1',
+            stepId: 'host-step-1',
+            planId: 'run-1',
+            planRevision: 1,
+            planStepId: 'step_1',
+            actionId: 'action-1',
+            maxActionDepth: 6,
+        });
+        const ctx = {
+            reply: jest.fn().mockResolvedValue(),
+            shouldMentionSender: false,
+            platform: 'web',
+            workspaceConversationId: 'conversation-plan-1',
+            onGolemProtocolResponse,
+        };
+        const brain = {
+            webBackend: { id: 'm365-web', safeMode: true },
+            memorize: jest.fn().mockResolvedValue(),
+            _appendChatLog: jest.fn(),
+            areActionsEnabled: jest.fn(() => true),
+            isLocalContextEnabled: jest.fn(() => false),
+        };
+        const controller = { pendingTasks: new Map() };
+        ResponseParser.parse.mockReturnValue({
+            memory: null,
+            reply: '正在執行第一步。',
+            plan: {
+                schemaVersion: 'golem_plan/1',
+                planId: null,
+                revision: 1,
+                status: 'running',
+                currentStepId: 'step_1',
+                steps: [{ id: 'step_1', title: '檢查', status: 'in_progress', doneWhen: '取得 Observation' }],
+            },
+            actions: [{ action: 'command', parameter: 'dir' }],
+        });
+
+        await NeuroShunter.dispatch(ctx, 'raw-plan-response', brain, controller);
+
+        expect(onGolemProtocolResponse).toHaveBeenCalledWith(expect.objectContaining({
+            rawResponse: 'raw-plan-response',
+            actionCount: 1,
+            isSystemFeedback: false,
+        }));
+        const pending = [...controller.pendingTasks.values()][0];
+        expect(pending).toEqual(expect.objectContaining({
+            type: 'M365_ACTION_APPROVAL',
+            proposedActions: [{ action: 'command', parameter: 'dir' }],
+            dispatchOptions: expect.objectContaining({
+                planMode: true,
+                workspaceRunId: 'run-1',
+                workspaceStepId: 'host-step-1',
+                workspacePlanId: 'run-1',
+                workspacePlanRevision: 1,
+                workspacePlanStepId: 'step_1',
+                workspaceActionId: 'action-1',
+            }),
+        }));
+        expect(CommandHandler.execute).not.toHaveBeenCalled();
+    });
+
+    test('turns a native Copilot plan checkpoint into a bound Observation without user approval', async () => {
+        const onGolemProtocolResponse = jest.fn().mockResolvedValue({
+            accepted: true,
+            allowActions: true,
+            planMode: true,
+            runId: 'run-native-1',
+            stepId: 'host-step-native-1',
+            planId: 'run-native-1',
+            planRevision: 1,
+            planStepId: 'step_1',
+            actionId: 'action-native-1',
+            maxActionDepth: 6,
+        });
+        const onGolemObservation = jest.fn().mockResolvedValue({
+            run: { status: 'RUNNING' },
+            planId: 'run-native-1',
+            planRevision: 1,
+        });
+        const convoManager = { enqueue: jest.fn().mockResolvedValue() };
+        const ctx = {
+            reply: jest.fn().mockResolvedValue(),
+            shouldMentionSender: false,
+            platform: 'web',
+            workspaceConversationId: 'conversation-native-1',
+            onGolemProtocolResponse,
+            onGolemObservation,
+        };
+        const brain = {
+            webBackend: { id: 'm365-web', safeMode: true },
+            memorize: jest.fn().mockResolvedValue(),
+            _appendChatLog: jest.fn(),
+            areActionsEnabled: jest.fn(() => true),
+            isLocalContextEnabled: jest.fn(() => false),
+        };
+        const controller = { pendingTasks: new Map(), convoManager };
+        ResponseParser.parse.mockReturnValue({
+            memory: null,
+            reply: '我已用原生能力完成第一段分析。',
+            plan: {
+                schemaVersion: 'golem_plan/1',
+                planId: null,
+                revision: 1,
+                status: 'running',
+                currentStepId: 'step_1',
+                steps: [{ id: 'step_1', title: '原生分析', status: 'in_progress', doneWhen: '輸出分析結果' }],
+            },
+            actions: [{
+                action: 'plan_checkpoint',
+                summary: '已完成第一段分析',
+                evidence: ['本輪 GOLEM_REPLY 已呈現分析結果'],
+            }],
+        });
+
+        await NeuroShunter.dispatch(ctx, 'raw-native-plan-response', brain, controller);
+
+        expect(controller.pendingTasks.size).toBe(0);
+        expect(onGolemObservation).toHaveBeenCalledWith(expect.objectContaining({
+            runId: 'run-native-1',
+            stepId: 'host-step-native-1',
+            actionId: 'action-native-1',
+            planStepId: 'step_1',
+            lane: 'plan_checkpoint',
+            status: 'succeeded',
+        }));
+        expect(convoManager.enqueue).toHaveBeenCalledWith(
+            ctx,
+            expect.stringContaining('[GOLEM_OBSERVATION]'),
+            expect.objectContaining({
+                isSystemFeedback: true,
+                planMode: true,
+                allowActions: true,
+                workspacePlanId: 'run-native-1',
+            })
+        );
+        expect(SkillHandler.execute).not.toHaveBeenCalled();
+        expect(CommandHandler.execute).not.toHaveBeenCalled();
+    });
+
     test('writes scoped project and user memory automatically without creating an approval task', async () => {
         const projectMemoryService = {
             applyMemoryBlock: jest.fn(() => ({ results: [{ changed: true }] })),
@@ -105,6 +249,7 @@ describe('NeuroShunter M365 safety gates', () => {
             workspaceProjectId: 'project-1',
             workspaceConversationId: 'conversation-1',
             workspaceRequestId: 'request-1',
+            workspaceRoot: 'C:\\workspaces\\project-1',
             m365ProjectWorkspaceService: projectMemoryService,
         };
         const brain = {
@@ -130,7 +275,11 @@ describe('NeuroShunter M365 safety gates', () => {
         expect(projectMemoryService.applyMemoryBlock).toHaveBeenCalledWith(
             'project-1',
             expect.any(String),
-            { conversationId: 'conversation-1', requestId: 'request-1' }
+            {
+                conversationId: 'conversation-1',
+                requestId: 'request-1',
+                workspacePath: 'C:\\workspaces\\project-1',
+            }
         );
         expect(userProfile.applyM365MemoryBlock).toHaveBeenCalledTimes(1);
         expect(brain.memorize).not.toHaveBeenCalled();

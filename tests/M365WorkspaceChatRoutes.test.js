@@ -110,6 +110,8 @@ describe('workspace-aware M365 chat route', () => {
     beforeEach(() => {
         jest.clearAllMocks();
         serverContext.m365DispatchLease = null;
+        serverContext.m365PendingResponses?.clear();
+        delete serverContext.m365AttachmentService;
         mockStore.getConversation.mockResolvedValue({
             id: 'conversation-1',
             projectId: 'project-1',
@@ -204,6 +206,8 @@ describe('workspace-aware M365 chat route', () => {
             expect(ctx.workspaceRoot).toBe('C:\\local\\m365-projects\\project-1');
             expect(ctx.m365ProjectWorkspaceService).toBe(mockProjectWorkspaceService);
             expect(ctx.toolRoutingQuery).toBe('Prepare a memo.');
+            await ctx.onTransportStart();
+            await ctx.onTransportAccepted();
             await ctx.onTransportComplete({ text: 'M365 answer' });
             await ctx.reply('M365 answer');
         });
@@ -227,7 +231,7 @@ describe('workspace-aware M365 chat route', () => {
         expect(mockStore.addMessage).toHaveBeenNthCalledWith(1, 'conversation-1', expect.objectContaining({
             role: 'user',
             content: 'Prepare a memo.',
-            deliveryState: 'dispatch_started',
+            deliveryState: 'local',
         }));
         expect(mockStore.updateMessageDeliveryState).toHaveBeenCalledWith('user-message-1', 'confirmed');
         expect(mockCaptureBinding).toHaveBeenCalled();
@@ -394,7 +398,82 @@ describe('workspace-aware M365 chat route', () => {
         }));
     });
 
-    test('rejects a second dispatch while the visible Edge window is leased', async () => {
+    test('keeps a confirmed slow response recoverable without locking the conversation', async () => {
+        mockHandleDashboardMessage.mockImplementation(async (ctx) => {
+            await ctx.onTransportStart();
+            await ctx.onTransportAccepted();
+            const error = new Error('response timeout');
+            error.code = 'M365_RESPONSE_NOT_FOUND';
+            await ctx.onTransportError(error);
+            await ctx.reply(`⚠️ ${error.message}`);
+        });
+
+        const sent = await postChat({
+            golemId: 'golem_A',
+            projectId: 'project-1',
+            conversationId: 'conversation-1',
+            message: 'Create a slow workbook.',
+        });
+        expect(sent.response.status).toBe(200);
+        await waitFor(() => serverContext.m365DispatchLease === null);
+
+        const response = await fetch(`${baseUrl}/api/chat/pending-responses?conversationId=conversation-1`);
+        const body = await response.json();
+        expect(body.items).toEqual([
+            expect.objectContaining({ requestId: sent.body.requestId, retryCount: 0, status: 'needs_recheck' }),
+        ]);
+        expect(mockStore.updateMessageDeliveryState).toHaveBeenLastCalledWith('user-message-1', 'confirmed');
+        expect(mockMarkReconcile).not.toHaveBeenCalled();
+        expect(mockStore.addMessage).toHaveBeenNthCalledWith(2, 'conversation-1', expect.objectContaining({
+            role: 'system',
+            deliveryState: 'local',
+        }));
+    });
+
+    test('keeps a staged attachment available until the dashboard transport settles', async () => {
+        let finishTransport;
+        const cleanupBatch = jest.fn();
+        serverContext.m365AttachmentService = {
+            resolveBatch: jest.fn(() => ({
+                isNative: true,
+                validatedByM365Harness: true,
+                batchId: 'attachment-batch-1',
+                files: [{
+                    name: 'brief.pdf',
+                    path: 'C:\\staged\\brief.pdf',
+                    mimeType: 'application/pdf',
+                    size: 12,
+                    sha256: 'a'.repeat(64),
+                }],
+                totalBytes: 12,
+            })),
+            cleanupBatch,
+        };
+        mockHandleDashboardMessage.mockImplementation(() => new Promise((resolve) => {
+            finishTransport = resolve;
+        }));
+
+        const result = await postChat({
+            golemId: 'golem_A',
+            projectId: 'project-1',
+            conversationId: 'conversation-1',
+            message: 'Read the attached brief.',
+            attachmentBatchId: 'attachment-batch-1',
+        });
+
+        expect(result.response.status).toBe(200);
+        await waitFor(() => typeof finishTransport === 'function');
+        expect(cleanupBatch).not.toHaveBeenCalled();
+
+        finishTransport();
+        await waitFor(() => cleanupBatch.mock.calls.length === 1);
+        expect(cleanupBatch).toHaveBeenCalledWith('attachment-batch-1', {
+            projectId: 'project-1',
+            conversationId: 'conversation-1',
+        });
+    });
+
+    test('accepts a second dispatch into the dialogue queue while Edge is leased', async () => {
         serverContext.m365DispatchLease = {
             token: 'existing',
             conversationId: 'another-conversation',
@@ -407,9 +486,12 @@ describe('workspace-aware M365 chat route', () => {
             message: 'Do not send this.',
         });
 
-        expect(result.response.status).toBe(409);
-        expect(result.body.error).toBe('M365_UI_BUSY');
+        expect(result.response.status).toBe(200);
+        expect(result.body.success).toBe(true);
         expect(mockActivate).not.toHaveBeenCalled();
-        expect(mockStore.addMessage).not.toHaveBeenCalled();
+        expect(mockStore.addMessage).toHaveBeenCalledWith('conversation-1', expect.objectContaining({
+            role: 'user',
+            deliveryState: 'local',
+        }));
     });
 });
