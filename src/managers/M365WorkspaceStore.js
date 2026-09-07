@@ -5,6 +5,10 @@ const fs = require('fs');
 const path = require('path');
 const sqlite3 = require('sqlite3').verbose();
 const { v4: uuidv4 } = require('uuid');
+const {
+    isPlaceholderConversationTitle,
+    normalizeGeneratedConversationTitle,
+} = require('../services/M365ConversationTitle');
 
 const RUN_STATUSES = Object.freeze([
     'DRAFT',
@@ -703,6 +707,39 @@ class M365WorkspaceStore {
                 WHERE id = ?
             `, [...this._encryptedParams(title, `conversations:${conversationId}:title`), now, conversationId]);
             return this._decodeConversation(await this._get('SELECT * FROM conversations WHERE id = ?', [conversationId]));
+        });
+    }
+
+    async updateConversationTitleIfPlaceholder(conversationId, titleValue) {
+        const title = normalizeGeneratedConversationTitle(titleValue);
+        return this._enqueue(async () => {
+            const current = await this._get('SELECT * FROM conversations WHERE id = ?', [conversationId]);
+            if (!current) throw workspaceError('M365_CONVERSATION_NOT_FOUND', 'Conversation not found.');
+
+            const decoded = this._decodeConversation(current);
+            if (!title) {
+                return { changed: false, reason: 'invalid_title', conversation: decoded };
+            }
+            if (current.status !== 'active') {
+                return { changed: false, reason: 'conversation_not_active', conversation: decoded };
+            }
+            if (!isPlaceholderConversationTitle(decoded.title)) {
+                return { changed: false, reason: 'title_already_set', conversation: decoded };
+            }
+
+            const now = this._now();
+            await this._run(`
+                UPDATE conversations SET
+                    title_ciphertext = ?, title_iv = ?, title_tag = ?, updated_at = ?
+                WHERE id = ?
+            `, [...this._encryptedParams(title, `conversations:${conversationId}:title`), now, conversationId]);
+            return {
+                changed: true,
+                reason: 'updated',
+                conversation: this._decodeConversation(
+                    await this._get('SELECT * FROM conversations WHERE id = ?', [conversationId])
+                ),
+            };
         });
     }
 

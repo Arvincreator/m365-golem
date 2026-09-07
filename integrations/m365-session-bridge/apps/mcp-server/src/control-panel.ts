@@ -8,7 +8,10 @@ import {
   type EditablePolicyList,
 } from "./policy-writer.js";
 
-const DEFAULT_CONTROL_PORT = 43_240;
+// 43240 is used by the standalone Bridge distribution. The Golem-integrated
+// control surface uses its own loopback port so the dashboard never edits an
+// older installation's policy by accident.
+const DEFAULT_CONTROL_PORT = 43_241;
 const MAX_BODY_BYTES = 32 * 1024;
 
 type VisiblePolicy = ReturnType<typeof readPolicyForControlPanel>;
@@ -34,6 +37,7 @@ function visiblePolicy(policy: VisiblePolicy): Record<string, unknown> {
     deniedHosts: policy.deniedHosts,
     deniedSites: policy.deniedSites,
     allowedLibraries: policy.allowedLibraries,
+    allowedLocalPaths: policy.allowedLocalPaths,
   };
 }
 
@@ -77,7 +81,7 @@ function isLocalOrigin(req: http.IncomingMessage, port: number): boolean {
 }
 
 function isEditableList(value: unknown): value is EditablePolicyList {
-  return value === "allowedHosts" || value === "allowedSites" || value === "deniedHosts" || value === "deniedSites";
+  return value === "allowedHosts" || value === "allowedSites" || value === "deniedHosts" || value === "deniedSites" || value === "allowedLocalPaths";
 }
 
 function controlPanelHtml(port: number): string {
@@ -119,11 +123,12 @@ button.remove{background:#6c3340;padding:5px 9px;font-size:12px}.items{display:f
 <section class="card"><h2>黑名單網域</h2><div class="row"><input id="deniedHostsInput" placeholder="不要操作的 SharePoint 網域"><button data-add="deniedHosts">加入</button></div><div id="deniedHosts" class="items"></div></section>
 <section class="card"><h2>白名單站台路徑</h2><div class="row"><input id="allowedSitesInput" placeholder="/sites/Finance 或 /personal/user_example_com"><button data-add="allowedSites">加入</button></div><div id="allowedSites" class="items"></div></section>
 <section class="card"><h2>黑名單站台路徑</h2><div class="row"><input id="deniedSitesInput" placeholder="/sites/Confidential"><button data-add="deniedSites">加入</button></div><div id="deniedSites" class="items"></div></section>
+<section class="card"><h2>允許上傳的本機專案資料夾</h2><div class="row"><input id="allowedLocalPathsInput" placeholder="C:\\Users\\you\\Documents\\Project"><button data-add="allowedLocalPaths">加入</button></div><div id="allowedLocalPaths" class="items"></div></section>
 </div>
-<p class="small">站台路徑黑名單會套用到所有列出的 SharePoint / OneDrive 網域；若同時存在白名單與黑名單，黑名單一定優先。根目錄可輸入 <code>/</code>，代表該網域下的根站台。</p>
+<p class="small">站台路徑黑名單會套用到所有列出的 SharePoint / OneDrive 網域；若同時存在白名單與黑名單，黑名單一定優先。根目錄可輸入 <code>/</code>，代表該網域下的根站台。本機路徑請只加入實際專案資料夾，不接受磁碟根目錄；這只允許 Bridge 讀取待上傳檔案，不會讓 SharePoint 取得整台電腦內容。</p>
 </main>
 <script>
-const lists=['allowedHosts','allowedSites','deniedHosts','deniedSites'];
+const lists=['allowedHosts','allowedSites','deniedHosts','deniedSites','allowedLocalPaths'];
 const $=id=>document.getElementById(id);
 function message(text,error){const el=$('message');el.textContent=text;el.className=error?'error':'';}
 function esc(value){return String(value).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}

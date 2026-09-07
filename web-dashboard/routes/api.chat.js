@@ -17,9 +17,22 @@ const {
 const { getM365RunCoordinator } = require('../../src/services/M365RunCoordinator');
 const { stripM365RunControl } = require('../../src/services/M365RunControlParser');
 const { getM365AttachmentService } = require('../../src/services/M365AttachmentService');
+const { isPlaceholderConversationTitle } = require('../../src/services/M365ConversationTitle');
 const ReferenceFileService = require('../../src/services/ReferenceFileService');
 const SkillPackageRegistry = require('../../src/managers/SkillPackageRegistry');
+const PromptShortcutManager = require('../../src/managers/PromptShortcutManager');
+const { recordM365PromptPoolUse } = require('./api.prompt-pool');
 const EnvManager = require('../../src/utils/EnvManager');
+const ConfigManager = require('../../src/config');
+const {
+    SecurityManager,
+} = require('../../packages/security');
+const {
+    getAutomationModePreset,
+    inferAutomationMode,
+    isFullAutoMode,
+    normalizeAutomationMode,
+} = require('../../src/config/AutomationModes');
 
 const M365_RESPONSE_MODES = Object.freeze({
     auto: 'Automatically match the depth and tool use to the request. Be concise for simple questions and deliberate for complex work.',
@@ -81,14 +94,21 @@ async function resolveSelectedMcpServers(value) {
 
 function listSelectableSkills() {
     return SkillPackageRegistry.listSkillPackages()
-        .filter((pkg) => pkg && pkg.enabled !== false && fs.existsSync(pkg.indexPath))
+        .filter((pkg) => pkg && pkg.enabled !== false && (
+            (pkg.entry && fs.existsSync(pkg.indexPath))
+            || (pkg.promptPath && fs.existsSync(pkg.promptPath))
+        ))
         .map((pkg) => ({
             id: String(pkg.id || ''),
             name: String(pkg.name || pkg.id || ''),
             description: String(pkg.description || '').slice(0, 300),
-            action: String(pkg.action || pkg.id || ''),
+            kind: pkg.entry ? 'executable' : 'prompt_only',
+            action: pkg.entry ? String(pkg.action || pkg.id || '') : '',
+            prompt: pkg.promptPath && fs.existsSync(pkg.promptPath)
+                ? SkillPackageRegistry.readPackagePrompt(pkg).slice(0, 12000)
+                : '',
         }))
-        .filter((pkg) => pkg.id && pkg.action);
+        .filter((pkg) => pkg.id && (pkg.action || pkg.prompt));
 }
 
 function resolveSelectedSkills(value) {
@@ -196,9 +216,15 @@ function buildM365WorkspacePrompt(project, message, requestId, includeProjectCon
 
     if (composerContext.selectedSkills?.length) {
         sections.push('[USER_SELECTED_SKILLS]');
-        sections.push('The user explicitly selected these installed Skills for this turn. Prioritize them when they fit the request. Selection makes the Skill available to this turn but does not approve execution.');
+        sections.push('The user explicitly selected these installed Skills for this turn. Prioritize them when they fit the request. Selection makes their guidance available but does not approve execution.');
         for (const skill of composerContext.selectedSkills) {
-            sections.push(`- ${skill.id} (action: ${skill.action})${skill.description ? `: ${skill.description}` : ''}`);
+            if (skill.kind === 'prompt_only') {
+                sections.push(`[PROMPT_ONLY_SKILL id="${skill.id}"]`);
+                sections.push(skill.prompt);
+                sections.push('[/PROMPT_ONLY_SKILL]');
+            } else {
+                sections.push(`- ${skill.id} (action: ${skill.action})${skill.description ? `: ${skill.description}` : ''}`);
+            }
         }
         sections.push('[/USER_SELECTED_SKILLS]');
     }
@@ -230,22 +256,27 @@ function workspaceErrorStatus(error) {
 
 function appendVisibleDownloadLinks(text, attachments) {
     const body = String(text || '').trim();
-    const links = [];
+    const downloads = [];
+    const sources = [];
     const seen = new Set();
     for (const item of Array.isArray(attachments) ? attachments : []) {
         const url = String(item && item.url || '').trim();
         if (!/^https:\/\//i.test(url) || seen.has(url) || body.includes(url)) continue;
         seen.add(url);
-        const label = String(item && item.name || '下載檔案')
+        const isSource = item && item.kind === 'source';
+        const label = String(item && item.name || (isSource ? '參考來源' : '下載檔案'))
             .replace(/[\r\n]/g, ' ')
             .replace(/[\[\]]/g, '')
             .trim()
-            .slice(0, 180) || '下載檔案';
-        links.push(`- [${label}](${url})`);
+            .slice(0, 180) || (isSource ? '參考來源' : '下載檔案');
+        const link = `- [${label}](<${url.replace(/[<>]/g, '')}>)`;
+        if (isSource) sources.push(link);
+        else downloads.push(link);
     }
-    return links.length > 0
-        ? `${body}\n\nM365 產生的檔案：\n${links.join('\n')}`.trim()
-        : body;
+    const sections = [body];
+    if (downloads.length > 0) sections.push(`M365 產生的檔案：\n${downloads.join('\n')}`);
+    if (sources.length > 0) sections.push(`參考來源連結：\n${sources.join('\n')}`);
+    return sections.filter(Boolean).join('\n\n').trim();
 }
 
 const M365_PENDING_ACTION_TTL_MS = 5 * 60 * 1000;
@@ -400,6 +431,7 @@ module.exports = function(server) {
         let lease = null;
         let workspaceStore = null;
         let workspaceConversation = null;
+        let workspaceConversationTitleRequested = false;
         let workspaceUserMessage = null;
         let transportFailed = false;
         let transportErrorHandled = false;
@@ -495,6 +527,8 @@ module.exports = function(server) {
             const protocolRequestId = requestId.replace(/-/g, '').slice(0, 12);
             const userMessage = String(message || '').trim()
                 || (attachmentBatchId ? '請閱讀並分析本輪上傳的附件。' : '');
+            const shortcutExpansion = PromptShortcutManager.expandPromptShortcutInput(userMessage);
+            const routedUserMessage = shortcutExpansion.changed ? shortcutExpansion.text : userMessage;
             let effectiveMessage = userMessage;
             let workspaceProject = null;
             let workspaceContextIncluded = false;
@@ -513,6 +547,7 @@ module.exports = function(server) {
                 }
                 workspaceStore = await getM365WorkspaceStore(server);
                 workspaceConversation = await workspaceStore.getConversation(conversationId);
+                workspaceConversationTitleRequested = isPlaceholderConversationTitle(workspaceConversation.title);
                 if (projectId && workspaceConversation.projectId !== projectId) {
                     return res.status(409).json({
                         success: false,
@@ -555,7 +590,7 @@ module.exports = function(server) {
                 relevantProjectMemories = typeof projectWorkspaceService.getRelevantMemories === 'function'
                     ? await projectWorkspaceService.getRelevantMemories(
                         workspaceProject.id,
-                        userMessage,
+                        routedUserMessage,
                         {
                             workspacePath: workspaceProject.workspacePath,
                             embedder: projectMemoryEmbedder,
@@ -564,8 +599,8 @@ module.exports = function(server) {
                     )
                     : (Array.isArray(projectWorkspace.memoryEntries) ? projectWorkspace.memoryEntries.slice(0, 8) : []);
                 const promptMessage = attachmentNames.length > 0
-                    ? `${userMessage}\n\n[本輪已附加檔案]\n${attachmentNames.map((name) => `- ${name}`).join('\n')}`
-                    : userMessage;
+                    ? `${routedUserMessage}\n\n[本輪已附加檔案]\n${attachmentNames.map((name) => `- ${name}`).join('\n')}`
+                    : routedUserMessage;
                 effectiveMessage = buildM365WorkspacePrompt(
                     workspaceProject,
                     promptMessage,
@@ -585,6 +620,12 @@ module.exports = function(server) {
                     stepId: stepId || null,
                     deliveryState: 'local',
                 });
+                if (shortcutExpansion.changed && shortcutExpansion.matched) {
+                    recordM365PromptPoolUse({
+                        shortcut: shortcutExpansion.matched.shortcut,
+                        actorIp: req.clientIp || req.ip || req.connection?.remoteAddress || '',
+                    });
+                }
             }
 
             const releaseLease = () => {
@@ -605,6 +646,7 @@ module.exports = function(server) {
                 isAdmin: true,
                 text: userMessage,
                 textOverride: workspaceEnabled ? effectiveMessage : undefined,
+                m365PromptShortcutExpanded: shortcutExpansion.changed === true,
                 messageTime: Date.now(),
                 senderName: 'User',
                 replyToName: '',
@@ -614,6 +656,7 @@ module.exports = function(server) {
                 workspaceRetryAttempt: 0,
                 workspaceProjectId: workspaceConversation ? workspaceConversation.projectId : null,
                 workspaceConversationId: conversationId || null,
+                workspaceConversationTitleRequested,
                 workspaceBootstrapRequired: workspaceEnabled && workspaceContextIncluded,
                 workspaceRunId: runId || null,
                 workspaceStepId: stepId || null,
@@ -621,11 +664,24 @@ module.exports = function(server) {
                 workspacePlanRevision: Number(planRevision || 0),
                 workspaceRoot: projectWorkspace ? projectWorkspace.rootPath : null,
                 m365ProjectWorkspaceService: projectWorkspaceService,
-                toolRoutingQuery: userMessage,
+                toolRoutingQuery: routedUserMessage,
                 preferredMcpServers: composerContext ? composerContext.selectedMcpServers.map((item) => item.name) : [],
                 preferredSkillIds: composerContext ? composerContext.selectedSkills.map((item) => item.id) : [],
-                preferredSkillActions: composerContext ? composerContext.selectedSkills.map((item) => item.action) : [],
-                onTransportStart: workspaceEnabled ? async () => {
+                preferredSkillActions: composerContext ? composerContext.selectedSkills.map((item) => item.action).filter(Boolean) : [],
+                // Browser-native mode is part of this message's queue snapshot;
+                // the prompt hint below remains secondary semantic guidance.
+                m365ResponseMode: composerContext ? composerContext.responseMode : null,
+                onTransportStart: workspaceEnabled ? async (transportMeta = {}) => {
+                    const isPrimaryTransport = transportMeta.isSystemFeedback !== true;
+                    transportFailed = false;
+                    transportErrorHandled = false;
+                    transportFailureCode = '';
+                    transportAmbiguous = false;
+                    transportPending = false;
+                    sendAccepted = false;
+                    persistenceWarning = null;
+                    workspaceConversation = await workspaceStore.getConversation(conversationId)
+                        || workspaceConversation;
                     const queueWaitStartedAt = Date.now();
                     const queueWaitTimeoutMs = 15 * 60 * 1000;
                     while (server.m365DispatchLease) {
@@ -642,13 +698,18 @@ module.exports = function(server) {
                         requestId,
                     });
                     await activateM365Conversation(golemId, workspaceConversation);
-                    await workspaceStore.updateMessageDeliveryState(workspaceUserMessage.id, 'dispatch_started');
+                    if (isPrimaryTransport) {
+                        await workspaceStore.updateMessageDeliveryState(workspaceUserMessage.id, 'dispatch_started');
+                    }
                 } : undefined,
-                onTransportAccepted: workspaceEnabled ? async () => {
+                onTransportAccepted: workspaceEnabled ? async (transportMeta = {}) => {
                     sendAccepted = true;
-                    await workspaceStore.updateMessageDeliveryState(workspaceUserMessage.id, 'confirmed');
+                    if (transportMeta.isSystemFeedback !== true) {
+                        await workspaceStore.updateMessageDeliveryState(workspaceUserMessage.id, 'confirmed');
+                    }
                 } : undefined,
-                onTransportComplete: workspaceEnabled ? async () => {
+                onTransportComplete: workspaceEnabled ? async (_response, transportMeta = {}) => {
+                    const isPrimaryTransport = transportMeta.isSystemFeedback !== true;
                     pendingResponses.delete(requestId);
                     transportPending = false;
                     try {
@@ -661,7 +722,7 @@ module.exports = function(server) {
                         await markConversationReconcileRequired(workspaceStore, conversationId);
                         persistenceWarning = bindingError;
                     }
-                    if (workspaceContextIncluded) {
+                    if (isPrimaryTransport && workspaceContextIncluded) {
                         workspaceConversation = await workspaceStore.acknowledgeConversationProjectContext(
                             conversationId,
                             workspaceProject.contextVersion || 1
@@ -670,7 +731,8 @@ module.exports = function(server) {
                     cleanupAttachmentBatch();
                     releaseLease();
                 } : undefined,
-                onTransportError: workspaceEnabled ? async (error) => {
+                onTransportError: workspaceEnabled ? async (error, transportMeta = {}) => {
+                    const isPrimaryTransport = transportMeta.isSystemFeedback !== true;
                     transportErrorHandled = true;
                     const code = String(error && error.code || '');
                     transportFailureCode = code;
@@ -678,7 +740,9 @@ module.exports = function(server) {
                         transportPending = true;
                         transportFailed = false;
                         retainAttachmentForRecovery = Number(mockContext.workspaceRetryAttempt || 0) < 1;
-                        await workspaceStore.updateMessageDeliveryState(workspaceUserMessage.id, 'confirmed');
+                        if (isPrimaryTransport) {
+                            await workspaceStore.updateMessageDeliveryState(workspaceUserMessage.id, 'confirmed');
+                        }
                         pendingResponses.set(requestId, {
                             requestId,
                             protocolRequestId,
@@ -693,7 +757,7 @@ module.exports = function(server) {
                                 transportPending = false;
                                 transportFailed = false;
                                 retainAttachmentForRecovery = false;
-                                await mockContext.onTransportComplete(response);
+                                await mockContext.onTransportComplete(response, transportMeta);
                                 const instance = typeof index.getOrCreateGolem === 'function'
                                     ? index.getOrCreateGolem(golemId)
                                     : null;
@@ -744,11 +808,21 @@ module.exports = function(server) {
                         'M365_ATTACHMENT_NOT_CONFIRMED',
                         'M365_ATTACHMENT_STAGE_INVALID',
                         'M365_SEND_NOT_READY',
+                        'M365_RESPONSE_MODE_INVALID',
+                        'M365_RESPONSE_MODE_UNAVAILABLE',
+                        'M365_RESPONSE_MODE_SWITCH_FAILED',
+                        'M365_RECONCILIATION_REQUIRED',
+                        'M365_CONVERSATION_BINDING_BROKEN',
+                        'M365_CONVERSATION_MISMATCH',
+                        'M365_CONVERSATION_URL_INVALID',
+                        'M365_NEW_CHAT_UNCONFIRMED',
                         'BROWSER_PROFILE_IN_USE',
                     ]).has(code);
                     const state = clearlyPreDispatch ? 'failed' : 'ambiguous';
                     transportAmbiguous = state === 'ambiguous';
-                    await workspaceStore.updateMessageDeliveryState(workspaceUserMessage.id, state);
+                    if (isPrimaryTransport) {
+                        await workspaceStore.updateMessageDeliveryState(workspaceUserMessage.id, state);
+                    }
                     if (state === 'ambiguous') {
                         await markConversationReconcileRequired(workspaceStore, conversationId);
                     }
@@ -756,9 +830,34 @@ module.exports = function(server) {
                     cleanupAttachmentBatch();
                     releaseLease();
                 } : undefined,
-                onPersistenceError: workspaceEnabled ? async (error) => {
+                onPersistenceError: workspaceEnabled ? async (error, _transportMeta = {}) => {
                     persistenceWarning = error;
                     await markConversationReconcileRequired(workspaceStore, conversationId).catch(() => undefined);
+                } : undefined,
+                onGolemConversationTitle: workspaceEnabled ? async ({ conversationTitle, isSystemFeedback }) => {
+                    if (isSystemFeedback === true || !workspaceConversationTitleRequested || !conversationTitle) {
+                        return { changed: false, reason: 'not_eligible' };
+                    }
+                    const result = await workspaceStore.updateConversationTitleIfPlaceholder(
+                        conversationId,
+                        conversationTitle
+                    );
+                    if (!result || result.changed !== true || !result.conversation) return result;
+
+                    workspaceConversation = result.conversation;
+                    workspaceConversationTitleRequested = false;
+                    server.broadcastLog({
+                        time: new Date().toLocaleTimeString('zh-TW', { hour12: false }),
+                        msg: `[Conversation] ${result.conversation.title}`,
+                        type: 'conversation_title',
+                        raw: result.conversation.title,
+                        golemId,
+                        projectId: result.conversation.projectId,
+                        conversationId,
+                        requestId,
+                        transient: true,
+                    });
+                    return result;
                 } : undefined,
                 onGolemProtocolResponse: workspaceEnabled ? async ({ rawResponse, parsed, actionCount, isSystemFeedback }) => {
                     const coordinator = await getM365RunCoordinator(server);
@@ -952,9 +1051,11 @@ module.exports = function(server) {
 
     router.get('/api/chat/preferences', (req, res) => {
         if (!requireLocalActionRequest(req, res)) return;
+        const automationMode = inferAutomationMode(process.env);
         return res.json({
             success: true,
-            approvalMode: process.env.GOLEM_AUTO_APPROVE_ALL === 'true' ? 'auto' : 'manual',
+            automationMode,
+            approvalMode: isFullAutoMode(automationMode) ? 'auto' : 'manual',
         });
     });
 
@@ -965,19 +1066,23 @@ module.exports = function(server) {
 
     router.post('/api/chat/preferences', (req, res) => {
         if (!requireLocalActionRequest(req, res)) return;
-        const approvalMode = String(req.body?.approvalMode || '').toLowerCase();
-        if (!['manual', 'auto'].includes(approvalMode)) {
+        const automationMode = normalizeAutomationMode(req.body?.automationMode || req.body?.approvalMode);
+        const preset = getAutomationModePreset(automationMode);
+        if (!automationMode || !preset) {
             return res.status(400).json({
                 success: false,
                 error: 'M365_APPROVAL_MODE_INVALID',
-                message: 'approvalMode must be manual or auto.',
+                message: 'automationMode must be guided, balanced, autopilot, or silent.',
             });
         }
-        EnvManager.updateEnv({
-            GOLEM_AUTO_APPROVE_ALL: approvalMode === 'auto' ? 'true' : 'false',
-            GOLEM_STRICT_SAFEGUARD: 'true',
+        EnvManager.updateEnv(preset);
+        ConfigManager.reloadConfig();
+        SecurityManager.currentLevel = Number(preset.AUTONOMY_LEVEL);
+        return res.json({
+            success: true,
+            automationMode,
+            approvalMode: isFullAutoMode(automationMode) ? 'auto' : 'manual',
         });
-        return res.json({ success: true, approvalMode });
     });
 
     router.post('/api/chat', handleChatPost);
@@ -1049,6 +1154,7 @@ module.exports = function(server) {
                 {
                     responseContainerSelectors: brain.webBackend && brain.webBackend.responseContainerSelectors,
                     stopSelectors: brain.webBackend && brain.webBackend.stopSelectors,
+                    extractSourceLinks: true,
                 }
             );
             if (inspection.found) {
@@ -1357,7 +1463,10 @@ module.exports = function(server) {
 
     router.get('/api/commands', (req, res) => {
         try {
-            const commandsPath = require.resolve('../../src/config/commands.js');
+            const commandModule = isM365SafeMode()
+                ? '../../src/config/m365Commands.js'
+                : '../../src/config/commands.js';
+            const commandsPath = require.resolve(commandModule);
             delete require.cache[commandsPath];
             const commands = require(commandsPath);
             return res.json({ success: true, commands });
@@ -1411,3 +1520,5 @@ module.exports = function(server) {
 
     return router;
 };
+
+module.exports.appendVisibleDownloadLinks = appendVisibleDownloadLinks;

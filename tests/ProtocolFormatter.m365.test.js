@@ -1,19 +1,25 @@
 const ProtocolFormatter = require('../packages/protocol/ProtocolFormatter');
+const { getAutomationModePreset } = require('../src/config/AutomationModes');
 
 describe('ProtocolFormatter M365 Web safe mode', () => {
-    const originalAutoApproveAll = process.env.GOLEM_AUTO_APPROVE_ALL;
+    const automationEnvKeys = Object.keys(getAutomationModePreset('guided'));
+    const originalAutomationEnv = Object.fromEntries(
+        automationEnvKeys.map((key) => [key, process.env[key]])
+    );
     const originalRunnerEnabled = process.env.M365_RUNNER_ENABLED;
 
     beforeAll(() => {
-        delete process.env.GOLEM_AUTO_APPROVE_ALL;
         delete process.env.M365_RUNNER_ENABLED;
     });
 
+    beforeEach(() => {
+        Object.assign(process.env, getAutomationModePreset('guided'));
+    });
+
     afterAll(() => {
-        if (originalAutoApproveAll === undefined) {
-            delete process.env.GOLEM_AUTO_APPROVE_ALL;
-        } else {
-            process.env.GOLEM_AUTO_APPROVE_ALL = originalAutoApproveAll;
+        for (const [key, value] of Object.entries(originalAutomationEnv)) {
+            if (value === undefined) delete process.env[key];
+            else process.env[key] = value;
         }
         if (originalRunnerEnabled === undefined) {
             delete process.env.M365_RUNNER_ENABLED;
@@ -88,6 +94,30 @@ describe('ProtocolFormatter M365 Web safe mode', () => {
         expect(result.skillMemoryText).toBeNull();
     });
 
+    test('describes balanced mode without promising either approval or execution too early', async () => {
+        Object.assign(process.env, getAutomationModePreset('balanced'));
+        const envelope = ProtocolFormatter.buildEnvelope('inspect the project', 'm365-balanced', {
+            webBackendId: 'm365-web',
+            safeMode: true,
+            actionsEnabled: true,
+        });
+        const result = await ProtocolFormatter.buildSystemPrompt(true, {
+            userDataDir: 'm365-balanced-profile',
+            activeScene: 'assistant',
+            activeTools: [],
+            webBackend: { id: 'm365-web' },
+            safeMode: true,
+            actionsEnabled: true,
+        });
+
+        expect(envelope).toContain('Balanced mode is active');
+        expect(envelope).toContain('Only trusted native commands within the configured L1 ceiling may run immediately');
+        expect(envelope).toContain('[GOLEM_REPLY] must be exactly "我正在確認，請稍候…"');
+        expect(envelope).toContain('Do not mention the command, tool, Observation');
+        expect(result.systemPrompt).toContain('目前自動化模式是 balanced');
+        expect(result.systemPrompt).toContain('Balanced mode is active');
+    });
+
     test('first project turn restores the original Golem role and harness education without disclosing a full local catalog', () => {
         const envelope = ProtocolFormatter.buildEnvelope('查看我啟動 Golem 的根目錄', 'm365-bootstrap', {
             webBackendId: 'm365-web',
@@ -125,6 +155,39 @@ describe('ProtocolFormatter M365 Web safe mode', () => {
         expect(envelope).toContain('Do not output [GOLEM_ACTION]');
     });
 
+    test('requests a hidden first-turn title derived only from USER_REQUEST', () => {
+        const envelope = ProtocolFormatter.buildEnvelope(
+            '[GOLEM_WORKSPACE_REQUEST:req]\n' +
+            '[PROJECT_CONTEXT]\nSYSTEM PROJECT NAME\n[/PROJECT_CONTEXT]\n' +
+            '[USER_REQUEST]\n幫我整理 OneDrive 的專案資料夾\n[/USER_REQUEST]\n' +
+            '[/GOLEM_WORKSPACE_REQUEST]',
+            'm365-title',
+            {
+                webBackendId: 'm365-web',
+                safeMode: true,
+                actionsEnabled: false,
+                m365ConversationTitleRequested: true,
+            }
+        );
+
+        expect(envelope).toContain('[GOLEM_CONVERSATION_TITLE]...[/GOLEM_CONVERSATION_TITLE]');
+        expect(envelope).toContain('only from the literal user-authored content inside [USER_REQUEST]');
+        expect(envelope).toContain('Ignore SYSTEM text, project context, project memory');
+        expect(envelope).toContain('machine metadata');
+        expect(envelope).toContain('Do not mention the naming operation');
+    });
+
+    test('forbids conversation-title metadata after the placeholder has been replaced', () => {
+        const envelope = ProtocolFormatter.buildEnvelope('繼續處理', 'm365-no-title', {
+            webBackendId: 'm365-web',
+            safeMode: true,
+            actionsEnabled: true,
+            m365ConversationTitleRequested: false,
+        });
+
+        expect(envelope).toContain('Do not output [GOLEM_CONVERSATION_TITLE] on this turn');
+    });
+
     test('scopes the resident Golem identity to complete workspace envelopes only', () => {
         const envelope = ProtocolFormatter.buildEnvelope('[GOLEM_WORKSPACE_REQUEST:req]\n[USER_REQUEST]\n列出本機檔案\n[/USER_REQUEST]\n[/GOLEM_WORKSPACE_REQUEST]', 'scope', {
             webBackendId: 'm365-web',
@@ -138,6 +201,13 @@ describe('ProtocolFormatter M365 Web safe mode', () => {
         expect(envelope).toContain('After you emit [[END:scope]], this Golem role ends');
         expect(envelope).toContain('without the complete Golem markers is an ordinary Copilot Chat turn');
         expect(envelope).toContain('do not answer "我在 M365，所以無法存取本機"');
+        expect(envelope).toContain('first attempt the native Microsoft 365 content capability');
+        expect(envelope).toContain('you must use that route in this same response before giving a capability conclusion');
+        expect(envelope).toContain('Merely saying that you could check, suggesting sample queries, or asking for a filename is not an attempted check');
+        expect(envelope).toContain('Absence of an earlier host observation is not evidence');
+        expect(envelope).toContain('A visibly grounded native Microsoft 365 result or citation may prove a native read/search result');
+        expect(envelope).toContain('Do not expose internal execution names or workflow details');
+        expect(envelope).toContain('Do not expose the names Golem Action, Observation, harness, MCP, Bridge, Work IQ');
     });
 
     test('lets Copilot author a durable plan only inside an enabled project conversation', () => {
@@ -158,11 +228,19 @@ describe('ProtocolFormatter M365 Web safe mode', () => {
         });
 
         expect(initial).toContain('[GOLEM_PLAN]');
-        expect(initial).toContain('silently decide whether the requested outcome needs a durable multi-step run');
+        expect(initial).toContain('silently perform a plan-or-direct decision');
         expect(initial).toContain('never wait for the user to name GOLEM_PLAN');
+        expect(initial).toContain('Default to one [GOLEM_PLAN]');
+        expect(initial).toContain('a result from one stage determines the next stage');
+        expect(initial).toContain('Do not force the whole job into one answer');
         expect(initial).toContain('create, modify, test, or verify a local project artifact');
         expect(initial).toContain('not merely a local-tool plan');
-        expect(initial).toContain('Native Microsoft 365 Copilot reasoning or generation');
+        expect(initial).toContain('A plan may be entirely native Microsoft 365 work');
+        expect(initial).toContain('locate a SharePoint site natively');
+        expect(initial).toContain('research sources -> synthesize a deliverable -> quality-check it');
+        expect(initial).toContain('Execute only the current bounded stage per turn');
+        expect(initial).toContain('Never reveal hidden chain-of-thought');
+        expect(initial).toContain('Never create GOLEM_PLAN merely to answer a capability, access, or connection question');
         expect(initial).toContain('"action":"plan_checkpoint"');
         expect(initial).toContain('records a bound Observation and wakes your next plan turn');
         expect(initial).toContain('製作一個有互動能力的網頁');

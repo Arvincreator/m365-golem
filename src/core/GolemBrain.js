@@ -9,6 +9,7 @@ const OllamaClient = require('../services/OllamaClient');
 const LMStudioClient = require('../services/LMStudioClient');
 const ProjectContextService = require('../services/ProjectContextService');
 const { LanceDBProDriver, SystemNativeDriver } = require('../../packages/memory');
+const { inferAutomationMode } = require('../config/AutomationModes');
 
 const BrowserLauncher = require('./BrowserLauncher');
 const { ProtocolFormatter } = require('../../packages/protocol');
@@ -856,9 +857,10 @@ class GolemBrain {
                 .filter((item) => item && /^https:\/\//i.test(String(item.url || '')))
                 .map((item) => ({
                     url: String(item.url),
-                    name: String(item.name || '下載檔案').replace(/[\r\n]/g, ' ').slice(0, 240),
-                    mimeType: String(item.mimeType || 'application/octet-stream'),
+                    name: String(item.name || (item.kind === 'source' ? '參考來源' : '下載檔案')).replace(/[\r\n]/g, ' ').slice(0, 240),
+                    mimeType: String(item.mimeType || (item.kind === 'source' ? 'text/html' : 'application/octet-stream')),
                     isRemote: true,
+                    kind: item.kind === 'source' ? 'source' : 'download',
                 }));
         } else if (result.attachments && result.attachments.length > 0) {
             const { downloadFile } = require('../utils/HttpUtils');
@@ -912,6 +914,8 @@ class GolemBrain {
             if (code === 'M365_UNEXPECTED_HOST') return 'unexpected_host';
             if (code === 'M365_INSECURE_URL') return 'insecure_url';
             if (code === 'M365_SEND_UNCONFIRMED') return 'send_unconfirmed';
+            if (code === 'M365_RESPONSE_MODE_INVALID') return 'poc_scope_blocked';
+            if (code === 'M365_RESPONSE_MODE_UNAVAILABLE' || code === 'M365_RESPONSE_MODE_SWITCH_FAILED') return 'ui_changed';
             if (code === 'BROWSER_PROFILE_IN_USE') return 'profile_in_use';
             if (code.startsWith('M365_ATTACHMENT_') || code === 'M365_SEND_NOT_READY'
                 || code === 'M365_POC_FEATURE_DISABLED') return 'poc_scope_blocked';
@@ -1031,19 +1035,6 @@ class GolemBrain {
     }
 
     _buildRuntimeTurnContext(options = {}) {
-        const toBool = (v) => String(v || '').trim().toLowerCase() === 'true';
-        const inferAutomationMode = () => {
-            const autoApprove = toBool(process.env.GOLEM_AUTO_APPROVE_ALL);
-            const silent = toBool(process.env.GOLEM_SILENT_AUTO_APPROVE);
-            const trustLibrary = toBool(process.env.GOLEM_TRUST_SYSTEM_COMMANDS);
-            const maxTurns = Number(process.env.GOLEM_MAX_AUTO_TURNS || ConfigManager.CONFIG.MAX_AUTO_TURNS || 5);
-            const level = Number(process.env.AUTONOMY_LEVEL || 2);
-            if (level <= 0) return 'lockdown';
-            if (autoApprove && silent) return 'silent';
-            if (autoApprove) return 'autopilot';
-            if (!autoApprove && trustLibrary && maxTurns >= 2) return 'balanced';
-            return 'guided';
-        };
         const toolsetContext = this._resolveToolsetContext();
         const activeTools = Array.isArray(toolsetContext.activeTools)
             ? toolsetContext.activeTools.map((item) => String(item || '').trim()).filter(Boolean)
@@ -1056,7 +1047,7 @@ class GolemBrain {
             `[System note: 你是本機執行代理 (local execution agent)，需依當前場景選擇正確行動通道。]`,
             `backend=${String(this.backend || 'gemini')}`,
             `scene=${String(toolsetContext.activeScene || 'assistant')}`,
-            `automation_mode=${inferAutomationMode()}`,
+            `automation_mode=${inferAutomationMode(process.env)}`,
             `autonomy_level=${String(process.env.AUTONOMY_LEVEL || '2')}`,
             `action_lanes=command|skill|mcp_call`,
             `active_tools=${shownTools.length > 0 ? shownTools.join(', ') : '(none)'}`,
@@ -1130,7 +1121,12 @@ class GolemBrain {
         if (options.disableToolRouting === true) return text;
         if (options._segmentedBypass === true) return text;
         if (isSystem) return text;
-        if (options.isSystemFeedback === true || options.allowActions === false) return text;
+        // Ordinary tool observations should not be re-routed. Autonomous-plan
+        // continuations are different: the next planned stage may need a tool
+        // that was not used by the stage that just completed. Re-run routing
+        // against the original user goal so a native M365 checkpoint can hand
+        // off to an exact local/MCP action on the next turn.
+        if ((options.isSystemFeedback === true && options.planMode !== true) || options.allowActions === false) return text;
         if (!text || typeof text !== 'string') return text;
         if (text.startsWith('<tool-routing>')) return text;
         if (/^\s*(<memory-context>|【系統補充|【系統技能庫初始化】|\[System Observation\])/i.test(text)) return text;
@@ -1585,6 +1581,7 @@ class GolemBrain {
 
             let state = await waitForPageState(this.page, this.webBackend, {
                 timeoutMs: Number(process.env.M365_PAGE_READY_TIMEOUT_MS || 20000),
+                loginRedirectGraceMs: Number(process.env.M365_LOGIN_REDIRECT_GRACE_MS || 8000),
             });
             if (state.status !== 'ready') throw this._buildM365PageStateError(state);
 
@@ -1622,6 +1619,7 @@ class GolemBrain {
                     await this.page.waitForTimeout(700);
                     state = await waitForPageState(this.page, this.webBackend, {
                         timeoutMs: Number(process.env.M365_PAGE_READY_TIMEOUT_MS || 20000),
+                        loginRedirectGraceMs: Number(process.env.M365_LOGIN_REDIRECT_GRACE_MS || 8000),
                     });
                     if (state.status !== 'ready') throw this._buildM365PageStateError(state);
                     snapshot = this.getM365ConversationSnapshot();
@@ -2231,6 +2229,7 @@ class GolemBrain {
                 if (definition.id === 'm365-web') {
                     const state = await waitForPageState(this.page, definition, {
                         timeoutMs: Number(process.env.M365_PAGE_READY_TIMEOUT_MS || 20000),
+                        loginRedirectGraceMs: Number(process.env.M365_LOGIN_REDIRECT_GRACE_MS || 8000),
                     });
                     if (state.status !== 'ready') {
                         const errorDetails = {

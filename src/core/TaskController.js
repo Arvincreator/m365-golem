@@ -2,13 +2,12 @@ const { v4: uuidv4 } = require('uuid');
 const Executor = require('./Executor');
 const { SecurityManager } = require('../../packages/security');
 const ToolScanner = require('../managers/ToolScanner');
-const InteractiveMultiAgent = require('./InteractiveMultiAgent');
 const NodeRouter = require('./NodeRouter');
 
-// Golem 內建斜線指令前綴（以 /wiki、/learn、/skills … 開頭的指令）
+// Golem 內建斜線指令前綴（以 /learn、/skills … 開頭的指令）
 // 凡是符合此清單的指令，直接由 NodeRouter 處理，不送進 shell。
 const GOLEM_SLASH_PREFIXES = [
-    '/wiki', '/learn', '/skills', '/callme', '/help', '/menu',
+    '/learn', '/skills', '/callme', '/help', '/menu',
     '/export', '/donate', '/support', '/update', '/reset',
     '/model', '/level', '/reload', '/patch', '/project', '/new', '/new_memory',
     '/toolset', '/search', '/compress', '/profile', '/api', '/feedback',
@@ -26,7 +25,6 @@ class TaskController {
         this.golemId = options.golemId || 'default';
         this.executor = new Executor();
         this.security = new SecurityManager();
-        this.multiAgent = null; // ✨ [v9.1]
         this.pendingTasks = new Map(); // Moved from global to here
 
         // ✨ [v9.1] 防止記憶體流失: 定期清理過期的待審批任務 (5 分鐘)
@@ -47,36 +45,7 @@ class TaskController {
         }
     }
 
-    // ✨ [v9.1] 處理多 Agent 請求
-    async _handleMultiAgent(ctx, action, brain) {
-        try {
-            if (!this.multiAgent) {
-                this.multiAgent = new InteractiveMultiAgent(brain);
-            }
-            const presetName = action.preset || 'TECH_TEAM';
-            const agentConfigs = InteractiveMultiAgent.PRESETS[presetName];
-            if (!agentConfigs) {
-                const available = Object.keys(InteractiveMultiAgent.PRESETS).join(', ');
-                await ctx.reply(`⚠️ 未知團隊: ${presetName}。可用: ${available}`);
-                return;
-            }
-            const task = action.task || '討論專案';
-            const options = {
-                maxRounds: action.rounds || 3,
-                toolset: action.toolset || 'assistant',
-                agentToolsets: action.agentToolsets || action.agent_toolsets || {},
-                workerSendTimeoutMs: action.workerSendTimeoutMs || action.worker_send_timeout_ms || action.workerTimeoutMs || action.worker_timeout_ms,
-                workerIdleTimeoutMs: action.workerIdleTimeoutMs || action.worker_idle_timeout_ms || action.workerTimeoutMs || action.worker_timeout_ms,
-                workerDraftCheckIntervalMs: action.workerDraftCheckIntervalMs || action.worker_draft_check_interval_ms,
-            };
-            await this.multiAgent.startConversation(ctx, task, agentConfigs, options);
-        } catch (e) {
-            console.error('[TaskController] MultiAgent 執行失敗:', e);
-            await ctx.reply(`❌ 執行失敗: ${e.message}`);
-        }
-    }
-
-    async runSequence(ctx, steps, startIndex = 0, brain = null) {
+    async runSequence(ctx, steps, startIndex = 0, brain = null, executionOptions = {}) {
         let reportBuffer = [];
         for (let i = startIndex; i < steps.length; i++) {
             const step = steps[i];
@@ -138,7 +107,7 @@ class TaskController {
                             .map(pkg => String(pkg && (pkg.action || pkg.id) || '').trim())
                             .filter(Boolean)
                             .slice(0, 3);
-                        const sampleSkill = sampleSkills[0] || 'wiki';
+                        const sampleSkill = sampleSkills[0] || 'log-reader';
                         const helpLines = [
                             `⛔ [系統攔截] 找不到實體技能檔: ${skillPath}`,
                             `你使用的 action: ${actionName}`,
@@ -153,7 +122,7 @@ class TaskController {
                 }
             }
             // ── Golem 內建斜線指令攔截 ──────────────────────────────
-            // /wiki、/learn 等指令不屬於 shell，直接由 NodeRouter 內部處理。
+            // /learn、/skills 等指令不屬於 shell，直接由 NodeRouter 內部處理。
             const isGolemSlash = cmdToRun.startsWith('/') &&
                 GOLEM_SLASH_PREFIXES.some(prefix => cmdToRun.startsWith(prefix));
 
@@ -190,7 +159,7 @@ class TaskController {
                 console.log(`⛔ [TaskController] 指令被系統攔截: ${cmdToRun}`);
                 return `⛔ 指令被系統攔截：${cmdToRun}`;
             }
-            if (risk.level === 'WARNING' || risk.level === 'DANGER') {
+            if ((risk.level === 'WARNING' || risk.level === 'DANGER') && executionOptions.approvalGranted !== true) {
                 console.log(`⚠️ [TaskController] 指令需審批 (${risk.level}): ${cmdToRun} - ${risk.reason}`);
                 const approvalId = uuidv4();
                 this.pendingTasks.set(approvalId, {

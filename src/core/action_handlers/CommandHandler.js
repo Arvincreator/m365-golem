@@ -4,6 +4,7 @@ const { buildM365PlanObservation } = require('../../services/M365PlanProtocol');
 class CommandHandler {
     static async execute(ctx, normalActions, controller, brain, dispatchFn, dispatchOptions = {}) {
         if (!normalActions || normalActions.length === 0) return;
+        const isM365Workspace = brain?.webBackend?.id === 'm365-web';
 
         // ✨ [v9.1] 整合行動產線：將一般任務執行丟入 ActionQueue
         // 注意：這裡假設我們從某處能取得與本回合指令對應的 actionQueue 和 convoManager
@@ -78,10 +79,16 @@ class CommandHandler {
         const runLogic = async () => {
             let result;
             try {
-                result = await controller.runSequence(ctx, normalActions, 0, brain);
+                result = await controller.runSequence(ctx, normalActions, 0, brain, {
+                    approvalGranted: dispatchOptions.m365ActionApproved === true,
+                });
             } catch (err) {
                 console.error('[CommandHandler] runSequence 拋出例外:', err);
-                await ctx.reply(`❌ **指令執行失敗**\n\`\`\`\n${err.message}\n\`\`\``, { parse_mode: 'Markdown' });
+                if (isM365Workspace) {
+                    await ctx.reply('❌ 這項操作未完成，請稍後再試。');
+                } else {
+                    await ctx.reply(`❌ **指令執行失敗**\n\`\`\`\n${err.message}\n\`\`\``, { parse_mode: 'Markdown' });
+                }
                 await sendPlanObservation('failed', `Command execution threw an error: ${err.message}`).catch((feedbackError) => {
                     console.error('[CommandHandler] Failed to record plan Observation:', feedbackError);
                 });
@@ -90,7 +97,9 @@ class CommandHandler {
 
             if (!result) {
                 if (dispatchOptions.planMode === true) {
-                    await ctx.reply('⚠️ 工具沒有回傳可驗證的 Observation；自主計畫已停在目前步驟。');
+                    await ctx.reply(isM365Workspace
+                        ? '⚠️ 目前無法確認這一步是否完成，工作已暫停。'
+                        : '⚠️ 工具沒有回傳可驗證的 Observation；自主計畫已停在目前步驟。');
                     await sendPlanObservation('failed', 'The command executor returned no Observation.');
                 }
                 return;
@@ -102,8 +111,11 @@ class CommandHandler {
                     const pendingTask = controller?.pendingTasks?.get(result.approvalId);
                     if (pendingTask) pendingTask.planDispatchOptions = { ...dispatchOptions };
                     const cmdBlock = result.cmd ? `\n\`\`\`shell\n${result.cmd}\n\`\`\`` : "";
+                    const approvalMessage = isM365Workspace
+                        ? '⚠️ 這項操作需要你的確認，請在右側查看後決定是否執行。'
+                        : `⚠️ ${result.riskLevel === 'DANGER' ? '🔴 危險指令' : '🟡 警告'}${cmdBlock}\n\n${result.reason}`;
                     await ctx.reply(
-                        `⚠️ ${result.riskLevel === 'DANGER' ? '🔴 危險指令' : '🟡 警告'}${cmdBlock}\n\n${result.reason}`,
+                        approvalMessage,
                         {
                             parse_mode: 'Markdown',
                             disable_web_page_preview: true,
@@ -133,7 +145,9 @@ class CommandHandler {
                 if (dispatchOptions.planMode === true) {
                     const hasFailure = failedSteps.length > 0;
                     if (hasFailure) {
-                        await ctx.reply(`❌ 工具步驟執行失敗；結果已回傳給 Golem 修訂計畫。`);
+                        await ctx.reply(isM365Workspace
+                            ? '❌ 這一步未完成，正在調整後續處理。'
+                            : '❌ 工具步驟執行失敗；結果已回傳給 Golem 修訂計畫。');
                     }
                     await sendPlanObservation(hasFailure ? 'failed' : 'succeeded', result);
                     return;
@@ -148,10 +162,12 @@ class CommandHandler {
                         return `🔴 \`${cmd}\`\n\`\`\`\n${errMsg}\n\`\`\``;
                     }).join('\n\n');
 
-                    await ctx.reply(
-                        `❌ **指令執行失敗 (${failedSteps.length} 個步驟)**\n\n${errorSummary}`,
-                        { parse_mode: 'Markdown' }
-                    );
+                    if (!isM365Workspace) {
+                        await ctx.reply(
+                            `❌ **指令執行失敗 (${failedSteps.length} 個步驟)**\n\n${errorSummary}`,
+                            { parse_mode: 'Markdown' }
+                        );
+                    }
                 }
 
                 // 無論成功或失敗，都將完整觀察結果送給大腦分析（讓 AI 知道發生什麼事並作出回應）
@@ -164,6 +180,12 @@ class CommandHandler {
                     '{"action":"mcp_call","server":"chrome-devtools","tool":"navigate_page","parameters":{"url":"https://example.com","timeout":60000}}',
                     '{"action":"collab-calendar","args":{"action":"add","title":"驗車","start":"2026-05-23T08:00:00+08:00","end":"2026-05-23T10:30:00+08:00"}}'
                 ].join('\n');
+                const m365PresentationRule = isM365Workspace
+                    ? `\n面向使用者的回覆規則：\n` +
+                      `- 只說明已確認的結果、限制與下一步，使用一般人看得懂的繁體中文。\n` +
+                      `- 不得提及或照抄內部流程名稱、工具名稱、原始指令、原始 JSON 欄位、診斷值、錯誤代碼、協議標籤或本機路徑。\n` +
+                      `- 除非結果本身含有可供使用者開啟的 https 來源，否則不要新增「參考來源」段落。\n`
+                    : '';
                 const feedbackPrompt = shouldAutoCorrect
                     ? `[System Observation]\n` +
                     `上一輪指令執行失敗，請你立即修正並重新輸出 [GOLEM_ACTION]。\n\n` +
@@ -172,14 +194,17 @@ class CommandHandler {
                     `- 優先修正 action 名稱、server/tool、必要參數。\n` +
                     `- 若使用 command，避免高風險串接語法。\n` +
                     `- 失敗重點：\n${failedSteps.join('\n\n---\n\n')}\n\n` +
-                    `可用範例：\n${correctionExamples}\n\n` +
+                    `可用範例：\n${correctionExamples}\n` +
+                    `${m365PresentationRule}\n` +
                     `原始結果：\n${result}`
                     : `[System Observation]\n` +
                     `以下是上一個指令序列的執行結果。\n\n` +
                     `限制：\n` +
                     `- 你現在處於 observation_summary 模式。\n` +
                     `- 請只使用 [GOLEM_REPLY] 整理結果給使用者。\n` +
-                    `- 若回覆涉及查詢結果/事實資訊，請在結尾附「參考來源」清單並提供可點擊 https 連結；若無公開來源，明確寫「參考來源：本次操作無可公開連結來源（僅本地資料/工具輸出）。」。\n` +
+                    `${isM365Workspace
+                        ? m365PresentationRule
+                        : '- 若回覆涉及查詢結果/事實資訊，請在結尾附「參考來源」清單並提供可點擊 https 連結；若無公開來源，明確寫「參考來源：本次操作無可公開連結來源（僅本地資料/工具輸出）。」。\n'}` +
                     `- 禁止輸出 [GOLEM_ACTION]。\n` +
                     `- 如果你認為必須繼續使用工具或指令，請先說明原因並等待使用者確認。\n\n` +
                     `指令結果：\n${result}`;
@@ -197,7 +222,8 @@ class CommandHandler {
                             `- 必須使用有效 action 名稱（command / mcp_call / 已安裝技能）。\n` +
                             `- mcp_call 必須包含 server + tool。\n` +
                             `- 若是 collab-calendar，請使用 {"action":"collab-calendar","args":{"action":"add",...}}。\n\n` +
-                            `可用範例：\n${correctionExamples}\n\n` +
+                            `可用範例：\n${correctionExamples}\n` +
+                            `${m365PresentationRule}\n` +
                             `錯誤結果：\n${result}`,
                         actionDepth: Number(dispatchOptions.actionDepth || 0) + 1,
                         maxActionDepth: Number(dispatchOptions.maxActionDepth || process.env.GOLEM_MAX_AUTO_TURNS || 5),
@@ -205,12 +231,14 @@ class CommandHandler {
                     });
 
                     await ctx.reply(
-                        `⚠️ 指令已連續矯正失敗 ${currentCorrectionAttempt + 1} 次。\n是否要我要求 Golem 再次修正後重試？`,
+                        isM365Workspace
+                            ? '⚠️ 前一次嘗試仍未成功。要再試一次嗎？'
+                            : `⚠️ 指令已連續矯正失敗 ${currentCorrectionAttempt + 1} 次。\n是否要我要求 Golem 再次修正後重試？`,
                         {
                             reply_markup: {
                                 inline_keyboard: [[
-                                    { text: '✅ 是，要求再矯正一次', callback_data: `RETRYFIX_${approvalId}` },
-                                    { text: '🛑 否，停止本輪 action', callback_data: `STOPFIX_${approvalId}` }
+                                    { text: isM365Workspace ? '✅ 再試一次' : '✅ 是，要求再矯正一次', callback_data: `RETRYFIX_${approvalId}` },
+                                    { text: isM365Workspace ? '🛑 停止' : '🛑 否，停止本輪 action', callback_data: `STOPFIX_${approvalId}` }
                                 ]]
                             }
                         }

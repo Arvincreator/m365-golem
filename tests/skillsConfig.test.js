@@ -6,9 +6,9 @@ describe('skillsConfig', () => {
         expect(MANDATORY_SKILLS.length).toBeGreaterThan(0);
     });
 
-    test('OPTIONAL_SKILLS is a non-empty array', () => {
+    test('OPTIONAL_SKILLS has no retired built-in placeholders', () => {
         expect(Array.isArray(OPTIONAL_SKILLS)).toBe(true);
-        expect(OPTIONAL_SKILLS.length).toBeGreaterThan(0);
+        expect(OPTIONAL_SKILLS).toEqual([]);
     });
 
     test('resolveEnabledSkills includes all mandatory skills', () => {
@@ -19,14 +19,14 @@ describe('skillsConfig', () => {
     });
 
     test('resolveEnabledSkills includes optionals from env string', () => {
-        const result = resolveEnabledSkills('git, youtube', []);
-        expect(result.has('git')).toBe(true);
-        expect(result.has('youtube')).toBe(true);
+        const result = resolveEnabledSkills('vat-review, client-intake', []);
+        expect(result.has('vat-review')).toBe(true);
+        expect(result.has('client-intake')).toBe(true);
     });
 
     test('resolveEnabledSkills includes optionals from persona skills', () => {
-        const result = resolveEnabledSkills('', ['spotify']);
-        expect(result.has('spotify')).toBe(true);
+        const result = resolveEnabledSkills('', ['owner-rules']);
+        expect(result.has('owner-rules')).toBe(true);
     });
 
     test('resolveEnabledSkills does not double-add mandatory skills from optionals', () => {

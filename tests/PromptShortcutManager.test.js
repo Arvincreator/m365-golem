@@ -37,14 +37,14 @@ describe('PromptShortcutManager', () => {
         ]);
 
         const manager = require('../src/managers/PromptShortcutManager');
-        const expanded = manager.expandPromptShortcutInput('/weekly@golem_test_bot 再補上風險');
+        const expanded = manager.expandPromptShortcutInput('/weekly 再補上風險');
 
         expect(expanded.changed).toBe(true);
         expect(expanded.matched.shortcut).toBe('/weekly');
         expect(expanded.text).toBe('請輸出本週重點摘要\n再補上風險');
     });
 
-    test('expandPromptShortcutInput matches legacy shortcut without slash when Telegram sends slash command', () => {
+    test('expandPromptShortcutInput matches a legacy shortcut without slash from the M365 composer', () => {
         writePromptPool(tempCwd, [
             {
                 id: 'p1',
@@ -95,21 +95,6 @@ describe('PromptShortcutManager', () => {
         expect(shortcuts).not.toContain('/bad cmd');
     });
 
-    test('getTelegramPromptCommands returns Telegram-compatible menu commands', () => {
-        writePromptPool(tempCwd, [
-            { id: 'a', shortcut: '/report_daily', prompt: 'daily prompt', note: '日報捷徑' },
-            { id: 'b', shortcut: '/中文', prompt: 'invalid tg command', note: '中文' },
-            { id: 'c', shortcut: '/report_daily', prompt: 'duplicate', note: 'duplicate' },
-        ]);
-
-        const manager = require('../src/managers/PromptShortcutManager');
-        const commands = manager.getTelegramPromptCommands();
-
-        expect(commands.length).toBe(1);
-        expect(commands[0].command).toBe('report_daily');
-        expect(commands[0].description.startsWith('[Prompt]')).toBe(true);
-    });
-
     test('suggestPromptShortcuts returns likely matches for slash prefixes', () => {
         writePromptPool(tempCwd, [
             { id: 'a', shortcut: '/report_daily', prompt: 'daily prompt' },
@@ -124,12 +109,12 @@ describe('PromptShortcutManager', () => {
         expect(suggestions[0].shortcut).toBe('/report_daily');
     });
 
-    test('normalizeShortcutKey is exported and strips slash prefix and bot mention', () => {
+    test('normalizeShortcutKey is exported and strips only the slash prefix', () => {
         jest.resetModules();
         const manager = require('../src/managers/PromptShortcutManager');
 
         expect(manager.normalizeShortcutKey('/weekly')).toBe('weekly');
-        expect(manager.normalizeShortcutKey('/weekly@golem_test_bot')).toBe('weekly');
+        expect(manager.normalizeShortcutKey('/weekly@golem_test_bot')).toBe('weekly@golem_test_bot');
         expect(manager.normalizeShortcutKey('weekly')).toBe('weekly');
         expect(manager.normalizeShortcutKey('')).toBe('');
         expect(manager.normalizeShortcutKey(null)).toBe('');

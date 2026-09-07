@@ -38,8 +38,9 @@ describe('built-in M365 Session Bridge distribution', () => {
 
     test('ships a tenant-neutral deny-first default policy', () => {
         const policy = JSON.parse(read('integrations/m365-session-bridge/config/policy.default.json'));
-        expect(policy.writeEnabled).toBe(false);
+        expect(policy.writeEnabled).toBe(true);
         expect(policy.allowOverwrite).toBe(false);
+        expect(policy.allowRecycle).toBe(false);
         expect(policy.allowPermanentDelete).toBe(false);
         expect(policy.allowExternalSharing).toBe(false);
         expect(policy.allowPermissionChange).toBe(false);
@@ -65,7 +66,16 @@ describe('built-in M365 Session Bridge distribution', () => {
         expect(installer).toContain("HKCU:\\Software\\Microsoft\\Edge\\NativeMessagingHosts\\m365_session_bridge");
         expect(installer).toContain("managedBy = 'm365-golem'");
         expect(installer).toContain('M365_BRIDGE_POLICY_PATH');
+        expect(installer).toContain("M365_BRIDGE_CONTROL_PORT = '43241'");
+        expect(read('integrations/m365-session-bridge/packages/protocol/src/ipc.ts')).toContain('M365_BRIDGE_SECRET_PATH');
+        expect(read('web-dashboard/server/m365BridgeControlProxy.js')).toContain('const DEFAULT_CONTROL_PORT = 43241');
         expect(installer).toContain('ConvertTo-Json -InputObject $serverArray');
+        expect(installer).toContain("name = 'chrome-devtools'");
+        expect(installer).toContain("'--isolated=true'");
+        expect(installer).toContain('$enabled = $true');
+        expect(installer).toContain('$chromeEnabled = $true');
+        expect(installer).not.toContain("$enabled = [bool](Get-PropertyValue $existing 'enabled' $true)");
+        expect(installer).not.toContain("$chromeEnabled = [bool](Get-PropertyValue $chromeExisting 'enabled' $true)");
         expect(installer).not.toMatch(/Claude Desktop/i);
     });
 
@@ -76,12 +86,15 @@ describe('built-in M365 Session Bridge distribution', () => {
         expect(packageJson.scripts['install:m365']).toContain('install-m365-golem.ps1');
         expect(packageJson.scripts['bridge:install']).toContain('install-m365-session-bridge.ps1');
         expect(packageJson.scripts['unix:setup']).toBeUndefined();
-        expect(read('Start-Golem.bat')).toContain('integrations\\m365-session-bridge\\apps\\mcp-server\\dist\\index.js');
+        expect(read('Start-Golem.bat')).toContain('Start-M365-Golem.vbs');
+        expect(read('scripts/start-m365-golem.ps1')).toContain('integrations\\m365-session-bridge\\apps\\mcp-server\\dist\\index.js');
         expect(read('Install-M365-Golem.bat')).toContain('install-m365-golem.ps1');
         expect(fs.existsSync(path.join(ROOT, 'scripts', 'select-workspace-folder.ps1'))).toBe(true);
         const releaseBuilder = read('scripts/build-m365-release.ps1');
         expect(releaseBuilder).toContain("'scripts/select-workspace-folder.ps1'");
         expect(releaseBuilder).toMatch(/\$Required\s*=\s*@\([\s\S]*'scripts\/select-workspace-folder\.ps1'/);
+        expect(releaseBuilder).toContain("'Start-M365-Golem.vbs'");
+        expect(releaseBuilder).toContain("'scripts/start-m365-golem.ps1'");
         expect(read('00-安裝前請先閱讀.txt')).toContain('Get-ChildItem -Recurse -File | Unblock-File');
         expect(read('README.md')).toContain('先對 ZIP 按右鍵 → 內容 → 解除封鎖');
         expect(read('jest.config.cjs')).toContain('<rootDir>/integrations/m365-session-bridge/');

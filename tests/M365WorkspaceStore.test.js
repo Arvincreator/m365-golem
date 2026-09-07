@@ -98,6 +98,32 @@ describe('M365WorkspaceStore', () => {
         await expect(store.listProjects()).rejects.toMatchObject({ code: 'M365_DATA_DECRYPT_FAILED' });
     });
 
+    test('lets an AI title replace only a placeholder and never a user title', async () => {
+        const project = await store.createProject({ name: 'Title project' });
+        const conversation = await store.createConversation(project.id);
+
+        const generated = await store.updateConversationTitleIfPlaceholder(
+            conversation.id,
+            '整理 OneDrive 專案檔案'
+        );
+        expect(generated).toEqual(expect.objectContaining({
+            changed: true,
+            reason: 'updated',
+            conversation: expect.objectContaining({ title: '整理 OneDrive 專案檔案' }),
+        }));
+
+        await store.updateConversationTitle(conversation.id, '使用者手動名稱');
+        const ignored = await store.updateConversationTitleIfPlaceholder(
+            conversation.id,
+            'Copilot 第二次命名'
+        );
+        expect(ignored).toEqual(expect.objectContaining({
+            changed: false,
+            reason: 'title_already_set',
+            conversation: expect.objectContaining({ title: '使用者手動名稱' }),
+        }));
+    });
+
     test('encrypts and restores the per-project workspace location', async () => {
         const workspacePath = path.join(tempDir, 'client-workspace');
         const project = await store.createProject({

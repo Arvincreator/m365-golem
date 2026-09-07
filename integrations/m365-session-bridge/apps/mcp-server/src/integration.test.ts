@@ -383,7 +383,7 @@ test("every v0.2 write tool returns FORBIDDEN_BY_POLICY when writeEnabled:false,
 });
 
 test("every v0.2 write tool passes policy and reaches the (absent) extension when fully authorized", async () => {
-  const bodies = await callTools({}, V02_WRITE_CALLS);
+  const bodies = await callTools({ allowRecycle: true }, V02_WRITE_CALLS);
   for (const [i, body] of bodies.entries()) {
     const toolName = V02_WRITE_CALLS[i].name;
     // Failing only because no extension is connected proves every guard
@@ -426,7 +426,7 @@ test("confirmation tokens do not cross-validate between destructive v0.2 tools",
     { name: "m365_discard_checkout", arguments: { fileUrl: SITE_FILE, confirmation: "" }, why: "missing token" },
     { name: "m365_recycle_file", arguments: { fileUrl: SITE_FILE, confirmation: "CONFIRM_RECYCLE_FOLDER" }, why: "folder token replayed at file recycle" },
   ];
-  const bodies = await callTools({}, attempts);
+  const bodies = await callTools({ allowRecycle: true }, attempts);
   for (const [i, body] of bodies.entries()) {
     const { name, why } = attempts[i];
     assert.equal(body.status, "error", `${name} (${why}) should have been rejected`);

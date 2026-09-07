@@ -36,6 +36,7 @@ $requiredFiles = @(
   'web-dashboard\package.json',
   'web-dashboard\package-lock.json',
   'M365-POC.env.example',
+  'Start-M365-Golem.vbs',
   'Start-Golem.bat',
   'integrations\m365-session-bridge\package.json'
 )
@@ -112,6 +113,30 @@ if ($LASTEXITCODE -ne 0) {
   throw "Encrypted workspace initialization failed with exit code $LASTEXITCODE."
 }
 
+Write-Step 'Creating the M365 Golem desktop shortcut'
+try {
+  $desktopDirectory = [Environment]::GetFolderPath('Desktop')
+  if ([string]::IsNullOrWhiteSpace($desktopDirectory)) {
+    throw 'Windows did not return the current user desktop folder.'
+  }
+  $wscriptPath = Join-Path $env:SystemRoot 'System32\wscript.exe'
+  $launcherPath = Join-Path $GolemRoot 'Start-M365-Golem.vbs'
+  $shortcutPath = Join-Path $desktopDirectory 'M365 Golem.lnk'
+  $shortcutShell = New-Object -ComObject WScript.Shell
+  $shortcut = $shortcutShell.CreateShortcut($shortcutPath)
+  $shortcut.TargetPath = $wscriptPath
+  $shortcut.Arguments = "`"$launcherPath`""
+  $shortcut.WorkingDirectory = $GolemRoot
+  $shortcut.Description = 'Start M365 Golem'
+  $shortcut.Save()
+  [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($shortcut)
+  [void][System.Runtime.InteropServices.Marshal]::ReleaseComObject($shortcutShell)
+  Write-Host "    Created shortcut: $shortcutPath" -ForegroundColor Green
+} catch {
+  Write-Warning "Desktop shortcut could not be created: $($_.Exception.Message)"
+  Write-Warning 'You can still double-click Start-M365-Golem.vbs in the installation folder.'
+}
+
 Write-Host @"
 
 =======================================================
@@ -119,7 +144,8 @@ Write-Host @"
 =======================================================
 
 Before the first SharePoint/OneDrive Bridge test, complete the visible Edge
-extension step printed above. Then run Start-Golem.bat.
+extension step printed above. Then open the M365 Golem desktop shortcut or
+double-click Start-M365-Golem.vbs.
 
 Login, MFA, tenant consent, and SharePoint authorization always remain visible
 user actions. No Copilot Chat API is used.

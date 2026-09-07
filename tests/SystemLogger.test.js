@@ -39,6 +39,8 @@ describe('SystemLogger', () => {
         delete process.env.ENABLE_SYSTEM_LOG;
         delete process.env.LOG_MAX_SIZE_MB;
         delete process.env.LOG_RETENTION_DAYS;
+        delete process.env.LOG_MAX_ARCHIVE_FILES;
+        delete process.env.LOG_MAX_ARCHIVE_TOTAL_SIZE_MB;
     });
 
     afterEach(() => {
@@ -136,5 +138,24 @@ describe('SystemLogger', () => {
         
         SystemLogger._cleanOldLogs();
         expect(mockUnlinkSync).toHaveBeenCalled();
+    });
+
+    test('_cleanOldLogs bounds archive count and total size', () => {
+        SystemLogger.logFile = path.join(logDir, 'system.log');
+        process.env.LOG_RETENTION_DAYS = '30';
+        process.env.LOG_MAX_ARCHIVE_FILES = '2';
+        process.env.LOG_MAX_ARCHIVE_TOTAL_SIZE_MB = '1';
+        const now = Date.now();
+        fs.existsSync.mockReturnValue(true);
+        fs.readdirSync.mockReturnValue(['system-a.log.gz', 'system-b.log.gz', 'system-c.log.gz']);
+        fs.statSync
+            .mockReturnValueOnce({ mtimeMs: now, size: 700 * 1024 })
+            .mockReturnValueOnce({ mtimeMs: now - 1000, size: 700 * 1024 })
+            .mockReturnValueOnce({ mtimeMs: now - 2000, size: 700 * 1024 });
+
+        SystemLogger._cleanOldLogs();
+
+        expect(mockUnlinkSync).toHaveBeenCalledWith(path.join(logDir, 'system-c.log.gz'));
+        expect(mockUnlinkSync).toHaveBeenCalledWith(path.join(logDir, 'system-b.log.gz'));
     });
 });

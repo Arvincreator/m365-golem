@@ -8,39 +8,18 @@
 
 const MANDATORY_SKILLS = [
     'actor',
-    'chronos',
-    'cloud',
-    'code-wizard',
-    'evolution',
-    'log-archive',
-    'log-reader',
-    'memory',
-    'multi-agent',
-    'optic-nerve',
-    'reincarnate',
-    'sys-admin',
-    'tool-explorer',
-    'adaptive-learning',
-    'reflection',
-    'session-search',  // 🔍 Hermes-inspired: 歷史對話語意搜尋
-    'reference-files',
     'collab-calendar',
-    'chrome-devtools',
     'duckduckgo-search',
     'duckduckgo-devtools-bridge',
+    'log-archive',
+    'log-reader',
+    'reference-files',
+    'sys-admin',
 ];
 
-const OPTIONAL_SKILLS = [
-    'git',
-    'image-prompt',
-    'moltbot',
-    'notebooklm-studio',
-    'spotify',
-    'youtube',
-    // ── 其他選用技能 ──────────────────────────────────────────
-    'apple-calendar',   // 🍎 macOS Apple Calendar 整合（僅 macOS）
-    'delegate-task',    // 🤝 任務委派
-];
+// Built-in optional placeholders were removed from the M365 edition. User-
+// authored prompt skills remain discoverable through SkillPackageRegistry.
+const OPTIONAL_SKILLS = [];
 
 /**
  * Given the current OPTIONAL_SKILLS env and persona skills,

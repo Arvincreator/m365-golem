@@ -59,7 +59,7 @@ describe('LocalWorkspacePicker', () => {
         expect(launch).toHaveBeenCalledWith(
             'powershell.exe',
             expect.arrayContaining(['-File', __filename]),
-            expect.objectContaining({ encoding: 'utf8' }),
+            expect.objectContaining({ encoding: 'utf8', windowsHide: true }),
             expect.any(Function)
         );
     });

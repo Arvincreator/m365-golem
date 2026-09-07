@@ -45,9 +45,34 @@ describe('ConversationManager M365 safe-mode privacy', () => {
             attachment: null,
         });
 
-        expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('不保存額外待處理內容'));
+        expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('上一則訊息仍在處理中'));
         expect(manager.queue).toHaveLength(0);
         expect(controller.pendingTasks.size).toBe(0);
+    });
+
+    test('queues trusted workspace feedback while the preceding turn is still processing', async () => {
+        const brain = {
+            chatLogManager: null,
+            isLocalContextEnabled: () => false,
+        };
+        const controller = { pendingTasks: new Map() };
+        const ctx = {
+            chatId: 'm365:conversation-1',
+            workspaceConversationId: 'conversation-1',
+            reply: jest.fn().mockResolvedValue(),
+        };
+        manager = new ConversationManager(brain, {}, controller);
+        manager.isProcessing = true;
+
+        await manager.enqueue(ctx, 'internal result', {
+            bypassDebounce: true,
+            isSystemFeedback: true,
+            isPriority: true,
+        });
+
+        expect(ctx.reply).not.toHaveBeenCalled();
+        expect(manager.queue).toHaveLength(1);
+        expect(manager.queue[0].options.isSystemFeedback).toBe(true);
     });
 
     test('does not expose last-turn retry content when local context is disabled', () => {

@@ -256,6 +256,14 @@
     --ops-sidebar-tint: oklch(0.79 0.12 85 / 0.16);
 }
 
+/* Presets above use a dark control-surface accent. In light mode, derive a
+   pale tint from the selected preset so hover and selected labels retain the
+   light-theme foreground contrast. Dark mode keeps each preset's accent. */
+:root:not(.dark)[data-ops-style] {
+    --accent: color-mix(in oklch, var(--primary) 14%, white);
+    --accent-foreground: oklch(0.24 0.02 245);
+}
+
 @layer base {
     * {
         @apply border-border outline-ring/50;

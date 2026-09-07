@@ -8,6 +8,7 @@ describe('ResponseParser', () => {
                 memory: null,
                 projectMemory: null,
                 userMemory: null,
+                conversationTitle: null,
                 avoidMemory: null,
                 actions: [],
                 reply: '',

@@ -3,6 +3,7 @@ const {
     extractJsonPayloadFromRenderedCode,
     stripSequentialRenderedLineNumbers,
 } = require('./M365RenderedCode');
+const { normalizeGeneratedConversationTitle } = require('../services/M365ConversationTitle');
 
 // ============================================================
 // ⚡ ResponseParser (JSON 解析器 - 寬鬆版 + 集中化 + 終極矯正 + 穿透思考模式)
@@ -23,7 +24,7 @@ class ResponseParser {
         // 的同一行；這仍是明確的協議邊界，不能因此漏掉 Action。
         const lineStartRe = new RegExp(`(?:^|\\n)\\[${escaped}\\]\\s*`, 'i');
         const protocolTransitionRe = new RegExp(
-            `(?:\\[\\/(?:GOLEM_(?:MEMORY|PROJECT_MEMORY|USER_MEMORY|ACTION|PLAN|REPLY)|AVOID_MEMORY)\\]|` +
+            `(?:\\[\\/(?:GOLEM_(?:MEMORY|PROJECT_MEMORY|USER_MEMORY|CONVERSATION_TITLE|ACTION|PLAN|REPLY)|AVOID_MEMORY)\\]|` +
             `\\[{1,2}\\s*BEGIN\\s*:[^\\]\\n\\r]+?\\]{1,2})\\s*` +
             `\\[${escaped}\\]\\s*`,
             'i'
@@ -32,7 +33,7 @@ class ResponseParser {
         // blocks may omit closing tags: [GOLEM_MEMORY]... [GOLEM_ACTION]...
         // Only enable this loose scan when the whole response itself starts as a
         // protocol response, so ordinary prose mentioning a tag is not promoted.
-        const protocolResponseRe = /^\s*(?:\[{1,2}\s*BEGIN\s*:[^\]\n\r]+?\]{1,2}\s*)?\[(?:GOLEM_(?:MEMORY|PROJECT_MEMORY|USER_MEMORY|ACTION|PLAN|REPLY)|AVOID_MEMORY)\]/i;
+        const protocolResponseRe = /^\s*(?:\[{1,2}\s*BEGIN\s*:[^\]\n\r]+?\]{1,2}\s*)?\[(?:GOLEM_(?:MEMORY|PROJECT_MEMORY|USER_MEMORY|CONVERSATION_TITLE|ACTION|PLAN|REPLY)|AVOID_MEMORY)\]/i;
         const compactTagRe = new RegExp(`\\[${escaped}\\]\\s*`, 'i');
         const start = lineStartRe.exec(text)
             || protocolTransitionRe.exec(text)
@@ -42,7 +43,7 @@ class ResponseParser {
         const rest = text.slice(from);
         const closeRe = new RegExp(`\\[\\/${escaped}\\]`, 'i');
         const close = closeRe.exec(rest);
-        const endRe = /\s*\[(?:\/?(?:GOLEM_(?:MEMORY|PROJECT_MEMORY|USER_MEMORY|ACTION|PLAN|REPLY)|AVOID_MEMORY))\]|\s*\[\[?\s*END\s*:[^\]\n\r]+?\]?\]?/i;
+        const endRe = /\s*\[(?:\/?(?:GOLEM_(?:MEMORY|PROJECT_MEMORY|USER_MEMORY|CONVERSATION_TITLE|ACTION|PLAN|REPLY)|AVOID_MEMORY))\]|\s*\[\[?\s*END\s*:[^\]\n\r]+?\]?\]?/i;
         const end = endRe.exec(rest);
         const endIndexes = [close, end]
             .filter(Boolean)
@@ -66,8 +67,8 @@ class ResponseParser {
             .replace(/\[\[\s*END\s*:[^\]\n\r]+?\]/gi, '')
             .replace(/\[\s*BEGIN\s*:[^\]\n\r]+?\]\]/gi, '')
             .replace(/\[\s*END\s*:[^\]\n\r]+?\]\]/gi, '')
-            .replace(/\[\/(?:GOLEM_(?:MEMORY|PROJECT_MEMORY|USER_MEMORY|ACTION|PLAN|REPLY)|AVOID_MEMORY)\]/gi, '')
-            .replace(/(?:^|\n)\s*\[(?:\/?GOLEM_(?:MEMORY|PROJECT_MEMORY|USER_MEMORY|ACTION|PLAN|REPLY)|\/?AVOID_MEMORY)\]\s*(?=\n|$)/gi, '\n')
+            .replace(/\[\/(?:GOLEM_(?:MEMORY|PROJECT_MEMORY|USER_MEMORY|CONVERSATION_TITLE|ACTION|PLAN|REPLY)|AVOID_MEMORY)\]/gi, '')
+            .replace(/(?:^|\n)\s*\[(?:\/?GOLEM_(?:MEMORY|PROJECT_MEMORY|USER_MEMORY|CONVERSATION_TITLE|ACTION|PLAN|REPLY)|\/?AVOID_MEMORY)\]\s*(?=\n|$)/gi, '\n')
             .replace(/^\s*null\s*$/i, '')
             .trim();
     }
@@ -77,6 +78,7 @@ class ResponseParser {
             memory: null,
             projectMemory: null,
             userMemory: null,
+            conversationTitle: null,
             avoidMemory: null,
             actions: [],
             reply: "",
@@ -116,6 +118,13 @@ class ResponseParser {
             if (content && content !== 'null' && content !== '(無)') {
                 parsed.userMemory = content;
             }
+        }
+
+        const conversationTitleBlock = ResponseParser._extractProtocolBlock(rawText, 'GOLEM_CONVERSATION_TITLE');
+        if (conversationTitleBlock) {
+            parsed.conversationTitle = normalizeGeneratedConversationTitle(
+                ResponseParser.sanitizeProtocolTags(conversationTitleBlock)
+            );
         }
 
         const avoidBlock = ResponseParser._extractProtocolBlock(rawText, 'AVOID_MEMORY');
@@ -249,7 +258,7 @@ class ResponseParser {
         }
 
         // ✨ [防呆機制] 如果完全沒有抓到任何結構化標籤，就把整段文字 (過濾掉雜訊) 當作 Reply
-        if (!parsed.memory && !parsed.projectMemory && !parsed.userMemory
+        if (!parsed.memory && !parsed.projectMemory && !parsed.userMemory && !parsed.conversationTitle
             && !parsed.avoidMemory && !parsed.plan && !parsed.planError
             && parsed.actions.length === 0 && !parsed.reply) {
             // 濾掉 Thinking Mode 常見的雜訊字眼

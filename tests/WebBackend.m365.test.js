@@ -3,6 +3,7 @@ const {
     extractM365ConversationLocator,
     getWebBackendDefinition,
     inspectPageState,
+    waitForPageState,
 } = require('../src/core/web_backends');
 
 describe('m365-web backend definition', () => {
@@ -40,6 +41,7 @@ describe('m365-web backend definition', () => {
             'textarea[placeholder*="Copilot" i]',
         ]));
         expect(definition.responseContainerSelectors).toEqual(expect.arrayContaining([
+            '[role="article"].fai-CopilotMessage',
             '[role="article"].fai-CopilotMessage [data-testid="lastChatMessage"]',
             'div[data-content="ai-message"]',
             '[data-message-author="bot"]',
@@ -141,6 +143,26 @@ describe('m365-web backend definition', () => {
             status: 'human_login_required',
         }));
         expect(page.evaluate).not.toHaveBeenCalled();
+    });
+
+    test('allows a signed-in M365 SSO redirect to finish before reporting login required', async () => {
+        const definition = getWebBackendDefinition('m365-web', config);
+        const page = {
+            url: jest.fn()
+                .mockReturnValueOnce('https://login.microsoftonline.com/common/oauth2/authorize')
+                .mockReturnValue('https://m365.cloud.microsoft/chat'),
+            evaluate: jest.fn().mockResolvedValue({ blocked: false, composerCount: 1 }),
+        };
+
+        await expect(waitForPageState(page, definition, {
+            timeoutMs: 2000,
+            pollMs: 200,
+            loginRedirectGraceMs: 1000,
+        })).resolves.toEqual(expect.objectContaining({
+            status: 'ready',
+            composerCount: 1,
+        }));
+        expect(page.evaluate).toHaveBeenCalledTimes(1);
     });
 
     test('requires a visible M365 composer before reporting ready', async () => {

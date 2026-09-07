@@ -12,6 +12,7 @@ const { v4: uuidv4 } = require('uuid');
 const fs = require('fs');
 const path = require('path');
 const { buildM365PlanObservation } = require('../../src/services/M365PlanProtocol');
+const { mayAutoApproveM365Actions } = require('../../src/services/M365AutomationPolicy');
 
 const MCP_CONFIG_PATH = path.resolve(process.cwd(), 'data', 'mcp-servers.json');
 
@@ -64,7 +65,7 @@ function sanitizeReply(text) {
         .replace(/\[{1,2}\s*(?:BEGIN|END)\s*:[^\]\n\r]+?\]{1,2}/gi, '')
         .replace(/\[\s*(?:BEGIN|END)\s*:[^\]\n\r]+?\]\]/gi, '')
         .replace(/\[\[?\s*(?:BEGIN|END)\s*:[^\]\n\r]+?\]?\]?/gi, '')
-        .replace(/\[\/?GOLEM_(?:MEMORY|PROJECT_MEMORY|USER_MEMORY|ACTION|PLAN|REPLY)\]/gi, '')
+        .replace(/\[\/?GOLEM_(?:MEMORY|PROJECT_MEMORY|USER_MEMORY|CONVERSATION_TITLE|ACTION|PLAN|REPLY)\]/gi, '')
         .trim();
 }
 
@@ -104,17 +105,6 @@ class NeuroShunter {
             if (c.includes(token)) score += token.length >= 4 ? 3 : 2;
         }
         return score;
-    }
-
-    static _isCommandLikeAction(act) {
-        if (!act || typeof act !== 'object') return false;
-        if (act.action === 'command') return true;
-        return Boolean(
-            act.cmd ||
-            act.parameter ||
-            act.command ||
-            (act.parameters && typeof act.parameters === 'object' && act.parameters.command)
-        );
     }
 
     static _isPlanCheckpointAction(act) {
@@ -314,6 +304,17 @@ class NeuroShunter {
             ? true
             : brain.areActionsEnabled();
 
+        if (parsed.conversationTitle && typeof ctx?.onGolemConversationTitle === 'function') {
+            try {
+                await ctx.onGolemConversationTitle({
+                    conversationTitle: parsed.conversationTitle,
+                    isSystemFeedback: options.isSystemFeedback === true,
+                });
+            } catch (titleError) {
+                console.warn('[NeuroShunter] Conversation title update skipped:', titleError.message);
+            }
+        }
+
         if (runtimeActionsEnabled && typeof ctx?.onGolemProtocolResponse === 'function') {
             try {
                 const protocolResult = await ctx.onGolemProtocolResponse({
@@ -375,13 +376,19 @@ class NeuroShunter {
         const hostCheckpointOnly = options.planMode === true
             && parsed.actions.length > 0
             && parsed.actions.every((action) => this._isPlanCheckpointAction(action));
+        const useM365ActionProgressReply = runtimeActionsEnabled
+            && parsed.actions.length > 0
+            && brain
+            && brain.webBackend
+            && brain.webBackend.id === 'm365-web'
+            && !hostCheckpointOnly;
         const needsM365Approval = runtimeActionsEnabled
             && parsed.actions.length > 0
             && brain
             && brain.webBackend
             && brain.webBackend.id === 'm365-web'
             && brain.webBackend.safeMode
-            && process.env.GOLEM_AUTO_APPROVE_ALL !== 'true'
+            && !mayAutoApproveM365Actions(parsed.actions)
             && options.m365ActionApproved !== true
             && !hostCheckpointOnly;
 
@@ -526,6 +533,13 @@ class NeuroShunter {
             }
         }
 
+        // M365 使用者只需要看到簡潔的執行狀態。Observation、harness 與
+        // 核准協議仍保留在宿主內部與專用狀態卡，不讓模型以操作細節打斷對話。
+        // plan_checkpoint 的回覆本身就是原生 M365 產出，不能被狀態文字蓋掉。
+        if (useM365ActionProgressReply) {
+            parsed.reply = '我正在確認，請稍候…';
+        }
+
         // 1. 處理直接回覆 (讓 AI 的解說文字在行動之前出現)
         if (parsed.reply && !shouldSuppressReply) {
             let finalReply = parsed.reply;
@@ -640,7 +654,7 @@ class NeuroShunter {
         // 2. 處理結構化 Action 分配 (讓批准視窗在回覆之後彈出)
         if (parsed.actions.length > 0) {
             console.log(`[GOLEM_ACTION] (${shouldSuppressReply ? 'Silent' : 'Normal'})\n${JSON.stringify(parsed.actions, null, 2)}`);
-            const normalActions = [];
+            const commandActions = [];
             const rejectedActions = [];
             const turnActiveTools = [
                 ...toolsetManager.getActiveTools(),
@@ -679,10 +693,10 @@ class NeuroShunter {
                         await MultiAgentHandler.execute(ctx, act, controller, brain);
                         break;
                     case 'command':
-                        normalActions.push(act);
+                    case 'sys-admin':
+                        commandActions.push(act);
                         break;
                     default:
-                        // 檢查是否為動態擴充技能
                         const isSkillHandled = await SkillHandler.execute(ctx, act, brain, controller, {
                             actionDepth,
                             maxActionDepth,
@@ -696,8 +710,11 @@ class NeuroShunter {
                             workspaceActionId: options.workspaceActionId || null,
                         });
                         if (!isSkillHandled) {
-                            // 若不是已知框架 Action 和非動態技能，則視為底層 Shell 指令
-                            normalActions.push(act);
+                            rejectedActions.push({
+                                action: act,
+                                code: 'ACTION_HANDLER_UNAVAILABLE',
+                                error: `Validated action "${act.action}" was not handled by its registered handler.`,
+                            });
                         }
                         break;
                 }
@@ -737,6 +754,8 @@ class NeuroShunter {
                         observationLines.push(`   ⚡ 修正方式: mcp_call 必須包含 server 和 tool 欄位。`);
                         observationLines.push(`   ✅ 格式模板: {"action":"mcp_call","server":"<server>","tool":"<tool>","parameters":{...}}`);
                         observationLines.push(`   ✅ 瀏覽模板(兩步): [{"action":"mcp_call","server":"chrome-devtools","tool":"navigate_page","parameters":{"url":"https://example.com","timeout":60000}},{"action":"mcp_call","server":"chrome-devtools","tool":"take_snapshot","parameters":{}}]`);
+                    } else if (item.code === 'ACTION_HANDLER_UNAVAILABLE') {
+                        observationLines.push(`   ⚡ 修正方式: 請確認對應 Skill 或 MCP 已安裝並啟用；除非任務本來就是本機命令，否則不要改寫成 shell 指令。`);
                     }
                     observationLines.push('');
                 }
@@ -834,11 +853,12 @@ class NeuroShunter {
             }
 
             // 處理剩餘的終端指令序列並自動啟動回饋循環 (Feedback Loop)
-            if (normalActions.length > 0) {
-                await CommandHandler.execute(ctx, normalActions, controller, brain, (c, r, b, ctrl) => this.dispatch(c, r, b, ctrl, options), {
+            if (commandActions.length > 0) {
+                await CommandHandler.execute(ctx, commandActions, controller, brain, (c, r, b, ctrl) => this.dispatch(c, r, b, ctrl, options), {
                     actionDepth,
                     maxActionDepth,
                     allowActions,
+                    m365ActionApproved: options.m365ActionApproved === true,
                     actionQueueManaged: options.actionQueueManaged === true,
                     planMode: options.planMode === true,
                     workspaceRunId: options.workspaceRunId || null,

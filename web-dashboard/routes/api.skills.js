@@ -46,7 +46,13 @@ function normalizeSkillRecord(record, enabledSkills) {
         isDeletable: !isMandatory,
         isEnabled: isDynamic ? true : (isMandatory || enabledSkills.has(id)),
         content: String(record.content || ''),
-        category
+        category,
+        description: String(record.description || ''),
+        path: String(record.path || ''),
+        isMandatory,
+        runtimeKind: String(record.runtimeKind || 'unknown'),
+        healthStatus: String(record.healthStatus || 'unknown'),
+        healthMessage: String(record.healthMessage || ''),
     };
 }
 
@@ -154,37 +160,6 @@ function parseImportedSkillsFromMarkdown(markdown) {
     return single ? [single] : [];
 }
 
-function buildLiveSkillInjectionText(skillEntries = []) {
-    const rows = Array.isArray(skillEntries) ? skillEntries : [];
-    const header = [
-        '【系統技能熱注入】',
-        `本次僅注入目前已啟用的選用技能，共 ${rows.length} 個。`,
-        '請立即在本輪與後續回合使用這些技能規則。',
-        '',
-    ];
-    const body = rows.map((item, index) => {
-        const title = String(item.name || item.id || `skill_${index + 1}`).trim();
-        const id = String(item.id || '').trim();
-        const content = String(item.content || '').trim();
-        return [
-            `--- Skill ${index + 1}/${rows.length}: ${title} (${id}) ---`,
-            content,
-            '',
-        ].join('\n');
-    });
-    return [...header, ...body].join('\n');
-}
-
-function buildLiveSkillDisableText(skillId) {
-    const safeId = String(skillId || '').trim();
-    return [
-        '【系統技能停用同步】',
-        `技能 "${safeId}" 已由使用者停用。`,
-        '從現在起，請不要再呼叫或依賴此技能的規則與 action。',
-        '若使用者要求此能力，請先告知技能已停用，並請使用者重新啟用後再執行。',
-    ].join('\n');
-}
-
 function hasExampleSection(promptText) {
     const text = String(promptText || '');
     if (!text.trim()) return false;
@@ -283,10 +258,11 @@ async function collectInstalledSkills(server, golemIdQuery) {
     const userDataDir = await resolveSkillUserDataDir(server, golemIdQuery);
     const userSkillPackageDir = SkillPackageRegistry.getUserSkillPackageDir(userDataDir);
 
-    for (const pkg of SkillPackageRegistry.listSkillPackages({ userDataDir })) {
-        if (skillsMap.has(pkg.id)) continue;
+    const packages = SkillPackageRegistry.listSkillPackages({ userDataDir });
+    const packageIds = new Set(packages.map((pkg) => pkg.id));
+    for (const pkg of packages) {
         const content = SkillPackageRegistry.buildPromptContent(pkg);
-        const normalized = normalizeSkillRecord({
+        const normalized = skillsMap.get(pkg.id) || normalizeSkillRecord({
             id: pkg.id,
             name: pkg.name,
             description: pkg.description,
@@ -295,6 +271,18 @@ async function collectInstalledSkills(server, golemIdQuery) {
             category: pkg.type || 'core',
         }, enabledSkills);
         if (normalized) {
+            normalized.title = pkg.name || normalized.title;
+            normalized.description = pkg.description || normalized.description || '';
+            normalized.path = pkg.dir || normalized.path || '';
+            normalized.isMandatory = MANDATORY_SKILLS.includes(pkg.id);
+            if (!normalized.content) normalized.content = content;
+            const hasExecutableRuntime = Boolean(pkg.entry && pkg.indexPath && fs.existsSync(pkg.indexPath));
+            const hasPrompt = Boolean(pkg.promptPath && fs.existsSync(pkg.promptPath));
+            normalized.runtimeKind = hasExecutableRuntime ? 'executable' : (hasPrompt ? 'prompt_only' : 'broken');
+            normalized.healthStatus = hasExecutableRuntime || hasPrompt ? 'ready' : 'broken';
+            normalized.healthMessage = hasExecutableRuntime
+                ? '可執行工具'
+                : (hasPrompt ? '提示規則；會注入所選 M365 對話回合' : '缺少執行檔與說明書');
             // isEnabled 判斷優先序：
             // 1. MANDATORY_SKILLS → 永遠啟用
             // 2. manifest.enabled === false → 停用（使用者手動關閉）
@@ -327,6 +315,7 @@ async function collectInstalledSkills(server, golemIdQuery) {
     }
 
     const skillsData = Array.from(skillsMap.values())
+        .filter((item) => packageIds.has(item.id))
         .filter((item) => !REMOVED_SKILL_IDS.has(String(item && item.id || '').toLowerCase()));
     skillsData.sort((a, b) => {
         if (a.isEnabled && !b.isEnabled) return -1;
@@ -543,12 +532,14 @@ module.exports = function(server) {
 
                 let isLoadable = false;
                 let loadError = '';
-                if (pkg && pkg.indexPath) {
+                let runtimeKind = 'broken';
+                if (pkg && pkg.entry && pkg.indexPath) {
                     try {
                         if (fs.existsSync(pkg.indexPath)) {
                             delete require.cache[require.resolve(pkg.indexPath)];
                             const mod = require(pkg.indexPath);
                             isLoadable = Boolean(mod && typeof mod.run === 'function');
+                            runtimeKind = isLoadable ? 'executable' : 'broken';
                             if (!isLoadable) loadError = 'module loaded but missing run()';
                         } else {
                             loadError = 'index.js not found';
@@ -556,8 +547,11 @@ module.exports = function(server) {
                     } catch (error) {
                         loadError = error && error.message ? error.message : String(error);
                     }
+                } else if (pkg && pkg.promptPath && fs.existsSync(pkg.promptPath)) {
+                    runtimeKind = 'prompt_only';
+                    loadError = '';
                 } else if (pkg) {
-                    loadError = 'missing indexPath';
+                    loadError = 'missing executable entry and prompt';
                 } else {
                     loadError = 'package not registered';
                 }
@@ -578,6 +572,8 @@ module.exports = function(server) {
                     isRegistered,
                     enabled,
                     isLoadable,
+                    runtimeKind,
+                    status: runtimeKind === 'broken' ? 'broken' : 'ready',
                     hasExamples,
                     promptPath: pkg ? pkg.promptPath : '',
                     indexPath: pkg ? pkg.indexPath : '',
@@ -589,6 +585,8 @@ module.exports = function(server) {
                 total: checks.length,
                 registered: checks.filter((item) => item.isRegistered).length,
                 loadable: checks.filter((item) => item.isLoadable).length,
+                promptOnly: checks.filter((item) => item.runtimeKind === 'prompt_only').length,
+                broken: checks.filter((item) => item.runtimeKind === 'broken').length,
                 withExamples: checks.filter((item) => item.hasExamples).length,
             };
 
@@ -901,37 +899,11 @@ module.exports = function(server) {
                 console.warn(`⚠️ [WebServer] SkillManager refresh failed after toggle (${safeId}): ${refreshError.message}`);
             }
 
-            let liveSessionRemoved = false;
-            const liveSyncResults = [];
-            if (!enabled) {
-                const disableText = buildLiveSkillDisableText(safeId);
-                for (const [ctxId, ctx] of server.contexts.entries()) {
-                    const brain = ctx && ctx.brain;
-                    if (!brain) {
-                        liveSyncResults.push({ id: ctxId, status: 'skipped', error: 'Brain not ready' });
-                        continue;
-                    }
-                    try {
-                        if (brain.skillIndex && typeof brain.skillIndex.removeSkill === 'function') {
-                            await brain.skillIndex.removeSkill(safeId).catch(() => {});
-                        }
-                        if (typeof brain.sendMessage === 'function') {
-                            await brain.sendMessage(disableText, false, { disableToolRouting: true });
-                        }
-                        liveSyncResults.push({ id: ctxId, status: 'success' });
-                        liveSessionRemoved = true;
-                    } catch (syncError) {
-                        liveSyncResults.push({ id: ctxId, status: 'error', error: syncError.message });
-                    }
-                }
-            }
-
             return res.json({
                 success: true,
                 enabled,
                 skillsStr: newSkillsStr,
-                liveSessionRemoved,
-                liveSyncResults,
+                appliesOn: 'next_m365_turn',
             });
         } catch (e) {
             console.error("Failed to toggle skill:", e);
@@ -1113,91 +1085,6 @@ module.exports = function(server) {
             return res.json({ success: true, message: "Skills cache cleared" });
         } catch (e) {
             console.error("Failed to reload skills cache:", e);
-            return res.status(500).json({ error: e.message });
-        }
-    });
-
-    router.post('/api/skills/inject', requireSkillAdmin, async (req, res) => {
-        try {
-            ProtocolFormatter._lastScanTime = 0;
-            const incomingIds = Array.isArray(req.body?.enabledSkillIds) ? req.body.enabledSkillIds : [];
-            const sanitizedEnabledIds = [...new Set(
-                incomingIds.map((id) => safeSkillId(id, '')).filter(Boolean)
-            )];
-
-            const results = [];
-            for (const [id, context] of server.contexts.entries()) {
-                if (context.brain) {
-                    try {
-                        const brain = context.brain;
-                        const skillIds = sanitizedEnabledIds.length > 0
-                            ? sanitizedEnabledIds
-                            : (() => {
-                                const enabledSkills = resolveEnabledSkills(process.env.OPTIONAL_SKILLS || '', []);
-                                return OPTIONAL_SKILL_LIST.filter((skillId) => enabledSkills.has(skillId));
-                            })();
-
-                        if (skillIds.length === 0) {
-                            results.push({ id, status: 'skipped', error: 'No enabled optional skills to inject' });
-                            continue;
-                        }
-
-                        const skillRows = await brain.skillIndex.getEnabledSkills(skillIds);
-                        if (!Array.isArray(skillRows) || skillRows.length === 0) {
-                            results.push({ id, status: 'skipped', error: 'Enabled skills not found in skill index' });
-                            continue;
-                        }
-
-                        const injectionText = buildLiveSkillInjectionText(skillRows);
-                        if (typeof brain.sendMessageSegmented === 'function' && injectionText.length > 12000) {
-                            await brain.sendMessageSegmented(injectionText, false, {
-                                disableToolRouting: true,
-                                maxSegmentChars: 10000,
-                            });
-                        } else if (typeof brain.sendMessage === 'function') {
-                            await brain.sendMessage(injectionText, false, { disableToolRouting: true });
-                        } else {
-                            throw new Error('Brain sendMessage API unavailable');
-                        }
-
-                        console.log(`⚡ [WebServer] Live skill injection complete [${id}] optional_count=${skillRows.length}`);
-                        results.push({ id, status: 'success' });
-
-                        const tgBot = brain.tgBot;
-                        if (tgBot) {
-                            const optionalList = skillRows.map((s) => `• ${s.id}`).join('\n');
-                            const msg = `⚡ *[${id}] 技能已即時注入*\n\n✅ *本次注入選用技能:*\n${optionalList}`;
-
-                            const gCfg = tgBot.golemConfig || {};
-                            const targetId = gCfg.adminId || gCfg.chatId;
-                            if (targetId) {
-                                tgBot.sendMessage(targetId, msg, { parse_mode: 'Markdown' })
-                                    .catch(e => console.warn(`⚠️ [WebServer] TG skill notify failed [${id}]:`, e.message));
-                                tgBot.sendMessage(targetId, `✅ *[${id}] 技能即時注入完成*\n未重啟 Gemini 視窗，當前對話上下文已保留。`, { parse_mode: 'Markdown' })
-                                    .catch(e => console.warn(`⚠️ [WebServer] TG inject notify failed [${id}]:`, e.message));
-                            }
-                        }
-                    } catch (e) {
-                        console.error(`❌ [WebServer] Failed to inject skills into Golem [${id}]:`, e.message);
-                        results.push({ id, status: 'error', error: e.message });
-                    }
-                } else {
-                    results.push({ id, status: 'skipped', error: 'Brain not ready' });
-                }
-            }
-
-            if (results.length === 0) {
-                return res.status(503).json({ success: false, message: "No active Golem instances found" });
-            }
-
-            const allSuccess = results.every(r => r.status === 'success');
-            return res.json({
-                success: allSuccess,
-                message: allSuccess ? `已即時注入 ${results.length} 個 Golem 實體` : `部分注入失敗`,
-                results
-            });
-        } catch (e) {
-            console.error("Failed to inject skills:", e);
             return res.status(500).json({ error: e.message });
         }
     });

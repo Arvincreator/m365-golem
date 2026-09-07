@@ -51,10 +51,10 @@ export default function ActionGatePage() {
                 <div className="space-y-2">
                     <div className="inline-flex items-center gap-2 rounded-lg border border-amber-500/40 bg-amber-500/10 px-3 py-1 text-[11px] font-semibold uppercase tracking-[0.1em] text-amber-300">
                         <ShieldAlert className="h-3.5 w-3.5" />
-                        {isEnglish ? "Action Gate Monitor" : "Action Gate 監控"}
+                        {isEnglish ? "Action Gate Records" : "Action Gate 紀錄"}
                     </div>
                     <h1 className="text-2xl font-semibold text-foreground">
-                        {isEnglish ? "Rejected Action Events" : "被阻擋的 Action 事件"}
+                        {isEnglish ? "Rejected Action Records" : "被阻擋的 Action 紀錄"}
                     </h1>
                     <p className="text-sm text-muted-foreground">
                         {isEnglish

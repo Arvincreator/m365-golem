@@ -1,5 +1,5 @@
 {
-  "writeEnabled": false,
+  "writeEnabled": true,
   "readHostPatterns": [
     "*.sharepoint.com",
     "*.sharepoint.us",
@@ -16,7 +16,7 @@
     "%M365_GOLEM_ROOT%"
   ],
   "allowOverwrite": false,
-  "allowRecycle": true,
+  "allowRecycle": false,
   "allowPermanentDelete": false,
   "allowExternalSharing": false,
   "allowPermissionChange": false,

@@ -25,7 +25,8 @@ class Executor {
             const child = spawn(command, [], {
                 shell: true,     // 允許使用 pipe (|) 和重導向 (>)
                 cwd: cwd,        // 設定工作目錄
-                env: process.env // 繼承原本的環境變數
+                env: process.env, // 繼承原本的環境變數
+                windowsHide: true // Windows 上不顯示命令列視窗
             });
 
             let stdout = '';

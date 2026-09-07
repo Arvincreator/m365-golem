@@ -82,39 +82,13 @@ const https = require('https');
 const InteractiveMultiAgent = require('../../src/core/InteractiveMultiAgent');
 const introspection = require('../../src/services/Introspection');
 const ActionQueue = require('../../src/core/ActionQueue'); // ✨ [v9.1] Dual-Queue Architecture
-const PromptShortcutManager = require('../../src/managers/PromptShortcutManager');
-const { normalizeShortcutKey } = PromptShortcutManager;
-
-
 // 🎯 v9.1.5 解耦：不再於啟動時遍歷配置建立 Bot 與實體
 // TelegramBot 與 Golem 實體將由 Web Dashboard 透過 golemFactory 動態建立
 let activeTgBot = null;
 let activeDcBot = null;
 let singleGolemInstance = null;
 let restartInProgress = false;
-let promptPoolWatcherTimer = null;
-let lastPromptPoolMtimeMs = Number.NaN;
 let lastTelegramCommandsSignature = '';
-
-function getHeadToken(rawText) {
-    const text = String(rawText || '').trim();
-    if (!text) return '';
-    return String(text.split(/\s+/)[0] || '').trim();
-}
-
-const SYSTEM_COMMAND_KEY_SET = (() => {
-    try {
-        const unifiedCommands = require('../../src/config/commands.js');
-        if (!Array.isArray(unifiedCommands)) return new Set();
-        return new Set(
-            unifiedCommands
-                .map((item) => normalizeShortcutKey(item && item.command ? item.command : ''))
-                .filter(Boolean)
-        );
-    } catch {
-        return new Set();
-    }
-})();
 
 // ✅ [Bug #6 修復] 啟動時間戳記，用於過濾重啟前的舊訊息
 const BOOT_TIME = Date.now();
@@ -140,11 +114,9 @@ function buildTelegramCommandsMenu() {
             .filter((cmd) => /^[a-z0-9_]{1,32}$/i.test(cmd.command))
         : [];
 
-    const promptCommands = PromptShortcutManager.getTelegramPromptCommands();
-
     const merged = [];
     const seen = new Set();
-    for (const cmd of [...systemCommands, ...promptCommands]) {
+    for (const cmd of systemCommands) {
         const key = String(cmd.command || '').trim().toLowerCase();
         if (!key || seen.has(key)) continue;
         seen.add(key);
@@ -167,61 +139,6 @@ async function syncTelegramCommandsMenu(bot, reason = 'manual') {
     } catch (error) {
         console.error(`❌ [Bot] Set TG Commands Error:`, error.message);
     }
-}
-
-function ensurePromptPoolWatcher() {
-    if (promptPoolWatcherTimer) return;
-    promptPoolWatcherTimer = setInterval(async () => {
-        if (!activeTgBot) return;
-
-        let nextMtime = -1;
-        try {
-            const stat = fs_sync.statSync(PromptShortcutManager.PROMPT_POOL_PATH);
-            if (stat && stat.isFile()) nextMtime = stat.mtimeMs;
-        } catch {
-            nextMtime = -1;
-        }
-
-        if (nextMtime !== lastPromptPoolMtimeMs) {
-            lastPromptPoolMtimeMs = nextMtime;
-            await syncTelegramCommandsMenu(activeTgBot, 'prompt_pool_changed');
-        }
-    }, 10000);
-
-    if (typeof promptPoolWatcherTimer.unref === 'function') {
-        promptPoolWatcherTimer.unref();
-    }
-}
-
-function getDashboardBackendPort() {
-    const configured = Number(process.env.DASHBOARD_PORT || 3000);
-    const isDev = (process.env.DASHBOARD_DEV_MODE || '').trim() === 'true';
-    if (isDev && configured === 3000) return 3001;
-    return configured;
-}
-
-function trackPromptShortcutUsage(shortcut, source = 'telegram') {
-    const shortcutText = String(shortcut || '').trim();
-    if (!shortcutText) return;
-
-    const opToken = String(process.env.SYSTEM_OP_TOKEN || '').trim();
-    const headers = { 'Content-Type': 'application/json' };
-    if (opToken) headers['x-system-op-token'] = opToken;
-
-    const port = getDashboardBackendPort();
-    const url = `http://127.0.0.1:${port}/api/prompt-pool/track-use`;
-
-    fetch(url, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-            shortcut: shortcutText,
-            source,
-            platform: 'telegram',
-        }),
-    }).catch((error) => {
-        console.warn(`[PromptShortcut] usage track failed: ${error.message}`);
-    });
 }
 
 async function startActiveTelegramPolling(golemId, reason = 'runtime') {
@@ -410,7 +327,7 @@ function getOrCreateGolem() {
                     bot.getMe().then(me => {
                         bot.username = me.username;
                         console.log(`🤖 [Bot] ${golemConfig.id} 已掛載 (@${me.username})`);
-                        // ✨ [新增] 更新 Telegram 指令選單（系統指令 + Prompt 指令池）
+                        // 保留舊 Telegram 系統指令選單；Prompt 指令池只由 M365 對話框使用。
                         syncTelegramCommandsMenu(bot, 'bot_ready');
                     }).catch(e => {
                         if (!e.message.includes('401')) {
@@ -419,7 +336,6 @@ function getOrCreateGolem() {
                     });
                     lastTelegramCommandsSignature = '';
                     activeTgBot = bot;
-                    ensurePromptPoolWatcher();
 
                     // ✅ [Bug #1 修復] 在 factory 內部動態綁定事件，確保動態建立的 Bot 也能接收訊息
                     const boundGolemId = golemConfig.id;
@@ -607,7 +523,11 @@ async function handleUnifiedMessage(ctx, forceTargetId = null) {
         && brain.webBackend.safeMode;
 
     if (isM365SafeMode && !/^\/new$/i.test(String(ctx.text || '').trim())) {
-        const isExplicitLocalCommand = /^\s*\/|^\s*GOLEM_SKILL::/i.test(String(ctx.text || ''));
+        const isPromptShortcutExpansion = ctx.m365PromptShortcutExpanded === true
+            && typeof ctx.textOverride === 'string'
+            && Boolean(ctx.textOverride.trim());
+        const isExplicitLocalCommand = !isPromptShortcutExpansion
+            && /^\s*\/|^\s*GOLEM_SKILL::/i.test(String(ctx.text || ''));
         if (/^\s*\/(?:rpg|stocks?|stockboard|stock-dashboard|cryptos?|cryptoboard|crypto-dashboard)(?:\s|$)/i.test(String(ctx.text || ''))) {
             await ctx.reply('此功能已從 M365 Golem 退役；不會送到 M365，也不會在本機執行。');
             return;
@@ -621,7 +541,9 @@ async function handleUnifiedMessage(ctx, forceTargetId = null) {
             await ctx.reply('⚠️ 附件未通過專案、對話、檔案類型與容量驗證，因此不會送到 M365。');
             return;
         }
-        const pocText = isExplicitLocalCommand
+        const pocText = isPromptShortcutExpansion
+            ? String(ctx.textOverride || '')
+            : isExplicitLocalCommand
             ? String(ctx.text || '')
             : String(typeof ctx.textOverride === 'string' ? ctx.textOverride : (ctx.text || ''));
         if (!pocText.trim()) return;
@@ -646,6 +568,7 @@ async function handleUnifiedMessage(ctx, forceTargetId = null) {
             forceObserver: false,
             m365Bootstrap: ctx.workspaceBootstrapRequired === true,
             workspaceConversationId: ctx.workspaceConversationId || null,
+            m365ConversationTitleRequested: ctx.workspaceConversationTitleRequested === true,
             workspaceRunId: ctx.workspaceRunId || null,
             workspaceStepId: ctx.workspaceStepId || null,
             workspacePlanId: ctx.workspacePlanId || null,
@@ -653,12 +576,14 @@ async function handleUnifiedMessage(ctx, forceTargetId = null) {
             workspacePlanStepId: ctx.workspacePlanStepId || null,
             workspaceActionId: ctx.workspaceActionId || null,
             protocolRequestId: ctx.workspaceProtocolRequestId || null,
+            // Snapshot the user's choice on the queued task. A later composer
+            // change must not alter how an earlier queued message is sent.
+            m365ResponseMode: ctx.m365ResponseMode || undefined,
             allowM365Queue: true,
             autoAppendWhenBusy: true,
         });
         return;
     }
-    let matchedPromptShortcut = null;
     const notifyBrainSystemChange = async (title, details) => {
         const message = `[System Observation]\n` +
             `${title}\n` +
@@ -684,33 +609,6 @@ async function handleUnifiedMessage(ctx, forceTargetId = null) {
             console.warn(`[SystemSync] Failed to notify brain: ${err.message}`);
         }
     };
-
-    // ✨ Telegram 快捷指令：送出後自動展開為完整 Prompt 內容
-    if (ctx.platform === 'telegram' && ctx.text) {
-        const rawTelegramText = String(ctx.text || '').trim();
-        const expanded = PromptShortcutManager.expandPromptShortcutInput(rawTelegramText);
-        if (expanded.changed && expanded.text) {
-            if (typeof ctx.setTextOverride === 'function') {
-                ctx.setTextOverride(expanded.text);
-            }
-            matchedPromptShortcut = expanded.matched || null;
-            console.log(`✨ [PromptShortcut] 已展開 Telegram 快捷指令 ${expanded.matched.shortcut}`);
-            trackPromptShortcutUsage(expanded.matched.shortcut, 'telegram');
-        } else {
-            const headToken = getHeadToken(rawTelegramText);
-            const headKey = normalizeShortcutKey(headToken);
-            const isSingleToken = Boolean(rawTelegramText) && rawTelegramText.split(/\s+/).length === 1;
-
-            if (headToken.startsWith('/') && isSingleToken && headKey && !SYSTEM_COMMAND_KEY_SET.has(headKey)) {
-                const suggestions = PromptShortcutManager.suggestPromptShortcuts(headToken, 5);
-                if (suggestions.length > 0) {
-                    const suggestionLines = suggestions.map((item) => `• ${item.shortcut}`).join('\n');
-                    await ctx.reply(`找不到這個快捷指令，你是不是想輸入：\n${suggestionLines}\n\n你也可以到 Dashboard 的「Prompt 指令池」新增或調整。`);
-                    return;
-                }
-            }
-        }
-    }
 
     if (ctx.isAdmin && ctx.text && ctx.text.trim().toLowerCase() === '/sos') {
         try {
@@ -942,8 +840,7 @@ async function handleUnifiedMessage(ctx, forceTargetId = null) {
     }
 
     if (!ctx.text && !ctx.getAttachment) return;
-    const allowPromptShortcutForNonAdmin = ctx.platform === 'telegram' && Boolean(matchedPromptShortcut);
-    if (!ctx.isAdmin && !allowPromptShortcutForNonAdmin) return;
+    if (!ctx.isAdmin) return;
 
     const isDiscordChatMode = ctx.platform === 'discord' && ctx.authMode === 'CHAT';
     const discordObserveAll = ConfigManager.CONFIG.DISCORD_CHAT_OBSERVE_ALL !== false;

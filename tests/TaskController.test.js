@@ -85,6 +85,44 @@ describe('TaskController', () => {
         expect(controller.pendingTasks.size).toBe(1);
     });
 
+    test('a scoped M365 approval avoids a duplicate warning prompt', async () => {
+        const controller = new TaskController({ golemId: 'test-golem' });
+        const ctx = { reply: jest.fn().mockResolvedValue(undefined) };
+
+        const result = await controller.runSequence(
+            ctx,
+            [{ action: 'command', parameter: 'cat README.md' }],
+            0,
+            null,
+            { approvalGranted: true }
+        );
+
+        controller.destroy();
+
+        expect(result).toContain('[Step 1 Success]');
+        expect(ctx.reply).not.toHaveBeenCalled();
+        expect(controller.pendingTasks.size).toBe(0);
+    });
+
+    test('a scoped M365 approval never bypasses a destructive hard block', async () => {
+        const controller = new TaskController({ golemId: 'test-golem' });
+        controller.security.evaluateCommandLevel = jest.fn(() => 0);
+        const ctx = { reply: jest.fn().mockResolvedValue(undefined) };
+
+        const result = await controller.runSequence(
+            ctx,
+            [{ action: 'command', parameter: 'rm -rf /' }],
+            0,
+            null,
+            { approvalGranted: true }
+        );
+
+        controller.destroy();
+
+        expect(result).toContain('指令被系統攔截');
+        expect(controller.internalExecutor).toBeUndefined();
+    });
+
     test('runSequence should assemble sys_admin through package runtime path', async () => {
         const controller = new TaskController({ golemId: 'test-golem' });
         controller.security.assess = jest.fn(() => ({ level: 'SAFE', reason: '' }));

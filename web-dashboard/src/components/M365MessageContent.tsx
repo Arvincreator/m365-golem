@@ -15,6 +15,7 @@ import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { cn } from "@/lib/utils";
 import { parseM365MessageContent } from "@/lib/m365-message-rendering";
+import { externalConversationLinkComponents } from "@/components/ExternalConversationLink";
 import {
     Dialog,
     DialogContent,
@@ -193,7 +194,7 @@ export default function M365MessageContent({ content }: { content: string }) {
                 <CodeArtifactCard key={`code-${index}`} {...segment} />
             ) : (
                 <div key={`markdown-${index}`} className="prose prose-sm max-w-none break-words text-foreground dark:prose-invert prose-p:my-2 prose-pre:overflow-x-auto">
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{segment.content}</ReactMarkdown>
+                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={externalConversationLinkComponents}>{segment.content}</ReactMarkdown>
                 </div>
             ))}
         </div>

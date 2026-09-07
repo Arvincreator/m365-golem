@@ -8,25 +8,10 @@
 
 // ── 原子工具集定義（對齊 skillsConfig.js 的 id 命名）─────────────
 const ATOMIC_TOOLS = {
-    // 系統工具
-    system:  ['actor', 'chronos', 'reincarnate', 'sys-admin'],
-    // 記憶與學習
-    memory:  ['memory', 'adaptive-learning', 'session-search', 'reflection'],
-    // 知識管理
-    knowledge: ['wiki', 'log-archive', 'log-reader'],
-    // 程式與演化
-    code:    ['evolution', 'code-wizard'],
-    // 網路與搜尋
-    search:  ['tool-explorer', 'optic-nerve', 'cloud', 'duckduckgo-search', 'chrome-devtools'],
-    // 多媒體
-    media:   ['image-prompt', 'youtube', 'spotify'],
-    // AI 協作
-    agents:  ['multi-agent'],
-    // MCP 整合
+    system: ['actor', 'sys-admin'],
+    knowledge: ['log-archive', 'log-reader', 'reference-files'],
+    search: ['duckduckgo-search', 'duckduckgo-devtools-bridge'],
     mcp:     ['mcp'],
-    // 社群整合
-    social:  ['moltbot'],
-    // 生產力（日曆）
     productivity: ['collab-calendar'],
 };
 
@@ -39,25 +24,25 @@ const SCENE_TOOLSETS = {
     coding: {
         description: '程式開發模式：啟用程式碼修改、Git、系統診斷等工具',
         emoji: '💻',
-        includes: [...ATOMIC_TOOLS.system, ...ATOMIC_TOOLS.code, ...ATOMIC_TOOLS.memory, ...ATOMIC_TOOLS.mcp, 'git'],
+        includes: [...ATOMIC_TOOLS.system, ...ATOMIC_TOOLS.knowledge, ...ATOMIC_TOOLS.mcp],
     },
 
     /**
      * research - 適合資料搜集、知識整理場景
      */
     research: {
-        description: '研究模式：啟用網路搜尋、Wiki、記憶工具',
+        description: '研究模式：啟用公開網路搜尋、知識來源與日誌工具',
         emoji: '🔬',
-        includes: [...ATOMIC_TOOLS.system, ...ATOMIC_TOOLS.search, ...ATOMIC_TOOLS.knowledge, ...ATOMIC_TOOLS.memory, ...ATOMIC_TOOLS.productivity],
+        includes: [...ATOMIC_TOOLS.system, ...ATOMIC_TOOLS.search, ...ATOMIC_TOOLS.knowledge, ...ATOMIC_TOOLS.productivity, ...ATOMIC_TOOLS.mcp],
     },
 
     /**
      * creative - 適合創意、寫作、影像生成場景
      */
     creative: {
-        description: '創意模式：啟用影像生成、音樂、知識工具',
+        description: '創意模式：啟用知識來源與內容整理工具',
         emoji: '🎨',
-        includes: [...ATOMIC_TOOLS.system, ...ATOMIC_TOOLS.media, ...ATOMIC_TOOLS.knowledge, ...ATOMIC_TOOLS.memory],
+        includes: [...ATOMIC_TOOLS.system, ...ATOMIC_TOOLS.knowledge],
     },
 
     /**
@@ -67,8 +52,8 @@ const SCENE_TOOLSETS = {
         description: '助手模式：全方位平衡工具集（預設）',
         emoji: '🤖',
         includes: [
-            ...ATOMIC_TOOLS.system, ...ATOMIC_TOOLS.memory, ...ATOMIC_TOOLS.knowledge,
-            ...ATOMIC_TOOLS.search, ...ATOMIC_TOOLS.agents, ...ATOMIC_TOOLS.productivity,
+            ...ATOMIC_TOOLS.system, ...ATOMIC_TOOLS.knowledge,
+            ...ATOMIC_TOOLS.search, ...ATOMIC_TOOLS.productivity, ...ATOMIC_TOOLS.mcp,
         ],
     },
 
@@ -78,8 +63,8 @@ const SCENE_TOOLSETS = {
     safe: {
         description: '安全模式：移除所有可修改系統的工具（唯讀）',
         emoji: '🛡️',
-        includes: [...ATOMIC_TOOLS.system, ...ATOMIC_TOOLS.knowledge, ...ATOMIC_TOOLS.memory],
-        excludes: ['evolution', 'code-wizard', 'sys-admin', 'git'],
+        includes: [...ATOMIC_TOOLS.knowledge, ...ATOMIC_TOOLS.search],
+        excludes: ['sys-admin'],
     },
 
     /**
@@ -89,8 +74,7 @@ const SCENE_TOOLSETS = {
         description: '自主模式：適合長時間自主任務執行',
         emoji: '🚀',
         includes: [
-            ...ATOMIC_TOOLS.system, ...ATOMIC_TOOLS.memory, ...ATOMIC_TOOLS.knowledge,
-            ...ATOMIC_TOOLS.search, ...ATOMIC_TOOLS.code, ...ATOMIC_TOOLS.agents,
+            ...ATOMIC_TOOLS.system, ...ATOMIC_TOOLS.knowledge, ...ATOMIC_TOOLS.search,
             ...ATOMIC_TOOLS.mcp, ...ATOMIC_TOOLS.productivity,
         ],
     },

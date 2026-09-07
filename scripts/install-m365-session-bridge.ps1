@@ -106,11 +106,17 @@ if ($nodeMajor -lt 20) {
 }
 
 $defaultPolicy = Get-Content -LiteralPath $PolicyTemplatePath -Raw -Encoding UTF8 | ConvertFrom-Json
-if ($defaultPolicy.writeEnabled -ne $false -or $defaultPolicy.allowArbitraryHttp -ne $false) {
+if ($defaultPolicy.writeEnabled -ne $true -or
+    $defaultPolicy.allowOverwrite -ne $false -or
+    $defaultPolicy.allowRecycle -ne $false -or
+    $defaultPolicy.allowPermanentDelete -ne $false -or
+    $defaultPolicy.allowArbitraryHttp -ne $false -or
+    @($defaultPolicy.allowedHosts).Count -ne 0 -or
+    @($defaultPolicy.allowedSites).Count -ne 0) {
   throw 'The built-in bridge policy template is not deny-first; refusing installation.'
 }
 Write-Ok "Node.js $nodeVersion"
-Write-Ok 'Deny-first policy template validated'
+Write-Ok 'Deny-first target policy validated; non-destructive writes are available after target approval'
 
 if ($PlanOnly) {
   [PSCustomObject]@{
@@ -211,7 +217,10 @@ for ($index = 0; $index -lt $servers.Count; $index += 1) {
   }
 }
 $existing = if ($existingIndex -ge 0) { $servers[$existingIndex] } else { $null }
-$enabled = [bool](Get-PropertyValue $existing 'enabled' $true)
+# Installer-owned built-ins must be immediately usable after install/update.
+# A user may still toggle them later in the running dashboard, but rerunning
+# setup restores the supported clean-install baseline.
+$enabled = $true
 
 $bridgeEntry = [ordered]@{
   name = 'm365-session-bridge'
@@ -222,10 +231,11 @@ $bridgeEntry = [ordered]@{
     M365_BRIDGE_POLICY_PATH = $PolicyPath
     M365_BRIDGE_LOG_PATH = $ActionLogPath
     M365_BRIDGE_SECRET_PATH = $SecretPath
+    M365_BRIDGE_CONTROL_PORT = '43241'
   }
   timeout = 180000
   enabled = $enabled
-  description = 'Built-in exact-URL SharePoint Online and OneDrive for Business bridge using the current user Edge session.'
+  description = 'Built-in exact-URL SharePoint Online and OneDrive for Business bridge for approved folder creation, upload, copy, move, rename, metadata and read operations using the current user Edge session.'
   builtIn = $true
   managedBy = 'm365-golem'
 }
@@ -241,11 +251,77 @@ if ($existingIndex -ge 0) {
   $servers += [PSCustomObject]$bridgeEntry
 }
 
+$chromePackagePath = Join-Path $GolemRoot 'node_modules\chrome-devtools-mcp\package.json'
+if (-not (Test-Path -LiteralPath $chromePackagePath -PathType Leaf)) {
+  throw "Built-in chrome-devtools dependency is missing. Run npm install in $GolemRoot before setup."
+}
+$chromePackage = Get-Content -LiteralPath $chromePackagePath -Raw -Encoding UTF8 | ConvertFrom-Json
+$chromeRelativeEntry = if ($chromePackage.bin -is [string]) {
+  $chromePackage.bin
+} else {
+  Get-PropertyValue $chromePackage.bin 'chrome-devtools-mcp' ''
+}
+if (-not $chromeRelativeEntry) {
+  throw "chrome-devtools-mcp package does not declare its CLI entry: $chromePackagePath"
+}
+$chromeEntryPath = [System.IO.Path]::GetFullPath((Join-Path (Split-Path -Parent $chromePackagePath) $chromeRelativeEntry))
+if (-not (Test-Path -LiteralPath $chromeEntryPath -PathType Leaf)) {
+  throw "chrome-devtools-mcp CLI entry was not found: $chromeEntryPath"
+}
+
+$edgeCandidates = @(
+  (Join-Path ${env:ProgramFiles(x86)} 'Microsoft\Edge\Application\msedge.exe'),
+  (Join-Path $env:ProgramFiles 'Microsoft\Edge\Application\msedge.exe'),
+  (Join-Path $env:LOCALAPPDATA 'Microsoft\Edge\Application\msedge.exe')
+) | Where-Object { $_ -and (Test-Path -LiteralPath $_ -PathType Leaf) }
+$chromeArgs = @(
+  $chromeEntryPath,
+  '--headless=true',
+  '--isolated=true',
+  '--no-usage-statistics',
+  '--no-performance-crux'
+)
+if ($edgeCandidates.Count -gt 0) {
+  $chromeArgs += "--executablePath=$($edgeCandidates[0])"
+}
+
+$chromeExistingIndex = -1
+for ($index = 0; $index -lt $servers.Count; $index += 1) {
+  if ((Get-PropertyValue $servers[$index] 'name' '') -eq 'chrome-devtools') {
+    $chromeExistingIndex = $index
+    break
+  }
+}
+$chromeExisting = if ($chromeExistingIndex -ge 0) { $servers[$chromeExistingIndex] } else { $null }
+$chromeEnabled = $true
+$chromeEntry = [ordered]@{
+  name = 'chrome-devtools'
+  command = $node.Source
+  args = $chromeArgs
+  env = [ordered]@{
+    CHROME_DEVTOOLS_MCP_NO_USAGE_STATISTICS = '1'
+  }
+  timeout = 120000
+  enabled = $chromeEnabled
+  description = 'Built-in isolated browser inspection and automation. It does not reuse the signed-in M365 Edge session.'
+  builtIn = $true
+  managedBy = 'm365-golem'
+}
+$chromeCachedTools = Get-PropertyValue $chromeExisting 'cachedTools' $null
+if ($null -ne $chromeCachedTools) {
+  $chromeEntry.cachedTools = @($chromeCachedTools)
+}
+if ($chromeExistingIndex -ge 0) {
+  $servers[$chromeExistingIndex] = [PSCustomObject]$chromeEntry
+} else {
+  $servers += [PSCustomObject]$chromeEntry
+}
+
 $serverArray = [object[]]@($servers)
 $configJson = ConvertTo-Json -InputObject $serverArray -Depth 100
 $null = $configJson | ConvertFrom-Json
 Write-Utf8NoBom -Path $ConfigPath -Content $configJson
-Write-Ok "Configured built-in MCP server: $ConfigPath"
+Write-Ok "Configured built-in MCP servers: m365-session-bridge, chrome-devtools"
 
 Write-Step 'Built-in M365 Session Bridge installation complete'
 Write-Host @"

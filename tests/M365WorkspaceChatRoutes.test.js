@@ -7,6 +7,7 @@ const mockStore = {
     getProject: jest.fn(),
     addMessage: jest.fn(),
     updateMessageDeliveryState: jest.fn(),
+    updateConversationTitleIfPlaceholder: jest.fn(),
     acknowledgeConversationProjectContext: jest.fn(),
 };
 const mockActivate = jest.fn();
@@ -33,6 +34,13 @@ const mockMcpManager = {
     load: jest.fn(),
     getServers: jest.fn(),
 };
+const mockUpdateEnv = jest.fn();
+const mockExpandPromptShortcutInput = jest.fn((text) => ({
+    changed: false,
+    text,
+    matched: null,
+}));
+const mockRecordM365PromptPoolUse = jest.fn();
 
 jest.mock('../src/services/M365WorkspaceService', () => ({
     isM365WorkspaceEnabled: jest.fn(() => true),
@@ -69,8 +77,19 @@ jest.mock('../src/managers/SkillPackageRegistry', () => mockSkillPackageRegistry
 jest.mock('../src/mcp/MCPManager', () => ({
     getInstance: () => mockMcpManager,
 }));
+jest.mock('../src/utils/EnvManager', () => ({
+    updateEnv: (...args) => mockUpdateEnv(...args),
+}));
+jest.mock('../src/managers/PromptShortcutManager', () => ({
+    expandPromptShortcutInput: (...args) => mockExpandPromptShortcutInput(...args),
+}));
+jest.mock('../web-dashboard/routes/api.prompt-pool', () => ({
+    recordM365PromptPoolUse: (...args) => mockRecordM365PromptPoolUse(...args),
+}));
 
 const ConfigManager = require('../src/config');
+const { SecurityManager } = require('../packages/security');
+const { getAutomationModePreset } = require('../src/config/AutomationModes');
 const registerChatRoutes = require('../web-dashboard/routes/api.chat');
 
 describe('workspace-aware M365 chat route', () => {
@@ -79,10 +98,18 @@ describe('workspace-aware M365 chat route', () => {
     let serverContext;
     let previousBackend;
     let previousSafeMode;
+    let previousAutomationEnv;
+    let previousSecurityLevel;
+    let reloadConfigSpy;
 
     beforeAll(async () => {
         previousBackend = ConfigManager.CONFIG.GOLEM_BACKEND;
         previousSafeMode = ConfigManager.CONFIG.M365_POC_SAFE_MODE;
+        previousSecurityLevel = SecurityManager.currentLevel;
+        previousAutomationEnv = Object.fromEntries(
+            Object.keys(getAutomationModePreset('guided')).map((key) => [key, process.env[key]])
+        );
+        reloadConfigSpy = jest.spyOn(ConfigManager, 'reloadConfig').mockImplementation(() => ConfigManager.CONFIG);
         ConfigManager.CONFIG.GOLEM_BACKEND = 'm365-web';
         ConfigManager.CONFIG.M365_POC_SAFE_MODE = true;
 
@@ -104,6 +131,12 @@ describe('workspace-aware M365 chat route', () => {
     afterAll(async () => {
         ConfigManager.CONFIG.GOLEM_BACKEND = previousBackend;
         ConfigManager.CONFIG.M365_POC_SAFE_MODE = previousSafeMode;
+        SecurityManager.currentLevel = previousSecurityLevel;
+        reloadConfigSpy.mockRestore();
+        for (const [key, value] of Object.entries(previousAutomationEnv)) {
+            if (value === undefined) delete process.env[key];
+            else process.env[key] = value;
+        }
         if (httpServer) await new Promise((resolve) => httpServer.close(resolve));
     });
 
@@ -115,6 +148,7 @@ describe('workspace-aware M365 chat route', () => {
         mockStore.getConversation.mockResolvedValue({
             id: 'conversation-1',
             projectId: 'project-1',
+            title: '新對話',
             status: 'active',
             bindingState: 'unbound',
             projectContextVersion: 1,
@@ -132,6 +166,18 @@ describe('workspace-aware M365 chat route', () => {
             .mockResolvedValueOnce({ id: 'user-message-1' })
             .mockResolvedValueOnce({ id: 'assistant-message-1' });
         mockStore.updateMessageDeliveryState.mockResolvedValue({ id: 'user-message-1' });
+        mockStore.updateConversationTitleIfPlaceholder.mockResolvedValue({
+            changed: true,
+            reason: 'updated',
+            conversation: {
+                id: 'conversation-1',
+                projectId: 'project-1',
+                title: '整理 OneDrive 專案檔案',
+                status: 'active',
+                bindingState: 'bound',
+                projectContextVersion: 1,
+            },
+        });
         mockStore.acknowledgeConversationProjectContext.mockResolvedValue({
             id: 'conversation-1',
             projectId: 'project-1',
@@ -178,6 +224,45 @@ describe('workspace-aware M365 chat route', () => {
         mockSkillPackageRegistry.listSkillPackages.mockReturnValue([]);
     });
 
+    test('renders real source links separately from generated file downloads', () => {
+        const rendered = registerChatRoutes.appendVisibleDownloadLinks('完成。', [
+            {
+                kind: 'source',
+                name: 'SharePoint 專案來源',
+                url: 'https://ecovistw.sharepoint.com/sites/project',
+            },
+            {
+                kind: 'download',
+                name: '報表.xlsx',
+                url: 'https://m365.cloud.microsoft/generated/report.xlsx',
+            },
+        ]);
+
+        expect(rendered).toContain('M365 產生的檔案：');
+        expect(rendered).toContain('[報表.xlsx](<https://m365.cloud.microsoft/generated/report.xlsx>)');
+        expect(rendered).toContain('參考來源連結：');
+        expect(rendered).toContain('[SharePoint 專案來源](<https://ecovistw.sharepoint.com/sites/project>)');
+    });
+
+    test('applies the complete original Golem automation preset from chat preferences', async () => {
+        const response = await fetch(`${baseUrl}/api/chat/preferences`, {
+            method: 'POST',
+            headers: { 'content-type': 'application/json' },
+            body: JSON.stringify({ automationMode: 'balanced' }),
+        });
+        const body = await response.json();
+
+        expect(response.status).toBe(200);
+        expect(body).toEqual(expect.objectContaining({
+            success: true,
+            automationMode: 'balanced',
+            approvalMode: 'manual',
+        }));
+        expect(mockUpdateEnv).toHaveBeenCalledWith(getAutomationModePreset('balanced'));
+        expect(reloadConfigSpy).toHaveBeenCalled();
+        expect(SecurityManager.currentLevel).toBe(1);
+    });
+
     async function postChat(body) {
         const response = await fetch(`${baseUrl}/api/chat`, {
             method: 'POST',
@@ -206,6 +291,7 @@ describe('workspace-aware M365 chat route', () => {
             expect(ctx.workspaceRoot).toBe('C:\\local\\m365-projects\\project-1');
             expect(ctx.m365ProjectWorkspaceService).toBe(mockProjectWorkspaceService);
             expect(ctx.toolRoutingQuery).toBe('Prepare a memo.');
+            expect(ctx.m365ResponseMode).toBe('auto');
             await ctx.onTransportStart();
             await ctx.onTransportAccepted();
             await ctx.onTransportComplete({ text: 'M365 answer' });
@@ -245,6 +331,104 @@ describe('workspace-aware M365 chat route', () => {
         expect(serverContext.broadcastLog).toHaveBeenCalledWith(expect.objectContaining({
             conversationId: 'conversation-1',
             transient: false,
+        }));
+    });
+
+    test('accepts Copilot title metadata for a placeholder conversation and broadcasts the rename', async () => {
+        mockHandleDashboardMessage.mockImplementation(async (ctx) => {
+            expect(ctx.workspaceConversationTitleRequested).toBe(true);
+            expect(ctx.textOverride).toContain('[USER_REQUEST]\n幫我整理 OneDrive 的專案資料夾\n[/USER_REQUEST]');
+            await ctx.onTransportComplete({ text: 'M365 answer' });
+            await ctx.onGolemConversationTitle({
+                conversationTitle: '整理 OneDrive 專案檔案',
+                isSystemFeedback: false,
+            });
+            await ctx.reply('M365 answer');
+        });
+
+        const result = await postChat({
+            golemId: 'golem_A',
+            projectId: 'project-1',
+            conversationId: 'conversation-1',
+            message: '幫我整理 OneDrive 的專案資料夾',
+        });
+
+        expect(result.response.status).toBe(200);
+        await waitFor(() => serverContext.m365DispatchLease === null);
+        expect(mockStore.updateConversationTitleIfPlaceholder).toHaveBeenCalledWith(
+            'conversation-1',
+            '整理 OneDrive 專案檔案'
+        );
+        expect(serverContext.broadcastLog).toHaveBeenCalledWith(expect.objectContaining({
+            type: 'conversation_title',
+            raw: '整理 OneDrive 專案檔案',
+            conversationId: 'conversation-1',
+            transient: true,
+        }));
+    });
+
+    test('does not ask for or apply an AI title after the user has named the conversation', async () => {
+        mockStore.getConversation.mockResolvedValue({
+            id: 'conversation-1',
+            projectId: 'project-1',
+            title: '使用者手動名稱',
+            status: 'active',
+            bindingState: 'bound',
+            projectContextVersion: 1,
+            remoteConversationId: 'remote-1',
+            remoteConversationUrl: 'https://m365.cloud.microsoft/chat/conversation/remote-1',
+        });
+        mockHandleDashboardMessage.mockImplementation(async (ctx) => {
+            expect(ctx.workspaceConversationTitleRequested).toBe(false);
+            await ctx.onGolemConversationTitle({
+                conversationTitle: 'Copilot 想改的名稱',
+                isSystemFeedback: false,
+            });
+            await ctx.onTransportComplete({ text: 'M365 answer' });
+            await ctx.reply('M365 answer');
+        });
+
+        const result = await postChat({
+            golemId: 'golem_A',
+            projectId: 'project-1',
+            conversationId: 'conversation-1',
+            message: '繼續',
+        });
+
+        expect(result.response.status).toBe(200);
+        await waitFor(() => serverContext.m365DispatchLease === null);
+        expect(mockStore.updateConversationTitleIfPlaceholder).not.toHaveBeenCalled();
+    });
+
+    test('expands an M365 prompt-pool shortcut for dispatch while preserving the user-visible text', async () => {
+        mockExpandPromptShortcutInput.mockReturnValueOnce({
+            changed: true,
+            text: '請整理本週工作，列出完成事項與下週風險。\n補充客戶 A。',
+            matched: { shortcut: '/weekly', shortcutKey: 'weekly' },
+        });
+        mockHandleDashboardMessage.mockImplementation(async (ctx) => {
+            expect(ctx.toolRoutingQuery).toBe('請整理本週工作，列出完成事項與下週風險。\n補充客戶 A。');
+            expect(ctx.textOverride).toContain('請整理本週工作，列出完成事項與下週風險。');
+            expect(ctx.textOverride).toContain('補充客戶 A。');
+            expect(ctx.m365PromptShortcutExpanded).toBe(true);
+            await ctx.onTransportComplete({ text: 'M365 answer' });
+            await ctx.reply('M365 answer');
+        });
+
+        const result = await postChat({
+            golemId: 'golem_A',
+            projectId: 'project-1',
+            conversationId: 'conversation-1',
+            message: '/weekly 補充客戶 A。',
+        });
+
+        expect(result.response.status).toBe(200);
+        await waitFor(() => serverContext.m365DispatchLease === null);
+        expect(mockStore.addMessage).toHaveBeenNthCalledWith(1, 'conversation-1', expect.objectContaining({
+            content: '/weekly 補充客戶 A。',
+        }));
+        expect(mockRecordM365PromptPoolUse).toHaveBeenCalledWith(expect.objectContaining({
+            shortcut: '/weekly',
         }));
     });
 
@@ -310,6 +494,7 @@ describe('workspace-aware M365 chat route', () => {
             description: 'Inspect selected project references',
             action: 'reference-files',
             enabled: true,
+            entry: 'index.js',
             indexPath: __filename,
         }]);
         mockHandleDashboardMessage.mockImplementation(async (ctx) => {
@@ -325,6 +510,7 @@ describe('workspace-aware M365 chat route', () => {
             expect(ctx.preferredMcpServers).toEqual(['demo-mcp']);
             expect(ctx.preferredSkillIds).toEqual(['reference-files']);
             expect(ctx.preferredSkillActions).toEqual(['reference-files']);
+            expect(ctx.m365ResponseMode).toBe('thoughtful');
             await ctx.onTransportComplete({ text: 'M365 answer' });
             await ctx.reply('M365 answer');
         });
@@ -346,6 +532,28 @@ describe('workspace-aware M365 chat route', () => {
             content: 'Use my selected context.',
         }));
         expect(mockReferenceFileService.read).toHaveBeenCalledWith('ref-1', expect.objectContaining({ maxChars: 6000 }));
+    });
+
+    test('marks a native response-mode failure as unsent without requiring reconciliation', async () => {
+        mockHandleDashboardMessage.mockImplementation(async (ctx) => {
+            const error = new Error('The native response mode was not confirmed.');
+            error.code = 'M365_RESPONSE_MODE_UNAVAILABLE';
+            await ctx.onTransportError(error);
+            await ctx.reply(`⚠️ ${error.message}`);
+        });
+
+        const result = await postChat({
+            golemId: 'golem_A',
+            projectId: 'project-1',
+            conversationId: 'conversation-1',
+            message: 'Use deep thinking.',
+            responseMode: 'thoughtful',
+        });
+
+        expect(result.response.status).toBe(200);
+        await waitFor(() => serverContext.m365DispatchLease === null);
+        expect(mockStore.updateMessageDeliveryState).toHaveBeenCalledWith('user-message-1', 'failed');
+        expect(mockMarkReconcile).not.toHaveBeenCalled();
     });
 
     test('refuses to send an indexed environment file into Microsoft 365 context', async () => {
@@ -396,6 +604,41 @@ describe('workspace-aware M365 chat route', () => {
             source: 'system',
             deliveryState: 'failed',
         }));
+    });
+
+    test('does not overwrite the confirmed user turn when an internal Observation is blocked before dispatch', async () => {
+        mockHandleDashboardMessage.mockImplementation(async (ctx) => {
+            const primaryMeta = { isSystemFeedback: false };
+            await ctx.onTransportStart(primaryMeta);
+            await ctx.onTransportAccepted(primaryMeta);
+            await ctx.onTransportComplete({ text: 'First M365 answer' }, primaryMeta);
+            await ctx.reply('First M365 answer');
+
+            const observationMeta = {
+                isSystemFeedback: true,
+                workspaceRunId: 'run-1',
+                workspaceStepId: 'step-1',
+            };
+            await ctx.onTransportStart(observationMeta);
+            const error = new Error('Conversation requires reconciliation.');
+            error.code = 'M365_RECONCILIATION_REQUIRED';
+            await ctx.onTransportError(error, observationMeta);
+            await ctx.reply(`⚠️ ${error.message}`);
+        });
+
+        const result = await postChat({
+            golemId: 'golem_A',
+            projectId: 'project-1',
+            conversationId: 'conversation-1',
+            message: 'Run a multi-step task.',
+        });
+
+        expect(result.response.status).toBe(200);
+        await waitFor(() => serverContext.m365DispatchLease === null);
+        expect(mockStore.updateMessageDeliveryState).toHaveBeenCalledWith('user-message-1', 'confirmed');
+        expect(mockStore.updateMessageDeliveryState).not.toHaveBeenCalledWith('user-message-1', 'failed');
+        expect(mockStore.updateMessageDeliveryState).not.toHaveBeenCalledWith('user-message-1', 'ambiguous');
+        expect(mockMarkReconcile).not.toHaveBeenCalled();
     });
 
     test('keeps a confirmed slow response recoverable without locking the conversation', async () => {

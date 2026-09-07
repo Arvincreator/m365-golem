@@ -11,6 +11,8 @@ const RETIRED_M365_API_PREFIXES = Object.freeze([
     '/api/stocks',
     '/api/crypto',
     '/api/diary',
+    '/api/memory',
+    '/api/memory-firewall',
 ]);
 
 function isRetiredM365ApiRequest(pathValue) {

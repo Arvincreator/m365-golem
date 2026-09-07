@@ -50,6 +50,15 @@ describe('ToolUsePolicy', () => {
         }));
     });
 
+    test('treats a OneDrive access question as a capability probe', () => {
+        const policy = new ToolUsePolicy();
+
+        expect(policy.classifyRequest('你可以看到我的 OneDrive 檔案嗎？')).toEqual(expect.objectContaining({
+            capabilityProbe: true,
+            shouldRoute: true,
+        }));
+    });
+
     test('allows an accepted GOLEM_PLAN to continue from its bound host Observation', () => {
         const rules = new ToolUsePolicy().buildRules().join('\n');
 

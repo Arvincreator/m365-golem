@@ -1,8 +1,7 @@
-const { execSync } = require('child_process');
+const { execFileSync } = require('child_process');
 const path = require('path');
 
 function runTest(env) {
-    const envStr = Object.entries(env).map(([k, v]) => `${k}=${v}`).join(' ');
     const code = `
         const config = require('./src/config/index.js');
         console.log(JSON.stringify({
@@ -11,8 +10,12 @@ function runTest(env) {
             memoryBaseDir: config.MEMORY_BASE_DIR
         }));
     `;
-    const output = execSync(`${envStr} node -e "${code.replace(/"/g, '\\"')}"`, { cwd: path.resolve(__dirname, '..') });
-    return JSON.parse(output.toString());
+    const output = execFileSync(process.execPath, ['-e', code], {
+        cwd: path.resolve(__dirname, '..'),
+        env: { ...process.env, ...env },
+        encoding: 'utf8',
+    });
+    return JSON.parse(output);
 }
 
 describe('Profile Configuration Verification (Clean Process)', () => {

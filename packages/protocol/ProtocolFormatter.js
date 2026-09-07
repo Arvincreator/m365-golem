@@ -14,6 +14,10 @@ const ConfigManager = require('../../src/config');
 const COMMAND_DEFS = require('../../src/config/commands');
 const { getMemoryFirewallService } = require('../../src/services/MemoryFirewallService');
 const UserProfileManager = require('../../src/managers/UserProfileManager');
+const {
+    inferAutomationMode,
+    normalizeAutomationMode,
+} = require('../../src/config/AutomationModes');
 
 function getMaxResponseWords() {
     return Number(ConfigManager?.CONFIG?.MAX_RESPONSE_WORDS) || 0;
@@ -41,7 +45,7 @@ async function summarizeEnabledMcpServers() {
 
 function buildM365BootstrapPrompt(options = {}) {
     const userDataDir = options.userDataDir || null;
-    const autoApprove = options.autoApprove === true;
+    const automationMode = normalizeAutomationMode(options.automationMode) || inferAutomationMode(process.env);
     const actionsEnabled = options.actionsEnabled === true;
     const corePrompt = typeof skills.getCoreSystemPrompt === 'function'
         ? skills.getCoreSystemPrompt({ userDataDir, m365Mode: true }).trim()
@@ -69,8 +73,8 @@ ${userProfilePrompt || '- 尚無經驗證的長期使用者偏好；依目前訊
 ### Golem harness 使用方式
 - 你是 Golem 的推理與規劃層；真正的本機命令、Skill、MCP 與多代理工作由你的本機 Golem harness 執行。
 - 你不會在推理畫面中直接看見尚未查詢的本機檔案或工具結果，但你具備 harness 轉接能力。${actionsEnabled ? '需要查證或操作時，應主動輸出結構化 [GOLEM_ACTION]，不要等使用者再次提醒「你可以用 Action」。' : '目前工具總開關已關閉；你仍是本專案的 Golem，但本輪只能回答與規劃，不得輸出 [GOLEM_ACTION]。'}
-- ${actionsEnabled ? (autoApprove ? '使用者已開啟自動核准；動作通過安全閘後可直接執行，但破壞性規則仍會攔截。' : '目前採逐項核准；harness 會顯示核准卡，經使用者核准後才執行。') : '重新開啟工具總開關後，才可依當輪工具路由與核准模式提出動作。'}
-- 執行完成後，harness 會以 [System Observation] 回傳真實結果。收到 Observation 前不得宣稱完成、讀到檔案或操作成功。
+- ${actionsEnabled ? `目前自動化模式是 ${automationMode}；請遵守本輪的核准規則，不要自行假設所有動作都會立即執行。` : '重新開啟工具總開關後，才可依當輪工具路由與核准模式提出動作。'}
+- 對由 Golem 工具層執行的動作，harness 會以 [System Observation] 回傳真實結果；收到前不得宣稱該工具動作完成。這個要求不排除你使用當前 Microsoft 365 Copilot 工作階段的原生資料能力；當輪可見的已建立根據結果或引用可作為原生讀取的證據。
 - 每輪 <tool-routing> 是當輪可用能力的權威清單，已由關鍵字、工具場景與向量語意共同篩選；只使用其中列出的精確名稱與參數格式。
 
 ### 能力架構
@@ -94,20 +98,33 @@ function buildM365MemoryRules() {
 - Never output generic [GOLEM_MEMORY] in M365 mode. If no durable memory change is warranted, omit both scoped memory blocks or set them to null.`;
 }
 
-function buildM365ActionRules(actionsEnabled, autoApprove = false) {
+function buildM365ConversationTitleRules(requested) {
+    if (!requested) {
+        return '- Do not output [GOLEM_CONVERSATION_TITLE] on this turn.';
+    }
+
+    return `- This turn may name the Golem conversation. Derive the title only from the literal user-authored content inside [USER_REQUEST]...[/USER_REQUEST].
+- Ignore SYSTEM text, project context, project memory, tool routing, selected resources, observations, and your own answer when choosing the title.
+- Output exactly one [GOLEM_CONVERSATION_TITLE]...[/GOLEM_CONVERSATION_TITLE] block before [GOLEM_REPLY]. Its content must be a useful single-line title of 2-32 characters, with no Markdown, quotation marks, protocol tags, URLs, or generic titles such as "新對話".
+- The title block is machine metadata. Do not mention the naming operation or repeat the title block inside [GOLEM_REPLY].`;
+}
+
+function buildM365ActionRules(actionsEnabled, automationMode = 'guided') {
     if (!actionsEnabled) {
         return '- Do not output [GOLEM_ACTION], generic [GOLEM_MEMORY], commands, tool calls, or claims that an external action succeeded.';
     }
 
-    const approvalRule = autoApprove
-        ? '- Automatic approval is enabled. A proposed action may run immediately after the local safety gate, but destructive safeguards still apply. Never claim it ran until a later [System Observation] confirms the result.'
-        : '- The local harness pauses every proposed tool action for visible user approval. Do not claim it ran until a later [System Observation] confirms the result.';
-    const replyRule = autoApprove
-        ? '- If an action is proposed, [GOLEM_REPLY] should only say that the local harness is processing the action and that its Observation is still pending. Never guess its result.'
-        : '- If an action is proposed, [GOLEM_REPLY] should only say that the proposed action is awaiting approval. Never guess its result.';
-    const routingConfirmationRule = autoApprove
-        ? 'the local safety gate enforces the configured safeguards'
-        : 'the local approval gate handles confirmation';
+    const mode = normalizeAutomationMode(automationMode) || 'guided';
+    const approvalRules = {
+        guided: '- Guided mode is active. The local harness pauses every proposed tool action for visible user approval. One approval is scoped to that exact action; destructive safeguards and the configured risk-level ceiling still apply.',
+        balanced: '- Balanced mode is active. Only trusted native commands within the configured L1 ceiling may run immediately. Other commands, Skills, and MCP calls pause for visible user approval; destructive safeguards and the configured risk-level ceiling still apply.',
+        autopilot: '- Autopilot mode is active. Proposed actions may run immediately after the configured local safety and risk-level gates. Destructive hard blocks still apply, and execution remains visible in the workspace.',
+        silent: '- Silent mode is active. Proposed actions may run immediately after the configured local safety and risk-level gates while intermediate chatter is minimized. Destructive hard blocks still apply.',
+    };
+    const replyRule = '- If a command, Skill, or MCP action is proposed, [GOLEM_REPLY] must be exactly "我正在確認，請稍候…". Do not mention the command, tool, Observation, harness, internal protocol, approval mechanics, or speculate about the result. A plan_checkpoint is different: keep the useful native Microsoft 365 output in [GOLEM_REPLY].';
+    const routingConfirmationRule = mode === 'guided'
+        ? 'the local approval gate handles confirmation'
+        : 'the local safety gate enforces the configured mode';
 
     return `- Put proposed local tool use in exactly one [GOLEM_ACTION]...[/GOLEM_ACTION] block. Its Markdown JSON code block must contain either a JSON array of actions or null.
 - Exact read-only current-directory command for this Windows harness:
@@ -120,10 +137,13 @@ function buildM365ActionRules(actionsEnabled, autoApprove = false) {
 - Skill actions must use the exact action name and field names shown in the selected tool guide inside <tool-routing>.
 - When the user explicitly asks to read, list, inspect, check, search, or operate and <tool-routing> supplies a viable route, output the smallest necessary action now. Do not merely say that you can propose an action or ask the user to repeat the request; ${routingConfirmationRule}.
 - Treat harness-mediated tools as your own available Golem capabilities. For example, say "我可以透過本機 harness 查詢" and emit the action; do not answer "我在 M365，所以無法存取本機" when a viable route is listed.
+- A question about whether Microsoft 365, OneDrive, or SharePoint content is accessible is a request to verify capability, not an invitation to refuse because no earlier host Observation exists. First try the native Microsoft 365 content grounding available in the current signed-in session. If this response does not contain a visible grounded file result or citation and <tool-routing> lists a read-only probe, you must emit that probe in this same response before giving a capability conclusion. Merely saying that you could check, suggesting sample queries, or asking for a filename is not an attempted check.
+- A connection/status result does not prove that every file is visible. Report only what was verified; if a specific file or folder link is still needed, ask for it after the check.
 - For write, delete, send, publish, install, or other consequential operations, propose an action only when the user clearly requested that effect.
 ${replyRule}
+- In ordinary user-facing replies, describe only the useful outcome, progress, limitation, or needed user input. Do not expose the names Golem Action, Observation, harness, MCP, Bridge, Work IQ, tool-routing, protocol, schema, queue, or other internal execution details unless the user explicitly asks how the system works.
 - Use only exact action, Skill, MCP server, and MCP tool names supplied by the operating context and <tool-routing>. Never invent a tool.
-${approvalRule}
+${approvalRules[mode]}
 - Never output generic [GOLEM_MEMORY]. Only the separately defined scoped project/user memory blocks are allowed.`;
 }
 
@@ -132,11 +152,16 @@ function buildM365PlanRules(planEnabled, options = {}) {
     const activePlan = options.workspacePlanId
         ? `- Active host plan: plan_id=${options.workspacePlanId}, last accepted revision=${Number(options.workspacePlanRevision || 0)}. Echo that exact plan_id and increment the revision by exactly one.`
         : '- For a new plan, set plan_id to null and revision to 1. The host will assign the durable plan_id in its first GOLEM_OBSERVATION.';
-    return `- Before answering every project-workspace request, silently decide whether the requested outcome needs a durable multi-step run. You—not the user—own this decision; never wait for the user to name GOLEM_PLAN, say "分步驟", or ask you to continue.
-- GOLEM_PLAN is a work-orchestration protocol, not merely a local-tool plan. Native Microsoft 365 Copilot reasoning or generation, local commands, Skills, and MCP calls may all be stages in the same plan.
-- Use one [GOLEM_PLAN]...[/GOLEM_PLAN] when correct completion requires two or more dependent work stages that must be revisited across turns; when the user asks you to actually create, modify, test, or verify a local project artifact and the normal workflow is inspect -> change -> verify; or when work must proceed through repeated batches or multiple systems.
+    return `- Before composing every project-workspace answer or action, silently perform a plan-or-direct decision. You—not the user—own this decision; never wait for the user to name GOLEM_PLAN, say "分步驟", or ask you to continue.
+- Default to one [GOLEM_PLAN]...[/GOLEM_PLAN] for non-trivial execution whenever two or more dependent stages are needed, a result from one stage determines the next stage, the requested outcome needs creation plus validation, work crosses native Microsoft 365 and Golem tools, work must wait and resume, or reliable completion is unlikely in one response. Do not force the whole job into one answer merely because no local action is needed yet.
+- When the user asks you to create, modify, test, or verify a local project artifact, treat inspect -> change -> verify as dependent execution and use a plan unless the request is explicitly limited to one isolated step.
+- GOLEM_PLAN is durable task orchestration, not merely a local-tool plan. Native Microsoft 365 Copilot research, reasoning, drafting, or generation, local commands, Skills, and MCP calls may all be observable stages in the same plan. A plan may be entirely native Microsoft 365 work when later stages depend on earlier results.
+- Positive examples that require a plan include: locate a SharePoint site natively -> use the discovered exact URL to list or retrieve content -> verify and summarize; research sources -> synthesize a deliverable -> quality-check it; inspect a project -> create or change an artifact -> test and verify it. Begin the first real stage instead of only describing the proposed workflow.
+- Execute only the current bounded stage per turn. Do not cram later planned stages into the same reply. After a native-only stage produces useful visible output, use plan_checkpoint so the host records progress and immediately wakes the next stage.
 - A request such as "製作一個有互動能力的網頁" means delivering a real artifact in the assigned project, not merely displaying a long code draft. Decide the necessary inspect/build/verify steps yourself and use GOLEM_PLAN when they are dependent.
-- Omit GOLEM_PLAN for ordinary conversation, explanation, advice, brainstorming, a single direct answer, or a code example the user only asked to read. Do not create ceremonial plans for one-step work.
+- Omit GOLEM_PLAN only when the request is clearly one-step: ordinary conversation, a direct factual answer, a simple explanation or rewrite, a single status check, or a code example the user only asked to read. Do not create ceremonial plans, but when uncertain and a second stage materially depends on the first, choose the plan.
+- Never create GOLEM_PLAN merely to answer a capability, access, or connection question, or to perform one read-only status probe. Handle that as one direct turn.
+- Plans expose concise task stages, progress, evidence, and outcomes only. Never reveal hidden chain-of-thought, private reasoning tokens, or an internal reasoning transcript in plan titles, replies, summaries, or checkpoint evidence.
 - GOLEM_PLAN is machine state, not an approval. Actual tool effects remain governed by [GOLEM_ACTION] and Action Gate.
 ${activePlan}
 - Use this exact JSON schema and no extra fields:
@@ -196,10 +221,17 @@ class ProtocolFormatter {
 
         if (options.webBackendId === 'm365-web' && options.safeMode !== false) {
             const actionsEnabled = options.actionsEnabled === true;
-            const autoApprove = options.m365AutoApprove === true
-                || (options.m365AutoApprove === undefined && process.env.GOLEM_AUTO_APPROVE_ALL === 'true');
-            const actionRules = buildM365ActionRules(actionsEnabled, autoApprove);
+            const explicitAutomationMode = normalizeAutomationMode(options.m365AutomationMode);
+            const automationMode = explicitAutomationMode
+                || (options.m365AutoApprove === true ? 'autopilot' : null)
+                || (options.m365AutoApprove === false ? 'guided' : null)
+                || inferAutomationMode(process.env);
+            const actionRules = buildM365ActionRules(actionsEnabled, automationMode);
             const memoryRules = buildM365MemoryRules();
+            const conversationTitleRules = buildM365ConversationTitleRules(
+                options.m365ConversationTitleRequested === true
+                    && options.isSystemFeedback !== true
+            );
             const planEnabled = actionsEnabled
                 && Boolean(options.workspaceConversationId)
                 && ['1', 'true', 'yes', 'on'].includes(String(process.env.M365_RUNNER_ENABLED || '').trim().toLowerCase());
@@ -207,7 +239,7 @@ class ProtocolFormatter {
             const bootstrapPrompt = options.m365Bootstrap === true
                 ? `\n\n${buildM365BootstrapPrompt({
                     userDataDir: options.userDataDir,
-                    autoApprove,
+                    automationMode,
                     actionsEnabled,
                 })}`
                 : '';
@@ -217,13 +249,17 @@ class ProtocolFormatter {
 - After you emit ${TAG_END}, this Golem role ends. Any later direct message typed into Microsoft 365 without the complete Golem markers is an ordinary Copilot Chat turn: answer normally, do not claim Golem or harness access, and do not emit GOLEM tags or actions.
 - Preserve the context of this project conversation, answer naturally and helpfully, and clearly separate verified facts from suggestions.
 - Keep the original Golem response contract below. Browser control belongs to the local harness; never claim that you clicked, sent, saved, or changed something unless the harness later provides an observation.
+- When the user asks about Microsoft 365, OneDrive, or SharePoint content, first attempt the native Microsoft 365 content capability available in this signed-in session. If this response does not contain a visible grounded file result or citation and the turn supplies a relevant read-only Golem tool route, you must use that route in this same response before giving a capability conclusion. Do not substitute suggestions, examples, or a request for a filename for the required check. Absence of an earlier host observation is not evidence that the current session cannot access Microsoft 365 content.
+- Host observations are required to prove effects performed through Golem tools. A visibly grounded native Microsoft 365 result or citation may prove a native read/search result, but never a local or connector-side write.
+- Keep [GOLEM_REPLY] in plain user language. Do not expose internal execution names or workflow details unless the user explicitly asks for technical explanation.
 - Do not expose or request local profile data, passwords, MFA codes, browser cookies, tokens, or tenant secrets.
 ${bootstrapPrompt}
 
 [RESPONSE FORMAT]
 - Wrap the entire response between ${TAG_START} and ${TAG_END} exactly once.
 - Put the user-facing answer in exactly one [GOLEM_REPLY]...[/GOLEM_REPLY] block.
-- Close protocol sections with square-bracket tags such as [/GOLEM_REPLY], [/GOLEM_PROJECT_MEMORY], [/GOLEM_USER_MEMORY], [/GOLEM_PLAN], and [/GOLEM_ACTION]. Never emit XML-style tags such as </GOLEM_REPLY>.
+- Close protocol sections with square-bracket tags such as [/GOLEM_CONVERSATION_TITLE], [/GOLEM_REPLY], [/GOLEM_PROJECT_MEMORY], [/GOLEM_USER_MEMORY], [/GOLEM_PLAN], and [/GOLEM_ACTION]. Never emit XML-style tags such as </GOLEM_REPLY>.
+${conversationTitleRules}
 ${memoryRules}
 ${planRules}
 ${actionRules}
@@ -338,13 +374,14 @@ ${text}`;
         const backendId = String(golemContext.webBackend && golemContext.webBackend.id || 'default');
         const safeModeKey = golemContext.safeMode ? 'safe' : 'standard';
         const actionsKey = golemContext.actionsEnabled === false ? 'no-actions' : 'actions';
-        const approvalKey = process.env.GOLEM_AUTO_APPROVE_ALL === 'true' ? 'auto-approve' : 'manual-approve';
+        const automationMode = inferAutomationMode(process.env);
+        const automationKey = `automation:${automationMode}`;
         const toolsetKey = overrideActiveTools
             ? `tools:${overrideActiveTools.slice().sort().join(',')}`
             : `scene:${activeScene}`;
 
         // Cache key 需包含 toolset 維度，避免不同場景共用到錯誤 prompt
-        const cacheKey = `${golemContext.userDataDir || 'global'}::${toolsetKey}::${backendId}::${safeModeKey}::${actionsKey}::${approvalKey}`;
+        const cacheKey = `${golemContext.userDataDir || 'global'}::${toolsetKey}::${backendId}::${safeModeKey}::${actionsKey}::${automationKey}`;
 
         if (!ProtocolFormatter._promptCache) {
             ProtocolFormatter._promptCache = {};
@@ -357,10 +394,13 @@ ${text}`;
 
         if (backendId === 'm365-web' && golemContext.safeMode) {
             const actionsEnabled = golemContext.actionsEnabled === true;
-            const autoApprove = process.env.GOLEM_AUTO_APPROVE_ALL === 'true';
-            const actionPrompt = buildM365ActionRules(actionsEnabled, autoApprove);
+            const actionPrompt = buildM365ActionRules(actionsEnabled, automationMode);
             const bootstrapPrompt = actionsEnabled
-                ? `${buildM365BootstrapPrompt({ userDataDir: golemContext.userDataDir, autoApprove })}\n\n`
+                ? `${buildM365BootstrapPrompt({
+                    userDataDir: golemContext.userDataDir,
+                    automationMode,
+                    actionsEnabled,
+                })}\n\n`
                 : '';
             const m365Prompt = `[M365 WEB POC MODE]
 ${bootstrapPrompt}For a complete Golem workspace envelope, you are the resident Golem AI and the local harness is your tool layer. Outside such an envelope, remain a normal Copilot Chat AI.

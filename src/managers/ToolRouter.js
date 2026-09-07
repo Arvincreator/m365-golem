@@ -12,6 +12,9 @@ const EXPLICIT_REMOTE_ARTIFACT_TARGET_RE = /(?:在|到|於|透過|使用).{0,8}(
 const EXTERNAL_SYSTEM_RE = /(@gmail|@google|calendar|gmail|drive|onedrive|sharepoint|microsoft\s*365|\bm365\b|mcp|devtools|notion|slack|teams|github[^a-z]|telegram|discord|瀏覽器自動化|外部服務|第三方)/i;
 const M365_DATA_RE = /(sharepoint|one\s*drive|onedrive|microsoft\s*365|\bm365\b|\.sharepoint\.(?:com|us|de|cn)|sharepoint-mil\.us)/i;
 const M365_SEARCH_RE = /(搜尋|查找|全文搜尋|全域搜尋|找出.{0,24}(?:檔案|文件)|\bsearch\b|\bfind\b.{0,24}\b(?:files?|documents?)\b)/i;
+const M365_FOLDER_CONTENT_RE = /(?:(?:列出|列舉|查看|檢視|取得|獲取|讀取|盤點).{0,24}(?:sharepoint|one\s*drive|onedrive|資料夾|folder).{0,24}(?:內容|檔案|文件|清單|列表|根目錄)|(?:sharepoint|one\s*drive|onedrive|資料夾|folder).{0,24}(?:內容|檔案|文件|清單|列表|根目錄).{0,24}(?:列出|列舉|查看|檢視|取得|獲取|讀取|盤點))/i;
+const M365_FILE_CONTENT_RE = /(?:(?:取得|獲取|讀取|下載|開啟|分析).{0,24}(?:sharepoint|one\s*drive|onedrive|檔案|文件).{0,16}(?:內容|全文|資料)|(?:sharepoint|one\s*drive|onedrive|檔案|文件).{0,24}(?:內容|全文|資料).{0,16}(?:取得|獲取|讀取|下載|開啟|分析))/i;
+const M365_CAPABILITY_PROBE_RE = /(?:(?:可以|能(?:不能)?|是否能|看(?:得)?到|讀(?:得)?到|存取|連線|使用).{0,32}(?:sharepoint|one\s*drive|onedrive|microsoft\s*365|\bm365\b)|(?:sharepoint|one\s*drive|onedrive|microsoft\s*365|\bm365\b).{0,32}(?:可以|能|可用|看(?:得)?到|讀(?:得)?到|存取|連線)|(?:can\s+you|are\s+you\s+able\s+to|do\s+you\s+have\s+access\s+to).{0,32}(?:sharepoint|one\s*drive|onedrive|microsoft\s*365|\bm365\b))/i;
 const STOPWORDS = new Set([
     'the', 'and', 'for', 'with', 'from', 'this', 'that', 'what', 'when', 'where', 'how',
     '你', '我', '他', '她', '它', '我們', '你們', '請', '幫我', '可以', '一下', '這個', '那個',
@@ -52,27 +55,23 @@ function inferIntentBoosts(text) {
     add(/(browser|chrome|devtools|網頁|頁面|點擊|輸入|表單|console|network|lighthouse|截圖|瀏覽器)/i, ['chrome-devtools']);
     add(/(搜尋引擎|meta search|metasearch|網路搜尋|公開資料|查資料|duckduckgo|html\.duckduckgo)/i, ['duckduckgo-search', 'chrome-devtools']);
     add(/(搜尋後|深入查看|深入網頁|繼續查看這個網頁|deep dive|follow-up crawl)/i, ['duckduckgo-devtools-bridge', 'duckduckgo-search', 'chrome-devtools']);
-    add(/(git|commit|branch|diff|pull request|pr|版本|分支)/i, ['git']);
-    add(/(記憶|memory|回憶|以前|之前|歷史|找對話|搜尋對話)/i, ['memory', 'session-search']);
-    add(/(排程|提醒|schedule|定時|每天|明天|下週|cron)/i, ['chronos', 'collab-calendar']);
+    add(/(排程|提醒|schedule|定時|每天|明天|下週|cron)/i, ['collab-calendar']);
     add(/(行程|行事曆|日曆|calendar|今天有什麼|明天有什麼|這週|下週|新增行程|加入行程|排行程|有什麼約|約了什麼|協作日曆)/i, ['collab-calendar']);
-    add(/(圖片|影像|畫圖|生成圖|image|prompt)/i, ['image-prompt']);
-    add(/(youtube|影片|字幕)/i, ['youtube']);
-    add(/(notebooklm|研究包|study pack|mind map|audio overview|slide deck|flashcards|quiz)/i, ['notebooklm-studio']);
-    add(/(spotify|音樂|播放清單)/i, ['spotify']);
-    add(/(代理|agent|multi-agent|協作|委派|delegate)/i, ['multi-agent', 'delegate-task']);
     add(/(檔案|附件|參考資料|reference)/i, ['reference-files']);
 
     const isM365DataTask = M365_DATA_RE.test(t);
     if (isM365DataTask) {
+        add(M365_CAPABILITY_PROBE_RE, ['m365-session-bridge/m365_bridge_status']);
         add(/(狀態|連線|在線|status|connect)/i, ['m365-session-bridge/m365_bridge_status']);
         add(/(列出|列舉|查看.*資料夾|資料夾.*檔案|有哪些檔案|folder.*(?:list|content)|list.*folder|enumerate)/i, ['m365-session-bridge/m365_list_folder']);
+        add(M365_FOLDER_CONTENT_RE, ['m365-session-bridge/m365_list_folder']);
+        add(M365_FILE_CONTENT_RE, ['m365-session-bridge/m365_list_folder', 'm365-session-bridge/m365_download_file']);
         add(/(下載|download)/i, ['m365-session-bridge/m365_download_file']);
         add(/(上傳|upload)/i, ['m365-session-bridge/m365_upload_file']);
         add(/(複製|copy)/i, ['m365-session-bridge/m365_copy_file']);
         add(/(移動|move)/i, ['m365-session-bridge/m365_move_file']);
         add(/(重新命名|改名|rename)/i, ['m365-session-bridge/m365_rename_file', 'm365-session-bridge/m365_rename_folder']);
-        add(/(建立|新增|create).{0,8}(資料夾|folder)/i, ['m365-session-bridge/m365_create_folder']);
+        add(/(?:(建立|新增|create).{0,16}(資料夾|folder)|(資料夾|folder).{0,24}(建立|新增|create))/i, ['m365-session-bridge/m365_create_folder']);
         add(/(版本紀錄|版本歷程|歷史版本|version history|list.*version)/i, ['m365-session-bridge/m365_list_file_versions']);
         add(/(還原|restore).{0,8}(版本|version)/i, ['m365-session-bridge/m365_restore_file_version']);
         add(/(簽出|check.?out)/i, ['m365-session-bridge/m365_checkout_file']);
@@ -174,8 +173,14 @@ function isLikelyCommandTask(query) {
 
 function loadCoreSlashCommands() {
     try {
-        const defs = require('../config/commands');
-        const keep = new Set(['/new', '/new_memory', '/skills', '/learn', '/install', '/toolset', '/search', '/project']);
+        const ConfigManager = require('../config');
+        const isM365 = ConfigManager.CONFIG.GOLEM_BACKEND === 'm365-web';
+        const defs = isM365
+            ? require('../config/m365Commands')
+            : require('../config/commands');
+        const keep = isM365
+            ? new Set(['/new'])
+            : new Set(['/new', '/new_memory', '/skills', '/learn', '/install', '/toolset', '/search', '/project']);
         return (Array.isArray(defs) ? defs : [])
             .filter((item) => item && keep.has(String(item.command || '').trim()))
             .map((item) => ({
@@ -419,7 +424,9 @@ class ToolRouter {
         if (result.connectorBoundary?.code === 'm365_exact_url_only') {
             lines.push('M365 connector boundary:');
             lines.push(`- ${result.connectorBoundary.message}`);
-            lines.push('- Do not emit a GOLEM_ACTION for tenant-wide or semantic M365 search with this connector. Explain the limitation and ask for an exact SharePoint/OneDrive URL, or state that a separate officially authorized connector/API is required.');
+            lines.push('- This is only a boundary of the URL-based connector; it is not evidence that the current Microsoft 365 Copilot session lacks native access. First try the native Microsoft 365 file/content grounding available in this signed-in session.');
+            lines.push('- Do not emit a GOLEM_ACTION for tenant-wide or semantic M365 search with this connector. If native grounding returns a visible result or citation, answer from that evidence. Only if the native attempt cannot produce a grounded result, ask the user in plain language for the specific SharePoint/OneDrive file or folder link.');
+            lines.push('- Keep [GOLEM_REPLY] user-friendly. Do not expose the names Work IQ, connector, Bridge, MCP, Action, Observation, tool-routing, harness, protocol, schema, or other internal execution details unless the user explicitly asks how the system works.');
             lines.push('</tool-routing>');
             return lines.join('\n');
         }
@@ -459,6 +466,22 @@ class ToolRouter {
                 lines.push(`- mcp_call server="${tool.server}" tool="${tool.name}": ${tool.description || 'no description'}${schemaSummary ? ` (${schemaSummary})` : ''}${policy}`);
                 lines.push(`  Use this exact action shape:\n  ${compactJson(tool.example)}`);
             }
+        }
+
+        if (result.mcpTools.some((tool) => tool.server === 'm365-session-bridge' && tool.name === 'm365_bridge_status')) {
+            lines.push('M365 access-probe rule:');
+            lines.push('- A question about whether OneDrive or SharePoint files are accessible is a request to check, not a reason to refuse based on missing prior tool results. First try the native Microsoft 365 file/content grounding available in this signed-in Copilot session.');
+            lines.push('- If this response does not contain a visible grounded file result or citation, you must emit the listed read-only status action in this same response. Do not replace the check with suggestions, example queries, or a request for a filename, and do not give an access conclusion before the check.');
+            lines.push('- A successful status result proves only that assistance is available; it does not prove that every file is visible. If a specific link is required, ask for that link in plain language after the check.');
+            lines.push('- Keep [GOLEM_REPLY] user-friendly. Do not expose the names Work IQ, Bridge, MCP, Action, Observation, tool-routing, harness, protocol, schema, or other internal execution details unless the user explicitly asks how the system works.');
+        }
+
+        if (result.mcpTools.some((tool) => tool.server === 'm365-session-bridge' && ['m365_list_folder', 'm365_download_file'].includes(tool.name))) {
+            lines.push('M365 exact-target handoff rule:');
+            lines.push('- These tools are available in this Golem workspace. Do not say that the local Microsoft 365 file connection or its listing/download capability is unavailable when the tools are listed here.');
+            lines.push('- They require an exact SharePoint/OneDrive folder or file URL. If the user asks for a multi-stage outcome and the exact URL is not known yet, use a durable plan: first use native Microsoft 365 grounding to locate and visibly cite the target, record that native stage with plan_checkpoint, then use the listed exact-target tool in the next plan turn.');
+            lines.push('- m365_list_folder returns the direct entries of one exact folder. m365_download_file retrieves one exact file for a later local inspection step. Neither tool is a tenant-wide semantic search engine.');
+            lines.push('- Do not stop after explaining this sequence. Start the first real stage now, and keep [GOLEM_REPLY] in plain user language without internal tool or protocol names.');
         }
 
         lines.push('Decision rules:');

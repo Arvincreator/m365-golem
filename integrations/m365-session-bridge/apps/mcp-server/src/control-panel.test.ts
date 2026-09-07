@@ -51,6 +51,7 @@ test("control panel is loopback-only and edits policy lists through validated en
     assert.match(html, /白名單網域/);
     assert.match(html, /黑名單網域/);
     assert.match(html, /永遠允許/);
+    assert.match(html, /允許上傳的本機專案資料夾/);
 
     const initial = await fetch(`http://127.0.0.1:${port}/api/policy`);
     assert.equal(initial.status, 200);
@@ -111,6 +112,22 @@ test("control panel is loopback-only and edits policy lists through validated en
       body: JSON.stringify({ list: "allowedHosts", value: "evil.com" }),
     });
     assert.equal(rejectedHost.status, 400);
+
+    const allowedProjectPath = path.join(os.tmpdir(), "m365-project-upload");
+    const addedLocalPath = await fetch(`http://127.0.0.1:${port}/api/entries`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: `http://127.0.0.1:${port}` },
+      body: JSON.stringify({ list: "allowedLocalPaths", value: allowedProjectPath }),
+    });
+    assert.equal(addedLocalPath.status, 200);
+    assert.ok((await addedLocalPath.json() as { allowedLocalPaths: string[] }).allowedLocalPaths.includes(allowedProjectPath));
+
+    const rejectedRelativePath = await fetch(`http://127.0.0.1:${port}/api/entries`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: `http://127.0.0.1:${port}` },
+      body: JSON.stringify({ list: "allowedLocalPaths", value: "relative-project" }),
+    });
+    assert.equal(rejectedRelativePath.status, 400);
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     if (previousPolicy === undefined) delete process.env.M365_BRIDGE_POLICY_PATH;

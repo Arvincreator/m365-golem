@@ -10,6 +10,7 @@ import {
     Loader2,
     MonitorUp,
     RefreshCw,
+    Server,
     ShieldCheck,
 } from "lucide-react";
 import { apiGet, apiPost } from "@/lib/api-client";
@@ -21,6 +22,9 @@ type SystemStatus = {
     hasGolems?: boolean;
     liveCount?: number;
 };
+
+type McpServer = { name: string; enabled?: boolean; connected?: boolean; description?: string };
+type LogInfo = { retention?: { maxFileSizeMb: number; retentionDays: number; maxArchiveFiles: number; maxArchiveTotalSizeMb: number } };
 
 function StatusCard({
     icon: Icon,
@@ -53,6 +57,8 @@ function StatusCard({
 export default function M365SettingsPage() {
     const [workspace, setWorkspace] = useState<M365WorkspaceStatus | null>(null);
     const [system, setSystem] = useState<SystemStatus | null>(null);
+    const [mcpServers, setMcpServers] = useState<McpServer[]>([]);
+    const [logInfo, setLogInfo] = useState<LogInfo | null>(null);
     const [loading, setLoading] = useState(true);
     const [starting, setStarting] = useState(false);
     const [message, setMessage] = useState("");
@@ -61,12 +67,16 @@ export default function M365SettingsPage() {
     const refresh = useCallback(async () => {
         setError("");
         try {
-            const [workspaceData, systemData] = await Promise.all([
+            const [workspaceData, systemData, mcpData, logData] = await Promise.all([
                 apiGet<{ workspace: M365WorkspaceStatus }>(apiUrl("/api/m365/workspace/status"), undefined, { retries: 0 }),
                 apiGet<SystemStatus>(apiUrl("/api/system/status"), undefined, { retries: 0 }),
+                apiGet<{ servers?: McpServer[] }>(apiUrl("/api/mcp/servers"), undefined, { retries: 0 }),
+                apiGet<LogInfo>(apiUrl("/api/system/log-info"), undefined, { retries: 0 }),
             ]);
             setWorkspace(workspaceData.workspace);
             setSystem(systemData);
+            setMcpServers(mcpData.servers || []);
+            setLogInfo(logData);
         } catch (requestError) {
             setError(requestError instanceof Error ? requestError.message : "無法取得系統狀態。");
         } finally {
@@ -96,15 +106,18 @@ export default function M365SettingsPage() {
     }
 
     const runtimeReady = Number(system?.liveCount || 0) > 0 && !system?.isBooting;
+    const bridge = mcpServers.find((server) => server.name === "m365-session-bridge");
+    const devtools = mcpServers.find((server) => server.name === "chrome-devtools");
+    const retention = logInfo?.retention;
 
     return (
         <div className="flex-1 overflow-y-auto p-4 md:p-7">
             <div className="mx-auto max-w-5xl space-y-6">
                 <header className="flex flex-col justify-between gap-4 md:flex-row md:items-end">
                     <div>
-                        <p className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-primary">Local Control</p>
-                        <h2 className="text-2xl font-semibold tracking-tight md:text-3xl">系統狀態</h2>
-                        <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">這個版本以原版 Golem 為核心，加入 M365 Copilot Web、Codex 式專案對話與有界多步驟工作；只退役 RPG、股市、加密貨幣與羈絆日記。</p>
+                        <p className="mb-2 text-xs font-semibold uppercase tracking-[0.16em] text-primary">M365 Local Control</p>
+                        <h2 className="text-2xl font-semibold tracking-tight md:text-3xl">M365 設定</h2>
+                        <p className="mt-2 max-w-2xl text-sm leading-6 text-muted-foreground">集中顯示可見 Edge、專案保存、MCP 連線、核准邊界與紀錄保留狀態；已退役的原版 Golem 功能不再出現在這裡。</p>
                     </div>
                     <div className="flex gap-2">
                         <button type="button" onClick={refresh} className="inline-flex h-10 items-center gap-2 rounded-xl border border-border px-4 text-sm hover:bg-accent">
@@ -119,19 +132,30 @@ export default function M365SettingsPage() {
                 {error && <div className="rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-3 text-sm text-destructive">{error}</div>}
                 {message && <div className="rounded-xl border border-primary/25 bg-primary/5 px-4 py-3 text-sm">{message}</div>}
 
-                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+                <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-3">
                     <StatusCard icon={MonitorUp} title="瀏覽器執行器" value={runtimeReady ? "已啟動" : "尚未就緒"} detail="使用本機可見 Microsoft Edge；登入與 MFA 由使用者親自完成。" ready={runtimeReady} />
                     <StatusCard icon={Database} title="專案保存" value={workspace?.enabled ? "已啟用" : "未啟用"} detail="專案、對話、訊息、執行步驟與檢查點保存在本機。" ready={Boolean(workspace?.enabled)} />
                     <StatusCard icon={KeyRound} title="靜態資料加密" value={workspace?.encryptionConfigured ? "已設定" : "缺少金鑰"} detail="沒有有效的本機金鑰時會停止，不會降級成明文保存。" ready={Boolean(workspace?.encryptionConfigured)} />
                     <StatusCard icon={ShieldCheck} title="多步驟工作" value={workspace?.runnerEnabled ? "已啟用" : "未啟用"} detail="有最大步數、逐步檢查點、開始核准與不明結果停止機制。" ready={Boolean(workspace?.runnerEnabled)} />
+                    <StatusCard icon={Server} title="M365 Session Bridge" value={bridge?.connected ? "已連線" : bridge?.enabled ? "已設定" : "未啟用"} detail="SharePoint／OneDrive 的精確 URL 讀寫；寫入仍需目標政策與核准。" ready={Boolean(bridge?.enabled)} />
+                    <StatusCard icon={Server} title="Chrome DevTools" value={devtools?.connected ? "已連線" : devtools?.enabled ? "已設定" : "未啟用"} detail="使用隔離瀏覽器做網頁工具工作，不接管已登入 M365 的 Edge。" ready={Boolean(devtools?.enabled)} />
                 </div>
+
+                <section className="enterprise-card rounded-2xl border border-border p-5 md:p-6">
+                    <h3 className="font-semibold">SharePoint／OneDrive 整理能力</h3>
+                    <p className="mt-2 text-sm leading-6 text-muted-foreground">乾淨安裝版預設允許經核准的非破壞性寫入：建立資料夾、上傳、複製、移動、重新命名與中繼資料更新。允許主機與網站仍採 deny-first；覆寫、資源回收筒、永久刪除、分享與權限變更預設關閉。</p>
+                    <div className="mt-4 flex flex-wrap items-center gap-3 text-xs">
+                        <a href="/dashboard/m365-bridge" className="inline-flex items-center gap-1 rounded-lg border border-border px-3 py-2 hover:bg-accent">在 Golem 內管理 Bridge <Server className="h-3.5 w-3.5" /></a>
+                        <span className="text-muted-foreground">內建 Bridge 安裝後預設啟用。若專案連結到 Golem 目錄外，請只加入該專案資料夾作為允許上傳的本機路徑。</span>
+                    </div>
+                </section>
 
                 <section className="enterprise-card rounded-2xl border border-border p-5 md:p-6">
                     <h3 className="font-semibold">目前安全邊界</h3>
                     <div className="mt-4 grid gap-3 md:grid-cols-2">
                         {[
                             ["不使用 Copilot Chat API", "所有提示與回覆都經由可見 M365 網頁操作。"],
-                            ["純文字傳輸、工具另行核准", "不自動上傳附件；Action／Skill／MCP 總開關預設關閉，啟用後仍逐項顯示並等待本機核准。"],
+                            ["附件可傳送、工具另行核准", "檔案會等 OneDrive 上傳完成且送出鍵穩定後才送出；MCP 寫入仍逐項顯示並依核准模式處理。"],
                             ["單一 Edge 派送鎖", "同一時間只允許一個專案對話使用可見 Edge，避免串錯對話。"],
                             ["傳送不明不重試", "如果無法確認提示是否已送出，會要求人工核對，避免重複工作。"],
                             ["專案脈絡可追溯", "專案固定指示有版本；每個對話綁定獨立 M365 對話網址。"],
@@ -147,6 +171,14 @@ export default function M365SettingsPage() {
                                 </div>
                             </div>
                         ))}
+                    </div>
+                </section>
+
+                <section className="enterprise-card rounded-2xl border border-border p-5 md:p-6">
+                    <h3 className="font-semibold">紀錄與 Microsoft 365 連線邊界</h3>
+                    <div className="mt-3 space-y-2 text-sm leading-6 text-muted-foreground">
+                        <p>終端紀錄：每 {retention?.maxFileSizeMb ?? 10} MB 或跨日輪替，保留 {retention?.retentionDays ?? 7} 天，最多 {retention?.maxArchiveFiles ?? 20} 份且壓縮檔合計上限 {retention?.maxArchiveTotalSizeMb ?? 100} MB。</p>
+                        <p>Teams 行事曆：技術上可透過 Microsoft Graph 接入，但目前尚未取得 Calendars.Read／Calendars.ReadWrite 授權，因此只保留本機協作日曆。</p>
                     </div>
                 </section>
 

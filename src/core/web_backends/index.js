@@ -26,10 +26,12 @@ const M365_COMPOSER_SELECTORS = Object.freeze([
 ]);
 
 const M365_RESPONSE_SELECTORS = Object.freeze([
-    // Live m365.cloud.microsoft UI (verified 2026-08-31): the newest Copilot
-    // answer text is exposed as lastChatMessage inside a CopilotMessage article.
-    // Keep the assistant-specific ancestor so a user's own article can never be
-    // mistaken for the response.
+    // Live m365.cloud.microsoft UI (verified 2026-09-04): the assistant article
+    // exists while the answer is still streaming, while lastChatMessage may be
+    // attached only after completion. Prefer the whole assistant article so
+    // source anchors rendered beside the markdown body are retained. The user
+    // article uses fai-UserMessage and therefore cannot match this selector.
+    '[role="article"].fai-CopilotMessage',
     '[role="article"].fai-CopilotMessage [data-testid="lastChatMessage"]',
     '[data-content-role="assistant"]',
     '[data-author="assistant"]',
@@ -255,6 +257,21 @@ function makeM365Definition(config) {
             ].join(', '),
         },
         composerSelectors: [...M365_COMPOSER_SELECTORS],
+        // Visible M365 model-depth control (verified on m365.cloud.microsoft
+        // 2026-09-04). Keep this as an explicit observation contract so a UI
+        // change fails before a message is typed or sent.
+        responseModeSelectors: {
+            trigger: [
+                '#gptModeSwitcher',
+                'button[aria-label*="Model selector" i]',
+                'button[aria-label*="Response mode" i]',
+                'button[aria-label*="模型選取器"]',
+                'button[aria-label*="回應模式"]',
+            ],
+            option: '[role="menuitemradio"]',
+            waitTimeoutMs: 6000,
+            pollIntervalMs: 100,
+        },
         readinessSelectors: [...M365_READY_COMPOSER_SELECTORS],
         responseContainerSelectors: [...M365_RESPONSE_SELECTORS],
         responseDiagnosticSelectors: [...M365_RESPONSE_DIAGNOSTIC_SELECTORS],
@@ -392,12 +409,23 @@ async function inspectPageState(page, definition) {
 async function waitForPageState(page, definition, options = {}) {
     const timeoutMs = Math.max(1000, Number(options.timeoutMs || 20000));
     const pollMs = Math.max(200, Number(options.pollMs || 500));
+    const loginRedirectGraceMs = Math.min(
+        timeoutMs,
+        Math.max(pollMs, Number(options.loginRedirectGraceMs || 8000))
+    );
     const startedAt = Date.now();
     let lastState = await inspectPageState(page, definition);
+    let loginObservedAt = lastState.status === 'human_login_required' ? Date.now() : null;
 
     while (Date.now() - startedAt < timeoutMs) {
-        if (['ready', 'human_login_required', 'tenant_blocked', 'unexpected_host', 'insecure_url', 'invalid_url'].includes(lastState.status)) {
+        if (['ready', 'tenant_blocked', 'unexpected_host', 'insecure_url', 'invalid_url'].includes(lastState.status)) {
             return lastState;
+        }
+        if (lastState.status === 'human_login_required') {
+            if (loginObservedAt === null) loginObservedAt = Date.now();
+            if (Date.now() - loginObservedAt >= loginRedirectGraceMs) return lastState;
+        } else {
+            loginObservedAt = null;
         }
         await new Promise((resolve) => setTimeout(resolve, pollMs));
         lastState = await inspectPageState(page, definition);

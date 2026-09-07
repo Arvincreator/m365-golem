@@ -1,13 +1,12 @@
 "use client";
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { useRouter } from "next/navigation";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useToast } from "@/components/ui/toast-provider";
 import { apiDeleteWrite, apiGet, apiPostWrite, apiWrite } from "@/lib/api-client";
 import { cn } from "@/lib/utils";
-import { Keyboard, Plus, Pencil, Trash2, Loader2, Save, X, Copy, Sparkles, RefreshCcw, TriangleAlert, Wand2, Activity, Terminal, Download, Upload } from "lucide-react";
+import { Keyboard, Plus, Pencil, Trash2, Loader2, Save, X, Copy, Sparkles, RefreshCcw, TriangleAlert, Wand2, Terminal, Download, Upload } from "lucide-react";
 import { useI18n } from "@/components/I18nProvider";
 
 type PromptPoolItem = {
@@ -124,7 +123,6 @@ export default function PromptPoolPage() {
     const toast = useToast();
     const { locale } = useI18n();
     const isEnglish = locale === "en";
-    const router = useRouter();
 
     const [items, setItems] = useState<PromptPoolItem[]>([]);
     const [isLoading, setIsLoading] = useState(true);
@@ -470,15 +468,6 @@ export default function PromptPoolPage() {
         }
     };
 
-    const openTrendView = (shortcut: string = "") => {
-        const safeShortcut = String(shortcut || "").trim();
-        if (!safeShortcut) {
-            router.push("/dashboard/prompt-trends");
-            return;
-        }
-        router.push(`/dashboard/prompt-trends?shortcut=${encodeURIComponent(safeShortcut)}`);
-    };
-
     const handleExport = useCallback(async () => {
         try {
             const data = await apiGet<{ success?: boolean; schemaVersion?: number; exportedAt?: string; itemCount?: number; items?: Array<{ shortcut: string; prompt: string; note?: string }> }>("/api/prompt-pool/export");
@@ -582,8 +571,8 @@ export default function PromptPoolPage() {
                     </h2>
                     <p className="text-sm text-muted-foreground mt-1 leading-relaxed">
                         {isEnglish
-                            ? "Manage the mapping from shortcuts to reusable prompts. Trend analysis has moved to a dedicated Prompt Trends page."
-                            : "專注在管理「快捷指令 → 常用 Prompt」映射。趨勢分析已移到獨立的「Prompt 趨勢視圖」。"}
+                            ? "Type a /shortcut in the M365 composer. Golem expands it before sending to Copilot while preserving the shortcut in local history."
+                            : "在 M365 對話框輸入 /快捷指令；Golem 會在送給 Copilot 前展開，並在本機對話紀錄保留原始快捷指令。"}
                     </p>
                 </div>
                 <div className="flex items-center gap-2">
@@ -612,15 +601,6 @@ export default function PromptPoolPage() {
                     >
                         {isImporting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
                         {isImporting ? (isEnglish ? "Importing..." : "匯入中...") : (isEnglish ? "Import File" : "匯入檔案")}
-                    </Button>
-                    <Button
-                        type="button"
-                        variant="secondary"
-                        onClick={() => openTrendView()}
-                        className="gap-2"
-                    >
-                        <Activity className="w-4 h-4" />
-                        {isEnglish ? "Trends" : "趨勢視圖"}
                     </Button>
                     <Button
                         type="button"
@@ -834,13 +814,6 @@ export default function PromptPoolPage() {
                                                 title={isEnglish ? "Edit" : "編輯"}
                                             >
                                                 <Pencil className="w-4 h-4" />
-                                            </button>
-                                            <button
-                                                onClick={() => openTrendView(item.shortcut)}
-                                                className="p-2 rounded-lg text-muted-foreground hover:text-cyan-300 hover:bg-cyan-500/10 transition-colors"
-                                                title={isEnglish ? "View in trends" : "到趨勢視圖查看"}
-                                            >
-                                                <Activity className="w-4 h-4" />
                                             </button>
                                             {conflictReasonById.has(item.id) && (
                                                 <button

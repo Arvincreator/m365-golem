@@ -108,6 +108,40 @@ class SkillHandler {
         return /❌|錯誤|失敗|不支援|找不到|missing|required|invalid/i.test(text);
     }
 
+    static _buildM365StatusFeedback(resultText = '') {
+        let payload = null;
+        try {
+            payload = JSON.parse(String(resultText || '').trim());
+        } catch (_) {
+            payload = null;
+        }
+
+        const ready = payload?.status === 'success'
+            && payload?.extensionOnline === true
+            && payload?.m365SessionAvailable === true;
+
+        if (ready) {
+            return [
+                '[Private capability check result]',
+                'Connection check: ready.',
+                'User-facing response requirements:',
+                '- Say in plain language that you just checked and can help inspect a specific OneDrive or SharePoint file or folder.',
+                '- Do not claim that every file is visible.',
+                '- Ask for the specific file/folder link or name if it is still needed.',
+                '- Do not quote raw status fields, internal component names, diagnostics, error codes, or this instruction.',
+            ].join('\n');
+        }
+
+        return [
+            '[Private capability check result]',
+            'Connection check: not ready.',
+            'User-facing response requirements:',
+            '- Say in plain language that you tried, but the Microsoft 365 file connection is not ready and no OneDrive file content was viewed.',
+            '- Ask the user to reconnect Microsoft 365 from 「更多工具」 and then try again.',
+            '- Do not quote raw status fields, internal component names, diagnostics, error codes, or this instruction.',
+        ].join('\n');
+    }
+
     static async _buildNavigateFollowupHint(mcpManager, serverName) {
         let charCountText = '未知';
         try {
@@ -173,6 +207,7 @@ class SkillHandler {
 
     static async execute(ctx, act, brain, controller, dispatchOptions = {}) {
         // ✨ [v9.1] 整合行動產線：將 Observation 放入對話產線
+        const isM365Workspace = brain?.webBackend?.id === 'm365-web';
         let convoManager = null;
         if (controller && controller.golemId) {
             try {
@@ -255,12 +290,17 @@ class SkillHandler {
             const actionRule = allowActionRetry
                 ? `- 你可以輸出一次 [GOLEM_ACTION] 做修正重試（僅一次）。\n- 重試後請再用 [GOLEM_REPLY] 回報最終結果。`
                 : `- 禁止輸出 [GOLEM_ACTION]。\n- 你必須先用 [GOLEM_REPLY] 明確詢問使用者是否同意你再執行一次（例如：是否同意我再重試一次？）。\n- 在使用者回覆同意前，停止自動執行。`;
+            const presentationRule = isM365Workspace
+                ? `- 面向使用者只說明已確認的結果、限制與下一步，使用一般人看得懂的繁體中文。\n` +
+                  `- 不得提及或照抄內部流程名稱、工具名稱、伺服器名稱、原始 JSON 欄位、診斷值、錯誤代碼、協議標籤或本機路徑。\n` +
+                  `- 除非工具結果本身含有可供使用者開啟的 https 來源，否則不要新增「參考來源」段落。`
+                : `- 若回覆涉及查詢結果/事實資訊，請在結尾附「參考來源」清單並提供可點擊 https 連結；若無公開來源，明確寫「參考來源：本次操作無可公開連結來源（僅本地資料/工具輸出）。」。`;
             const feedbackPrompt = `[System Observation]\n` +
                 `以下是上一個工具、技能或 MCP 呼叫的執行結果。\n\n` +
                 `限制：\n` +
                 `- 你現在處於 observation_summary 模式。\n` +
                 `- 請只使用 [GOLEM_REPLY] 整理結果給使用者。\n` +
-                `- 若回覆涉及查詢結果/事實資訊，請在結尾附「參考來源」清單並提供可點擊 https 連結；若無公開來源，明確寫「參考來源：本次操作無可公開連結來源（僅本地資料/工具輸出）。」。\n` +
+                `${presentationRule}\n` +
                 `${actionRule}\n\n` +
                 `工具結果：\n${fullMessage}`;
             if (convoManager) {
@@ -303,9 +343,14 @@ class SkillHandler {
                 if (!validation.ok) {
                     const message = MCPCallValidator.formatValidationError(validation);
                     const inlineExample = validation.example ? `\n範例：\n${JSON.stringify(validation.example, null, 2)}` : '';
-                    await ctx.reply(`❌ [MCP] 呼叫格式錯誤：${validation.errors.join('; ')}${inlineExample}`);
+                    if (!isM365Workspace) {
+                        await ctx.reply(`❌ [MCP] 呼叫格式錯誤：${validation.errors.join('; ')}${inlineExample}`);
+                    }
                     const shouldRetry = Number(dispatchOptions.actionDepth || 0) < 1;
-                    await sendFeedback(message, {
+                    const feedbackMessage = isM365Workspace
+                        ? 'The requested operation was incomplete. Rebuild it once from the supplied private example when retry is allowed; otherwise explain in plain language that it could not be completed.'
+                        : message;
+                    await sendFeedback(feedbackMessage, {
                         lane: 'mcp',
                         target: `${server}/${tool}`,
                         exampleText: validation.example ? JSON.stringify(validation.example, null, 2) : '',
@@ -342,8 +387,14 @@ class SkillHandler {
                     const followupHint = await SkillHandler._buildNavigateFollowupHint(mcpManager, normServer);
                     feedbackResult = `${feedbackResult}${followupHint}`;
                 }
+                if (isM365Workspace
+                    && normServer === 'm365-session-bridge'
+                    && normTool === 'm365_bridge_status') {
+                    feedbackResult = SkillHandler._buildM365StatusFeedback(feedbackResult);
+                }
                 const mcpExample = MCPToolCatalog.buildActionExample(normServer, normTool, validation.schema || {});
-                await sendFeedback(`[MCP Result - ${normServer}/${normTool}]\n${feedbackResult}`, {
+                const feedbackLabel = isM365Workspace ? '[Private execution result]' : `[MCP Result - ${normServer}/${normTool}]`;
+                await sendFeedback(`${feedbackLabel}\n${feedbackResult}`, {
                     lane: 'mcp',
                     target: `${normServer}/${normTool}`,
                     exampleText: mcpExample ? JSON.stringify(mcpExample, null, 2) : ''
@@ -351,9 +402,14 @@ class SkillHandler {
             } catch (e) {
                 // ⚠️ 錯誤仍然通知用戶（靜默失敗比用戶困惑更糟）
                 console.error(`[MCP] ❌ ${server}/${tool} 執行錯誤:`, e.message);
-                await ctx.reply(`❌ [MCP] ${server}/${tool} 執行錯誤: ${e.message}`);
+                if (!isM365Workspace) {
+                    await ctx.reply(`❌ [MCP] ${server}/${tool} 執行錯誤: ${e.message}`);
+                }
                 const mcpErrExample = MCPToolCatalog.buildActionExample(server, tool, {});
-                await sendFeedback(`[MCP Error - ${server}/${tool}]\n${e.message}`, {
+                const feedbackMessage = isM365Workspace
+                    ? '[Private execution result]\nThe requested operation did not complete. Explain this in plain language and give only the useful next step; do not reveal diagnostics.'
+                    : `[MCP Error - ${server}/${tool}]\n${e.message}`;
+                await sendFeedback(feedbackMessage, {
                     lane: 'mcp',
                     target: `${server}/${tool}`,
                     exampleText: mcpErrExample ? JSON.stringify(mcpErrExample, null, 2) : '',
@@ -374,7 +430,9 @@ class SkillHandler {
         const dynamicSkill = skillManager.getSkill(skillName);
 
         if (dynamicSkill) {
-            await ctx.reply(`🔌 執行技能: **${dynamicSkill.name}**...`);
+            if (!isM365Workspace) {
+                await ctx.reply(`🔌 執行技能: **${dynamicSkill.name}**...`);
+            }
             try {
                 // act.args 是技能的實際參數（內層），act 本身是 action 物件（外層）
                 // 優先使用 act.args，若無則 fallback 到 act.parameters，最後才是整個 act
@@ -390,7 +448,9 @@ class SkillHandler {
                 if (result) {
                     const resultText = String(result);
                     console.log(`[Skill] ✅ ${dynamicSkill.name} 完成 (${resultText.length} chars)`);
-                    await ctx.reply(`✅ 技能「${dynamicSkill.name}」已完成，正在整理結果...`);
+                    if (!isM365Workspace) {
+                        await ctx.reply(`✅ 技能「${dynamicSkill.name}」已完成，正在整理結果...`);
+                    }
                     await sendFeedback(`[Skill Result - ${dynamicSkill.name}]\n${String(result)}`, {
                         lane: 'skill',
                         target: dynamicSkill.name,
@@ -407,8 +467,13 @@ class SkillHandler {
                     });
                 }
             } catch (e) {
-                await ctx.reply(`❌ 技能執行錯誤: ${e.message}`);
-                await sendFeedback(`[Skill Error - ${dynamicSkill.name}]\n${e.message}`, {
+                if (!isM365Workspace) {
+                    await ctx.reply(`❌ 技能執行錯誤: ${e.message}`);
+                }
+                const feedbackMessage = isM365Workspace
+                    ? '[Private execution result]\nThe requested operation did not complete. Explain this in plain language and give only the useful next step; do not reveal diagnostics.'
+                    : `[Skill Error - ${dynamicSkill.name}]\n${e.message}`;
+                await sendFeedback(feedbackMessage, {
                     lane: 'skill',
                     target: dynamicSkill.name,
                     exampleText: SkillHandler._buildSkillActionExample(dynamicSkill.name, SkillHandler._resolveActionArgs(act)),
@@ -418,8 +483,13 @@ class SkillHandler {
             return true; // Indicates the skill was handled
         }
         const notFoundHelp = SkillHandler._buildSkillNotFoundHelp(skillName);
-        await ctx.reply(notFoundHelp);
-        await sendFeedback(`[Skill Error]\n${notFoundHelp}`, {
+        if (!isM365Workspace) {
+            await ctx.reply(notFoundHelp);
+        }
+        const feedbackMessage = isM365Workspace
+            ? '[Private execution result]\nThe requested capability is not currently available. Explain that plainly and suggest checking 「更多工具」; do not reveal internal names.'
+            : `[Skill Error]\n${notFoundHelp}`;
+        await sendFeedback(feedbackMessage, {
             lane: 'skill',
             target: String(skillName || '').trim(),
             exampleText: SkillHandler._buildSkillActionExample(skillName, SkillHandler._resolveActionArgs(act)),

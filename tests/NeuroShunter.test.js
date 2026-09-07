@@ -107,11 +107,30 @@ describe('NeuroShunter', () => {
         expect(CommandHandler.execute).not.toHaveBeenCalled();
     });
 
-    test('dispatch routes action through SkillHandler first', async () => {
-        SkillHandler.execute.mockResolvedValue(true);
+    test('dispatch routes explicit command directly to CommandHandler', async () => {
         ResponseParser.parse.mockReturnValue({
             reply: '',
             actions: [{ action: 'command', parameter: 'pwd' }]
+        });
+
+        await NeuroShunter.dispatch(mockCtx, 'raw', mockBrain, mockController);
+
+        expect(SkillHandler.execute).not.toHaveBeenCalled();
+        expect(CommandHandler.execute).toHaveBeenCalledWith(
+            mockCtx,
+            [{ action: 'command', parameter: 'pwd' }],
+            mockController,
+            mockBrain,
+            expect.any(Function),
+            expect.any(Object)
+        );
+    });
+
+    test('dispatch routes MCP actions through SkillHandler', async () => {
+        SkillHandler.execute.mockResolvedValue(true);
+        ResponseParser.parse.mockReturnValue({
+            reply: '',
+            actions: [{ action: 'mcp_call', server: 'demo', tool: 'read', parameters: {} }]
         });
 
         await NeuroShunter.dispatch(mockCtx, 'raw', mockBrain, mockController);
@@ -120,17 +139,37 @@ describe('NeuroShunter', () => {
         expect(CommandHandler.execute).not.toHaveBeenCalled();
     });
 
-    test('dispatch falls back to CommandHandler when SkillHandler does not handle action', async () => {
+    test('dispatch does not fall back a non-command action to shell when its handler declines', async () => {
         SkillHandler.execute.mockResolvedValue(false);
         ResponseParser.parse.mockReturnValue({
             reply: '',
-            actions: [{ action: 'command', parameter: 'pwd' }]
+            actions: [{ action: 'mcp_call', server: 'demo', tool: 'read', parameters: {} }]
         });
 
         await NeuroShunter.dispatch(mockCtx, 'raw', mockBrain, mockController);
 
         expect(SkillHandler.execute).toHaveBeenCalled();
-        expect(CommandHandler.execute).toHaveBeenCalled();
+        expect(CommandHandler.execute).not.toHaveBeenCalled();
+        expect(mockCtx.reply).toHaveBeenCalledWith(expect.stringContaining('已阻擋'));
+    });
+
+    test('dispatch preserves the explicit sys-admin security route', async () => {
+        ResponseParser.parse.mockReturnValue({
+            reply: '',
+            actions: [{ action: 'sys_admin', parameters: { command: 'echo hello' } }]
+        });
+
+        await NeuroShunter.dispatch(mockCtx, 'raw', mockBrain, mockController);
+
+        expect(SkillHandler.execute).not.toHaveBeenCalled();
+        expect(CommandHandler.execute).toHaveBeenCalledWith(
+            mockCtx,
+            [{ action: 'sys-admin', parameters: { command: 'echo hello' } }],
+            mockController,
+            mockBrain,
+            expect.any(Function),
+            expect.any(Object)
+        );
     });
 
     test('dispatch still executes actions when suppressReply is true and actions exist', async () => {
@@ -143,7 +182,7 @@ describe('NeuroShunter', () => {
         await NeuroShunter.dispatch(mockCtx, 'raw', mockBrain, mockController, { suppressReply: true });
 
         expect(MultiAgentHandler.execute).not.toHaveBeenCalled();
-        expect(SkillHandler.execute).toHaveBeenCalled();
+        expect(SkillHandler.execute).not.toHaveBeenCalled();
         expect(CommandHandler.execute).toHaveBeenCalled();
     });
 });

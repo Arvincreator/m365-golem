@@ -2,10 +2,6 @@ const fs = require('fs');
 const path = require('path');
 
 const PROMPT_POOL_PATH = path.resolve(process.cwd(), 'data', 'dashboard', 'prompt-pool.json');
-const TELEGRAM_COMMAND_REGEX = /^[a-z0-9_]{1,32}$/i;
-const MAX_COMMAND_DESCRIPTION = 255;
-const MAX_TELEGRAM_COMMANDS = 100;
-
 let cache = {
     mtimeMs: -1,
     items: [],
@@ -19,20 +15,18 @@ function normalizePrompt(raw) {
     return String(raw || '').trim();
 }
 
-function stripTelegramBotMentionSuffix(raw) {
-    const shortcut = String(raw || '').trim();
-    return shortcut.replace(/^((?:\/)?[a-z0-9_]{1,32})@[a-z0-9_]{3,}$/i, '$1');
-}
-
 function toShortcutKey(raw) {
-    const shortcut = stripTelegramBotMentionSuffix(raw).toLowerCase();
+    const shortcut = String(raw || '').trim().toLowerCase();
     if (!shortcut) return '';
     return shortcut.replace(/^\/+/, '');
 }
 
 function loadSystemCommandSet() {
     try {
-        const commands = require('../config/commands.js');
+        const ConfigManager = require('../config');
+        const commands = ConfigManager.CONFIG.GOLEM_BACKEND === 'm365-web'
+            ? require('../config/m365Commands.js')
+            : require('../config/commands.js');
         if (!Array.isArray(commands)) return new Set();
         return new Set(
             commands
@@ -132,18 +126,6 @@ function expandPromptShortcutInput(rawText) {
     };
 }
 
-function toTelegramCommandEntry(item) {
-    const command = toShortcutKey(item && item.shortcut ? item.shortcut : '');
-    if (!TELEGRAM_COMMAND_REGEX.test(command)) return null;
-    const rawDescription = item.note || item.prompt || 'Prompt shortcut';
-    const description = rawDescription.replace(/\s+/g, ' ').trim().slice(0, MAX_COMMAND_DESCRIPTION);
-    if (!description) return null;
-    return {
-        command,
-        description: description.startsWith('[Prompt]') ? description : `[Prompt] ${description}`.slice(0, MAX_COMMAND_DESCRIPTION),
-    };
-}
-
 function scoreShortcutCandidate(shortcutKey, queryKey) {
     if (!shortcutKey || !queryKey) return 0;
     if (shortcutKey === queryKey) return 1000;
@@ -188,25 +170,6 @@ function suggestPromptShortcuts(rawText, limit = 5) {
     return scored;
 }
 
-function getTelegramPromptCommands() {
-    const base = readPromptPoolItems()
-        .map(toTelegramCommandEntry)
-        .filter(Boolean);
-
-    const deduped = [];
-    const seen = new Set();
-    for (const item of base) {
-        const key = item.command.toLowerCase();
-        if (seen.has(key)) continue;
-        seen.add(key);
-        deduped.push(item);
-        if (deduped.length >= MAX_TELEGRAM_COMMANDS) break;
-    }
-    return deduped;
-}
-
-// Exported alias used by the runtime to normalize Telegram shortcut keys.
-// Keeping a single source of truth avoids silent drift between the two usages.
 const normalizeShortcutKey = toShortcutKey;
 
 module.exports = {
@@ -214,6 +177,5 @@ module.exports = {
     readPromptPoolItems,
     expandPromptShortcutInput,
     suggestPromptShortcuts,
-    getTelegramPromptCommands,
     normalizeShortcutKey,
 };

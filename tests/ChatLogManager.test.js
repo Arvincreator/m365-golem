@@ -112,21 +112,20 @@ describe('ChatLogManager', () => {
         expect(manager._compressAndSave).not.toHaveBeenCalled();
     });
 
-    test('compressLogsForDate calls _compressAndSave when force is true', async () => {
+    test('compressLogsForDate calls the chunked daily compressor when force is true', async () => {
         manager._isInitialized = true;
         manager.db = {};
         manager.allAsync = jest.fn().mockResolvedValue([
             { timestamp: Date.now(), sender: 'A', content: 'alpha' },
             { timestamp: Date.now(), sender: 'B', content: 'beta' },
         ]);
-        manager._compressAndSave = jest.fn().mockResolvedValue();
+        manager._compressDailyByChunks = jest.fn().mockResolvedValue();
 
         await manager.compressLogsForDate('20240101', { sendMessage: jest.fn() }, true);
 
-        expect(manager._compressAndSave).toHaveBeenCalledWith(
-            expect.stringContaining('alpha'),
+        expect(manager._compressDailyByChunks).toHaveBeenCalledWith(
             '20240101',
-            'daily',
+            expect.stringContaining('alpha'),
             expect.any(Object),
             expect.any(Number)
         );

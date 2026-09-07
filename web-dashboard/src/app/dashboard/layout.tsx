@@ -3,8 +3,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import {
-    Bot,
-    BrainCircuit,
     CalendarDays,
     ChevronDown,
     ChevronLeft,
@@ -12,7 +10,6 @@ import {
     FileText,
     Folder,
     FolderOpen,
-    Gauge,
     Library,
     MessageSquarePlus,
     MessageSquareText,
@@ -29,7 +26,6 @@ import {
     SquareTerminal,
     Trash2,
     UserRoundCog,
-    Users,
 } from "lucide-react";
 import {
     DropdownMenu as DropdownMenuPrimitive,
@@ -38,6 +34,7 @@ import {
 import { cn } from "@/lib/utils";
 import { apiGet, apiPost, apiWrite } from "@/lib/api-client";
 import { apiUrl } from "@/lib/api";
+import { socket } from "@/lib/socket";
 import { ThemeToggle } from "@/components/ThemeToggle";
 import { ConfirmModal } from "@/components/ConfirmModal";
 import {
@@ -72,19 +69,15 @@ const EMPTY_PROJECT_FORM = {
 
 const TOOL_ITEMS = [
     { label: "MCP 工具", href: "/dashboard/mcp", icon: Plug },
-    { label: "Skills", href: "/dashboard/skills", icon: Sparkles },
-    { label: "Action Gate", href: "/dashboard/action-gate", icon: ShieldCheck },
-    { label: "多代理", href: "/dashboard/agents", icon: Users },
+    { label: "M365 Bridge", href: "/dashboard/m365-bridge", icon: FolderOpen },
+    { label: "技能說明書", href: "/dashboard/skills", icon: Sparkles },
+    { label: "Action Gate 紀錄", href: "/dashboard/action-gate", icon: ShieldCheck },
     { label: "人格設定", href: "/dashboard/persona", icon: UserRoundCog },
     { label: "Prompt 指令池", href: "/dashboard/prompt-pool", icon: Library },
-    { label: "Prompt 趨勢", href: "/dashboard/prompt-trends", icon: Gauge },
-    { label: "記憶", href: "/dashboard/memory", icon: BrainCircuit },
-    { label: "記憶防火牆", href: "/dashboard/memory-firewall", icon: ShieldCheck },
-    { label: "參考檔案", href: "/dashboard/reference-files", icon: FileText },
+    { label: "知識來源", href: "/dashboard/knowledge-sources", icon: FileText },
     { label: "協作日曆", href: "/dashboard/calendar", icon: CalendarDays },
-    { label: "虛擬辦公室", href: "/dashboard/office", icon: Bot },
-    { label: "終端", href: "/dashboard/terminal", icon: SquareTerminal },
-    { label: "系統設定", href: "/dashboard/settings", icon: Settings },
+    { label: "終端紀錄", href: "/dashboard/terminal", icon: SquareTerminal },
+    { label: "M365 設定", href: "/dashboard/settings", icon: Settings },
 ] as const;
 
 function CodexSidebar({ open, setOpen }: { open: boolean; setOpen: (value: boolean) => void }) {
@@ -195,6 +188,15 @@ function CodexSidebar({ open, setOpen }: { open: boolean; setOpen: (value: boole
         }, 15000);
         return () => window.clearInterval(timer);
     }, [hydrated, loadProjectTree, loadWorkspace]);
+
+    useEffect(() => {
+        const handleConversationTitle = (payload: { type?: string }) => {
+            if (payload?.type !== "conversation_title") return;
+            void loadProjectTree();
+        };
+        socket.on("log", handleConversationTitle);
+        return () => { socket.off("log", handleConversationTitle); };
+    }, [loadProjectTree]);
 
     useEffect(() => {
         if (!activeProjectId) return;

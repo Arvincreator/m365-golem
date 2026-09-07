@@ -4,13 +4,103 @@
 const { TIMINGS, LIMITS } = require('../../src/core/constants');
 
 class ResponseExtractor {
+    static normalizeVisibleArtifacts(items, options = {}) {
+        const includeSources = options.includeSources === true;
+        const byUrl = new Map();
+        const fileExtensionPattern = /\.(?:pdf|docx?|xlsx?|pptx?|csv|tsv|txt|zip|md|rtf|odt|ods|odp|json|xml|html?|png|jpe?g|gif|webp)(?:$|[?#])/i;
+        const cleanLabel = (value) => String(value || '')
+            .replace(/[\r\n]+/g, ' ')
+            .replace(/\s+/g, ' ')
+            .trim()
+            .slice(0, 240);
+        const cleanUrl = (value) => String(value || '')
+            .replace(/[\r\n]+/g, '')
+            .trim();
+
+        for (const raw of Array.isArray(items) ? items : []) {
+            // Labels are intentionally bounded, but signed SharePoint/Teams
+            // URLs can legitimately be much longer than 240 characters.
+            const url = cleanUrl(raw && raw.url);
+            let parsed;
+            try {
+                parsed = new URL(url);
+            } catch (_) {
+                continue;
+            }
+            if (parsed.protocol !== 'https:') continue;
+
+            const urlText = parsed.toString();
+            const lowerUrl = urlText.toLowerCase();
+            const elementType = String(raw && raw.elementType || 'link').toLowerCase();
+            const suppliedName = cleanLabel(raw && (raw.name || raw.linkText || raw.downloadName || raw.ariaLabel || raw.title));
+            const semanticText = cleanLabel([
+                suppliedName,
+                raw && raw.alt,
+                raw && raw.ariaLabel,
+                raw && raw.title,
+                raw && raw.className,
+                raw && raw.testId,
+            ].filter(Boolean).join(' '));
+            const isFaviconOrUiAsset = /services\.bingapis\.com\/favicon/i.test(lowerUrl)
+                || /(?:^|[/_.-])favicon(?:[/?_.-]|$)/i.test(lowerUrl)
+                || /res\.cdn\.office\.net\/files\/fabric-cdn-[^/]+\/assets\/item-types\//i.test(lowerUrl)
+                || (elementType === 'image' && /(?:^|\s)(?:favicon|site icon|logo|avatar|profile image|tracking pixel)(?:\s|$)/i.test(semanticText));
+            if (isFaviconOrUiAsset) continue;
+
+            let artifact = null;
+            if (elementType === 'image') {
+                if (raw && raw.parentHref) continue;
+                const width = Number(raw && raw.width || 0);
+                const height = Number(raw && raw.height || 0);
+                const isSubstantiveImage = (width >= 96 && height >= 64)
+                    || /(?:generated|attachment|preview|result|content image|產生|附件|預覽)/i.test(semanticText);
+                if (!isSubstantiveImage) continue;
+                artifact = {
+                    url: urlText,
+                    name: suppliedName || 'M365 圖片',
+                    mimeType: String(raw && raw.mimeType || 'image/png'),
+                    isRemote: true,
+                    kind: 'download',
+                };
+            } else {
+                const hasDownloadAttribute = raw && raw.hasDownload === true;
+                const isCitation = raw && raw.isCitation === true;
+                const downloadName = cleanLabel(raw && raw.downloadName);
+                const looksLikeFile = fileExtensionPattern.test(lowerUrl)
+                    || fileExtensionPattern.test(suppliedName)
+                    || fileExtensionPattern.test(downloadName);
+                const looksLikeDownload = /(?:^|[/?&=_-])(?:download|attachment)(?:[/?&=_-]|$)/i.test(lowerUrl)
+                    || /^(?:下載|download)(?:\s|[「『:"'])/i.test(suppliedName);
+                const kind = !isCitation && (hasDownloadAttribute || looksLikeFile || looksLikeDownload)
+                    ? 'download'
+                    : 'source';
+                if (kind === 'source' && !includeSources) continue;
+                artifact = {
+                    url: urlText,
+                    name: suppliedName || parsed.hostname,
+                    mimeType: kind === 'download'
+                        ? String(raw && raw.mimeType || 'application/octet-stream')
+                        : 'text/html',
+                    isRemote: true,
+                    kind,
+                };
+            }
+
+            const existing = byUrl.get(urlText);
+            if (!existing || (existing.kind === 'source' && artifact.kind === 'download')) {
+                byUrl.set(urlText, artifact);
+            }
+        }
+        return Array.from(byUrl.values());
+    }
+
     /**
      * Inspect the currently visible conversation without sending anything.
      * Used by the M365 recovery button to find the exact request envelope that
      * may have appeared after the normal wait expired.
      */
     static async inspectExistingResponse(page, selector, startTag, endTag, options = {}) {
-        return page.evaluate(({ sel, sTag, eTag, responseContainers, stopSelectors }) => {
+        const result = await page.evaluate(({ sel, sTag, eTag, responseContainers, stopSelectors }) => {
             const visible = (node) => {
                 if (!node || !(node instanceof HTMLElement)) return false;
                 const style = window.getComputedStyle(node);
@@ -48,21 +138,56 @@ class ResponseExtractor {
                 const startIndex = rawText.indexOf(sTag);
                 const endIndex = rawText.indexOf(eTag, startIndex + sTag.length);
                 if (startIndex < 0 || endIndex <= startIndex) continue;
-                const attachments = Array.from(container.querySelectorAll('a[href]')).map((anchor) => {
+                const links = Array.from(container.querySelectorAll('a[href]')).map((anchor) => {
                     const href = String(anchor.href || '');
                     if (!/^https:\/\//i.test(href)) return null;
-                    const name = String(anchor.innerText || anchor.getAttribute('download') || href)
+                    const name = String(anchor.innerText || anchor.textContent || anchor.getAttribute('aria-label') || anchor.getAttribute('title') || '')
                         .replace(/\s+/g, ' ')
                         .trim()
                         .slice(0, 240);
-                    return { url: href, name, mimeType: 'application/octet-stream', isRemote: true };
+                    return {
+                        url: href,
+                        name,
+                        linkText: name,
+                        downloadName: String(anchor.getAttribute('download') || ''),
+                        ariaLabel: String(anchor.getAttribute('aria-label') || ''),
+                        title: String(anchor.getAttribute('title') || ''),
+                        hasDownload: anchor.hasAttribute('download'),
+                        isCitation: anchor.matches('[data-testid="fl-link"], [data-testid="chat-link-testid"], .sef-entity-link')
+                            || Boolean(anchor.closest('[data-testid*="citation" i], [class*="citation" i], [aria-label*="citation" i], [data-testid*="source" i], [class*="source" i], [aria-label*="source" i], [aria-label*="來源" i]')),
+                        className: String(anchor.getAttribute('class') || ''),
+                        testId: String(anchor.getAttribute('data-testid') || ''),
+                        elementType: 'link',
+                    };
+                }).filter(Boolean);
+                const images = Array.from(container.querySelectorAll('img[src]')).map((img) => {
+                    const src = String(img.src || '');
+                    if (!/^https:\/\//i.test(src)) return null;
+                    const rect = typeof img.getBoundingClientRect === 'function'
+                        ? img.getBoundingClientRect()
+                        : { width: 0, height: 0 };
+                    const parentAnchor = typeof img.closest === 'function' ? img.closest('a[href]') : null;
+                    return {
+                        url: src,
+                        name: String(img.getAttribute('alt') || img.getAttribute('aria-label') || ''),
+                        alt: String(img.getAttribute('alt') || ''),
+                        ariaLabel: String(img.getAttribute('aria-label') || ''),
+                        title: String(img.getAttribute('title') || ''),
+                        className: String(img.getAttribute('class') || ''),
+                        testId: String(img.getAttribute('data-testid') || ''),
+                        width: Number(rect.width || img.naturalWidth || 0),
+                        height: Number(rect.height || img.naturalHeight || 0),
+                        parentHref: String(parentAnchor && parentAnchor.href || ''),
+                        mimeType: 'image/png',
+                        elementType: 'image',
+                    };
                 }).filter(Boolean);
                 return {
                     found: true,
                     busy: isGenerating,
                     status: 'ENVELOPE_COMPLETE',
                     text: rawText.substring(startIndex + sTag.length, endIndex).trim(),
-                    attachments,
+                    attachments: [...links, ...images],
                 };
             }
             return { found: false, busy: isGenerating, status: isGenerating ? 'GENERATING' : 'NOT_FOUND', text: '', attachments: [] };
@@ -77,6 +202,10 @@ class ResponseExtractor {
                 ? options.stopSelectors
                 : ['button[aria-label*="Stop" i]', 'button[aria-label*="停止" i]', '[data-testid*="stop" i]'],
         });
+        result.attachments = ResponseExtractor.normalizeVisibleArtifacts(result.attachments, {
+            includeSources: options.extractSourceLinks === true,
+        });
+        return result;
     }
 
     /**
@@ -107,8 +236,8 @@ class ResponseExtractor {
             ? Math.max(1, Math.floor(configuredFallbackThreshold))
             : stableThinkingThreshold;
 
-        return page.evaluate(
-            async ({ sel, sTag, eTag, oldText, _stableComplete, _stableThinking, _stableFallback, _pollInterval, _timeout, _responseContainers, _diagnosticSelectors, _stopSelectors, _extractAttachments }) => {
+        const result = await page.evaluate(
+            async ({ sel, sTag, eTag, oldText, _stableComplete, _stableThinking, _stableFallback, _pollInterval, _timeout, _responseContainers, _diagnosticSelectors, _stopSelectors, _extractAttachments, _extractSourceLinks }) => {
                 return new Promise((resolve) => {
                     const startTime = Date.now();
                     let beganAt = 0;
@@ -227,25 +356,43 @@ class ResponseExtractor {
                         const attachments = [];
                         
                         if (_extractAttachments) {
-                            // 1. 圖片偵測 (濾除天氣/UI 圖示等 svg 雜訊)
+                            // 1. Collect image candidates. Classification is performed
+                            // outside the page so favicons and UI assets are not exposed.
                             container.querySelectorAll('img').forEach(img => {
                                 if (img.src && img.src.startsWith('http')) {
                                     if (img.src.toLowerCase().includes('.svg')) return;
-                                    attachments.push({ url: img.src, mimeType: 'image/png' });
+                                    const rect = typeof img.getBoundingClientRect === 'function'
+                                        ? img.getBoundingClientRect()
+                                        : { width: 0, height: 0 };
+                                    const parentAnchor = typeof img.closest === 'function' ? img.closest('a[href]') : null;
+                                    attachments.push({
+                                        url: img.src,
+                                        name: String(img.getAttribute('alt') || img.getAttribute('aria-label') || ''),
+                                        alt: String(img.getAttribute('alt') || ''),
+                                        ariaLabel: String(img.getAttribute('aria-label') || ''),
+                                        title: String(img.getAttribute('title') || ''),
+                                        className: String(img.getAttribute('class') || ''),
+                                        testId: String(img.getAttribute('data-testid') || ''),
+                                        width: Number(rect.width || img.naturalWidth || 0),
+                                        height: Number(rect.height || img.naturalHeight || 0),
+                                        parentHref: String(parentAnchor && parentAnchor.href || ''),
+                                        mimeType: 'image/png',
+                                        elementType: 'image',
+                                    });
                                 }
                             });
 
-                            // 2. 連結/下載偵測 (例如生成的檔案、PDF 等)
+                            // 2. Collect real file links and, for M365, visible source links.
                             container.querySelectorAll('a').forEach(a => {
                                 const href = a.href || "";
                                 if (!href || !href.startsWith('http')) return;
                                 const isDownload = a.hasAttribute('download');
-                                const linkText = String(a.innerText || a.textContent || '').trim();
+                                const linkText = String(a.innerText || a.textContent || a.getAttribute('aria-label') || a.getAttribute('title') || '').trim();
                                 const hasFileExt = /\.(pdf|docx|xlsx|pptx|csv|txt|zip|md|js|py)(?:$|[?#])/i.test(href)
                                     || /\.(pdf|docx|xlsx|pptx|csv|txt|zip|md|js|py)$/i.test(linkText);
                                 const isGoogleContent = href.includes('googleusercontent.com') || href.includes('blob:');
                                 const looksLikeDownload = /download|attachment/i.test(href);
-                                if (isDownload || hasFileExt || isGoogleContent || looksLikeDownload) {
+                                if (_extractSourceLinks || isDownload || hasFileExt || isGoogleContent || looksLikeDownload) {
                                     let mime = 'application/octet-stream';
                                     if (href.endsWith('.pdf')) mime = 'application/pdf';
                                     else if (href.endsWith('.md')) mime = 'text/markdown';
@@ -253,8 +400,17 @@ class ResponseExtractor {
                                     attachments.push({
                                         url: href,
                                         mimeType: mime,
-                                        name: linkText || a.getAttribute('download') || '下載檔案',
-                                        isRemote: true,
+                                        name: linkText || a.getAttribute('download') || '',
+                                        linkText,
+                                        downloadName: String(a.getAttribute('download') || ''),
+                                        ariaLabel: String(a.getAttribute('aria-label') || ''),
+                                        title: String(a.getAttribute('title') || ''),
+                                        hasDownload: isDownload,
+                                        isCitation: a.matches('[data-testid="fl-link"], [data-testid="chat-link-testid"], .sef-entity-link')
+                                            || Boolean(a.closest('[data-testid*="citation" i], [class*="citation" i], [aria-label*="citation" i], [data-testid*="source" i], [class*="source" i], [aria-label*="source" i], [aria-label*="來源" i]')),
+                                        className: String(a.getAttribute('class') || ''),
+                                        testId: String(a.getAttribute('data-testid') || ''),
+                                        elementType: 'link',
                                     });
                                 }
                             });
@@ -377,9 +533,14 @@ class ResponseExtractor {
                 _stopSelectors: Array.isArray(options.stopSelectors) && options.stopSelectors.length > 0
                     ? options.stopSelectors
                     : ['button[aria-label*=\"Stop\" i]', 'button[aria-label*=\"停止\" i]', '[data-testid*=\"stop\" i]'],
-                _extractAttachments: options.extractAttachments !== false
+                _extractAttachments: options.extractAttachments !== false,
+                _extractSourceLinks: options.extractSourceLinks === true,
             }
         );
+        result.attachments = ResponseExtractor.normalizeVisibleArtifacts(result.attachments, {
+            includeSources: options.extractSourceLinks === true,
+        });
+        return result;
     }
 
     /**

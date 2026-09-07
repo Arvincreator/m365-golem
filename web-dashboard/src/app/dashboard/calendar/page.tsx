@@ -3,7 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   CalendarDays, ChevronLeft, ChevronRight, Download, ExternalLink,
-  Loader2, Plus, RefreshCcw, Settings, Trash2, Upload, X, Check, CircleHelp,
+  Loader2, Plus, RefreshCcw, Trash2, Upload, X, Check, CircleHelp,
   AlertCircle, LogOut
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
@@ -553,7 +553,7 @@ function UsageHelpModal({ onClose }: { onClose: () => void }) {
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between">
-          <h2 className="text-lg font-semibold">協作日曆使用說明</h2>
+          <h2 className="text-lg font-semibold">本機協作日曆使用說明</h2>
           <button onClick={onClose} className="p-1.5 rounded-lg hover:bg-secondary/60 text-muted-foreground">
             <X className="w-4 h-4" />
           </button>
@@ -566,22 +566,15 @@ function UsageHelpModal({ onClose }: { onClose: () => void }) {
         </section>
 
         <section className="space-y-2">
-          <h3 className="text-sm font-semibold">怎麼開啟同步</h3>
-          <p className="text-sm text-muted-foreground">右上角按「設定」，就可以看到 Google 與 Apple 的同步設定。</p>
-          <p className="text-sm text-muted-foreground">Google：先完成授權，再按同步即可把行程拉進來或推送出去。</p>
-          <p className="text-sm text-muted-foreground">Apple：選好要同步的日曆，勾選啟用後可立即手動同步，也可設定自動同步時間。</p>
+          <h3 className="text-sm font-semibold">目前可用範圍</h3>
+          <p className="text-sm text-muted-foreground">行程目前保存在這台電腦，可新增、修改、拖曳改期與刪除；按重新整理可重新載入。</p>
+          <p className="text-sm text-muted-foreground">這不是 Teams／Outlook 行事曆的鏡像，尚未取得 Microsoft Graph 行事曆權限。</p>
         </section>
 
         <section className="space-y-2">
-          <h3 className="text-sm font-semibold">自動同步規則</h3>
-          <p className="text-sm text-muted-foreground">你新增、修改、刪除行程後，系統會自動嘗試同步。</p>
-          <p className="text-sm text-muted-foreground">Apple 也可依你設定的每日時間或固定間隔自動同步。</p>
-        </section>
-
-        <section className="space-y-2">
-          <h3 className="text-sm font-semibold">使用小提醒</h3>
-          <p className="text-sm text-muted-foreground">如果看不到最新行程，先按工具列的重新整理，再到設定裡看「上次同步狀態」。</p>
-          <p className="text-sm text-muted-foreground">若同步失敗，先確認授權是否仍有效，或檢查選到的日曆是否正確。</p>
+          <h3 className="text-sm font-semibold">Teams 行事曆評估</h3>
+          <p className="text-sm text-muted-foreground">技術上可行：Teams 會議可建立為 Outlook 行事曆的線上會議事件；讀取需 Calendars.Read，建立或修改需 Calendars.ReadWrite 與租戶同意。</p>
+          <p className="text-sm text-muted-foreground">現有 m365-session-bridge 只處理 SharePoint／OneDrive 檔案，不應拿來冒充行事曆連線。</p>
         </section>
       </div>
     </div>
@@ -1222,7 +1215,7 @@ export default function CalendarPage() {
           <div className="flex h-9 w-9 items-center justify-center rounded-xl border border-primary/25 bg-primary/10">
             <CalendarDays className="h-5 w-5 text-primary" />
           </div>
-          <span className="font-semibold text-base hidden sm:block">協作日曆</span>
+          <span className="font-semibold text-base hidden sm:block">本機協作日曆</span>
         </div>
 
         {/* Navigation */}
@@ -1261,9 +1254,16 @@ export default function CalendarPage() {
         <Button size="icon" variant="ghost" onClick={load} disabled={isLoading}>
           {isLoading ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCcw className="w-4 h-4" />}
         </Button>
-        <Button size="icon" variant="ghost" onClick={() => setShowSettings(true)}>
-          <Settings className="w-4 h-4" />
-        </Button>
+      </div>
+
+      <div className="mx-4 mt-3 flex flex-wrap items-center justify-between gap-3 rounded-xl border border-amber-500/25 bg-amber-500/5 px-4 py-3 text-xs">
+        <div>
+          <strong className="text-foreground">Teams 行事曆：尚未連線</strong>
+          <p className="mt-1 text-muted-foreground">本機行事曆可正常使用；Teams 整合需另建 Microsoft Graph 授權，不使用 SharePoint／OneDrive Bridge 代替。</p>
+        </div>
+        <a href="https://learn.microsoft.com/graph/api/user-post-events?view=graph-rest-1.0" target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-primary hover:underline">
+          查看官方能力 <ExternalLink className="h-3.5 w-3.5" />
+        </a>
       </div>
 
       {/* Calendar body */}

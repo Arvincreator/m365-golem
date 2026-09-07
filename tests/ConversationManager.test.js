@@ -127,6 +127,24 @@ describe('ConversationManager', () => {
         expect(mockShunter.dispatch).toHaveBeenCalled();
     });
 
+    test('keeps the selected M365 response mode on the queued message snapshot', async () => {
+        cm = new ConversationManager(mockBrain, mockShunter, mockController);
+        cm.queue.push({
+            ctx: mockCtx,
+            text: 'queued prompt',
+            attachment: null,
+            options: { m365ResponseMode: 'thoughtful' },
+        });
+
+        await cm._processQueue();
+
+        expect(mockBrain.sendMessage).toHaveBeenCalledWith(
+            'queued prompt',
+            false,
+            expect.objectContaining({ m365ResponseMode: 'thoughtful' })
+        );
+    });
+
     test('should keep system feedback internal and skip user-visible input log', async () => {
         cm = new ConversationManager(mockBrain, mockShunter, mockController);
         const observation = '[System Observation]\n' + 'tool result '.repeat(500);
@@ -166,5 +184,104 @@ describe('ConversationManager', () => {
                 allowActions: false
             })
         );
+    });
+
+    test('labels transport hooks for an internal Observation turn', async () => {
+        const onTransportStart = jest.fn().mockResolvedValue();
+        const onTransportAccepted = jest.fn().mockResolvedValue();
+        const onTransportComplete = jest.fn().mockResolvedValue();
+        mockCtx = {
+            ...mockCtx,
+            onTransportStart,
+            onTransportAccepted,
+            onTransportComplete,
+        };
+        mockBrain.sendMessage.mockImplementation(async (_text, _isSystem, options) => {
+            await options.onSendAccepted({ acceptedAt: 123 });
+            return {
+                text: '[GOLEM_REPLY] Continued',
+                attachments: [],
+                status: 'ENVELOPE_COMPLETE',
+            };
+        });
+        cm = new ConversationManager(mockBrain, mockShunter, mockController);
+        cm.queue.push({
+            ctx: mockCtx,
+            text: '[System Observation]\nAction completed.',
+            attachment: null,
+            options: {
+                isSystemFeedback: true,
+                workspaceRunId: 'run-1',
+                workspaceStepId: 'step-1',
+                protocolRequestId: 'protocol-1',
+            },
+        });
+
+        await cm._processQueue();
+
+        const expectedMeta = expect.objectContaining({
+            isSystemFeedback: true,
+            workspaceRunId: 'run-1',
+            workspaceStepId: 'step-1',
+            protocolRequestId: 'protocol-1',
+        });
+        expect(onTransportStart).toHaveBeenCalledWith(expectedMeta);
+        expect(onTransportAccepted).toHaveBeenCalledWith(expectedMeta, { acceptedAt: 123 });
+        expect(onTransportComplete).toHaveBeenCalledWith(expect.objectContaining({
+            text: '[GOLEM_REPLY] Continued',
+        }), expectedMeta);
+    });
+
+    test('labels a normal user turn separately from internal Observation turns', async () => {
+        const onTransportStart = jest.fn().mockResolvedValue();
+        const onTransportComplete = jest.fn().mockResolvedValue();
+        mockCtx = {
+            ...mockCtx,
+            onTransportStart,
+            onTransportComplete,
+        };
+        cm = new ConversationManager(mockBrain, mockShunter, mockController);
+        cm.queue.push({ ctx: mockCtx, text: 'normal turn', attachment: null, options: {} });
+
+        await cm._processQueue();
+
+        expect(onTransportStart).toHaveBeenCalledWith(expect.objectContaining({
+            isSystemFeedback: false,
+        }));
+        expect(onTransportComplete).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+            isSystemFeedback: false,
+        }));
+    });
+
+    test('preserves the internal Observation identity when transport start fails', async () => {
+        const error = new Error('Conversation requires reconciliation.');
+        error.code = 'M365_RECONCILIATION_REQUIRED';
+        const onTransportStart = jest.fn().mockRejectedValue(error);
+        const onTransportError = jest.fn().mockResolvedValue();
+        mockCtx = {
+            ...mockCtx,
+            onTransportStart,
+            onTransportError,
+        };
+        cm = new ConversationManager(mockBrain, mockShunter, mockController);
+        cm.queue.push({
+            ctx: mockCtx,
+            text: '[System Observation]\nContinue the plan.',
+            attachment: null,
+            options: {
+                isSystemFeedback: true,
+                workspaceRunId: 'run-1',
+                workspaceStepId: 'step-1',
+            },
+        });
+
+        await cm._processQueue();
+
+        expect(onTransportError).toHaveBeenCalledWith(error, expect.objectContaining({
+            isSystemFeedback: true,
+            workspaceRunId: 'run-1',
+            workspaceStepId: 'step-1',
+        }));
+        expect(mockBrain.sendMessage).not.toHaveBeenCalled();
     });
 });

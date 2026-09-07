@@ -10,6 +10,7 @@ describe('ResponseParser M365 reply-only envelope', () => {
             memory: null,
             projectMemory: null,
             userMemory: null,
+            conversationTitle: null,
             avoidMemory: null,
             actions: [],
             reply: 'POC-M365-READY',
@@ -86,5 +87,32 @@ describe('ResponseParser M365 reply-only envelope', () => {
         const candidate = '1\n[\n3\n{"action":"command","parameter":"echo 7"}\n]';
 
         expect(ResponseParser._stripRenderedCodeLineNumbers(candidate)).toBe(candidate);
+    });
+
+    test('extracts a hidden conversation title separately from the visible reply', () => {
+        const parsed = ResponseParser.parse(
+            '[[BEGIN:title]]\n' +
+            '[GOLEM_CONVERSATION_TITLE]整理 OneDrive 專案檔案[/GOLEM_CONVERSATION_TITLE]\n' +
+            '[GOLEM_REPLY]我來幫你確認。[/GOLEM_REPLY]\n' +
+            '[[END:title]]'
+        );
+
+        expect(parsed.conversationTitle).toBe('整理 OneDrive 專案檔案');
+        expect(parsed.reply).toBe('我來幫你確認。');
+        expect(parsed.reply).not.toContain('GOLEM_CONVERSATION_TITLE');
+    });
+
+    test('rejects multiline or protocol-like generated titles', () => {
+        const multiline = ResponseParser.parse(
+            '[GOLEM_CONVERSATION_TITLE]第一行\n第二行[/GOLEM_CONVERSATION_TITLE]\n' +
+            '[GOLEM_REPLY]完成[/GOLEM_REPLY]'
+        );
+        const protocolLike = ResponseParser.parse(
+            '[GOLEM_CONVERSATION_TITLE]GOLEM_ACTION 測試[/GOLEM_CONVERSATION_TITLE]\n' +
+            '[GOLEM_REPLY]完成[/GOLEM_REPLY]'
+        );
+
+        expect(multiline.conversationTitle).toBeNull();
+        expect(protocolLike.conversationTitle).toBeNull();
     });
 });

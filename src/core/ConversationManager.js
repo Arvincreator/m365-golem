@@ -94,13 +94,13 @@ class ConversationManager {
         // store before entering this queue, so the UI can remain writable while
         // Edge handles the preceding turn.
         const m365WorkspaceQueueEnabled = !localContextEnabled
-            && options.allowM365Queue === true
-            && Boolean(ctx && ctx.workspaceConversationId);
+            && Boolean(ctx && ctx.workspaceConversationId)
+            && (options.allowM365Queue === true || options.isSystemFeedback === true);
         if (!localContextEnabled
             && !m365WorkspaceQueueEnabled
             && (this.isProcessing || this.queue.length > 0 || this.userBuffers.size > 0)) {
             if (ctx && typeof ctx.reply === 'function') {
-                await ctx.reply('⚠️ M365 Web POC 正在處理上一則訊息；安全模式不保存額外待處理內容，請稍後重新送出。');
+                await ctx.reply('⚠️ 上一則訊息仍在處理中，這一則尚未加入；請稍候再試。');
             }
             return;
         }
@@ -278,6 +278,16 @@ class ConversationManager {
 
         this.isProcessing = true;
         const task = this.queue.shift();
+        const isSystemFeedback = task.options && task.options.isSystemFeedback === true;
+        const transportMeta = {
+            isSystemFeedback,
+            protocolRequestId: task.options?.protocolRequestId || task.ctx?.workspaceProtocolRequestId || null,
+            workspaceRunId: task.options?.workspaceRunId || task.ctx?.workspaceRunId || null,
+            workspaceStepId: task.options?.workspaceStepId || task.ctx?.workspaceStepId || null,
+            workspacePlanId: task.options?.workspacePlanId || task.ctx?.workspacePlanId || null,
+            workspacePlanStepId: task.options?.workspacePlanStepId || task.ctx?.workspacePlanStepId || null,
+            workspaceActionId: task.options?.workspaceActionId || task.ctx?.workspaceActionId || null,
+        };
         this._logQueueState('dequeue_start');
 
         // 🧹 [Extra Arch 3] Memory Guard 記憶體上限監控
@@ -293,9 +303,8 @@ class ConversationManager {
         try {
             console.log(`🚀 [Dialogue Queue:${this.golemId}] 從隊列取出，開始處理對話...`);
             if (task.ctx && typeof task.ctx.onTransportStart === 'function') {
-                await task.ctx.onTransportStart();
+                await task.ctx.onTransportStart(transportMeta);
             }
-            const isSystemFeedback = task.options && task.options.isSystemFeedback === true;
             const localContextEnabled = typeof this.brain.isLocalContextEnabled === 'function'
                 ? this.brain.isLocalContextEnabled()
                 : true;
@@ -394,7 +403,7 @@ class ConversationManager {
                 preferredSkillActions: task.ctx && Array.isArray(task.ctx.preferredSkillActions) ? task.ctx.preferredSkillActions : [],
                 preferredMcpServers: task.ctx && Array.isArray(task.ctx.preferredMcpServers) ? task.ctx.preferredMcpServers : [],
                 onSendAccepted: task.ctx && typeof task.ctx.onTransportAccepted === 'function'
-                    ? task.ctx.onTransportAccepted
+                    ? (acceptance) => task.ctx.onTransportAccepted(transportMeta, acceptance)
                     : undefined,
                 toolRoutingQuery: task.ctx && typeof task.ctx.toolRoutingQuery === 'string'
                     ? task.ctx.toolRoutingQuery
@@ -404,11 +413,11 @@ class ConversationManager {
 
             if (task.ctx && typeof task.ctx.onTransportComplete === 'function') {
                 try {
-                    await task.ctx.onTransportComplete(brainResponse);
+                    await task.ctx.onTransportComplete(brainResponse, transportMeta);
                 } catch (hookError) {
                     console.error(`❌ [Dialogue Queue:${this.golemId}] M365 transport persistence hook failed:`, hookError);
                     if (typeof task.ctx.onPersistenceError === 'function') {
-                        await task.ctx.onPersistenceError(hookError).catch(() => undefined);
+                        await task.ctx.onPersistenceError(hookError, transportMeta).catch(() => undefined);
                     }
                 }
             }
@@ -466,7 +475,7 @@ class ConversationManager {
         } catch (e) {
             console.error(`❌ [Dialogue Queue:${this.golemId}] 處理失敗:`, e);
             if (task.ctx && typeof task.ctx.onTransportError === 'function') {
-                await task.ctx.onTransportError(e).catch((hookError) => {
+                await task.ctx.onTransportError(e, transportMeta).catch((hookError) => {
                     console.error(`❌ [Dialogue Queue:${this.golemId}] M365 transport error hook failed:`, hookError);
                 });
             }

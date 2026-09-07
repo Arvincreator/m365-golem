@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import * as os from "node:os";
 import * as path from "node:path";
 import * as fs from "node:fs";
-import { BridgeError, ErrorCode, type Policy } from "@m365-bridge/protocol";
+import { BridgeError, ErrorCode, parsePolicy, type Policy } from "@m365-bridge/protocol";
 import {
   loadPolicy,
   resolveAllowedLocalPath,
@@ -39,6 +39,12 @@ function basePolicy(overrides: Partial<Policy> = {}): Policy {
     deniedSites: deniedSites ?? [],
   };
 }
+
+test("parsePolicy: keeps recycle disabled when an older policy omits the field", () => {
+  const { allowRecycle: _omitted, ...legacyPolicy } = basePolicy();
+  const parsed = parsePolicy(legacyPolicy);
+  assert.equal(parsed.allowRecycle, false);
+});
 
 test("validateHostAndSite: allows a host+site in the allowlist", () => {
   const policy = basePolicy();

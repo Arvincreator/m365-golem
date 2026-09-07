@@ -10,9 +10,9 @@ class SystemLogger {
         this.logFile = path.join(logBaseDir, 'system.log');
         this._ensureDirectory(logBaseDir);
 
-        this.originalLog = console.log;
-        this.originalError = console.error;
-        this.originalWarn = console.warn;
+        this.originalLog = this.originalLog || console.log;
+        this.originalError = this.originalError || console.error;
+        this.originalWarn = this.originalWarn || console.warn;
 
         console.log = (...args) => {
             const ts = new Date().toLocaleTimeString('zh-TW', { hour12: false });
@@ -37,6 +37,20 @@ class SystemLogger {
         this.lastRotationFailure = 0; // ✨ [新增] 避免寫入失敗時無限嘗試輪替 (造成 EIO 循環)
         this.rotationCooldown = 60000; // 60s cooldown
         this._bytesWrittenSinceLastCheck = 0; // ✨ [新增] 累積字節，避免頻繁呼叫 statSync
+        this._cleanOldLogs();
+    }
+
+    static getRetentionPolicy() {
+        const positive = (value, fallback) => {
+            const parsed = Number(value);
+            return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
+        };
+        return {
+            maxFileSizeMb: positive(process.env.LOG_MAX_SIZE_MB, 10),
+            retentionDays: Math.floor(positive(process.env.LOG_RETENTION_DAYS, 7)),
+            maxArchiveFiles: Math.floor(positive(process.env.LOG_MAX_ARCHIVE_FILES, 20)),
+            maxArchiveTotalSizeMb: positive(process.env.LOG_MAX_ARCHIVE_TOTAL_SIZE_MB, 100),
+        };
     }
 
     static _ensureDirectory(dir) {
@@ -102,7 +116,7 @@ class SystemLogger {
 
         // == 輪替條件 2: 容量達標 ==
         if (!shouldRotate) {
-            const maxSizeMb = parseFloat(process.env.LOG_MAX_SIZE_MB) || 10;
+            const maxSizeMb = this.getRetentionPolicy().maxFileSizeMb;
             if (maxSizeMb > 0) {
                 const maxBytes = maxSizeMb * 1024 * 1024;
                 this._bytesWrittenSinceLastCheck += lineBytes;
@@ -178,26 +192,45 @@ class SystemLogger {
         const logDir = path.dirname(this.logFile);
         if (!fs.existsSync(logDir)) return;
 
-        // 從目前的環境變數取得保留參數，預設 7 天
-        const retentionDays = parseInt(process.env.LOG_RETENTION_DAYS, 10) || 7;
+        const policy = this.getRetentionPolicy();
 
         try {
-            const files = fs.readdirSync(logDir)
+            const directoryEntries = fs.readdirSync(logDir);
+            if (!Array.isArray(directoryEntries)) return;
+            const files = directoryEntries
                 .filter(file => file.startsWith('system-') && file.endsWith('.log.gz'))
                 .map(file => {
                     const filePath = path.join(logDir, file);
                     return { path: filePath, stats: fs.statSync(filePath) };
-                });
+                })
+                .sort((a, b) => b.stats.mtimeMs - a.stats.mtimeMs);
 
-            // 統一以檔案的新舊時間 (Retention Days) 作為清理依據
             const nowTime = Date.now();
-            const maxAgeMs = retentionDays * 24 * 60 * 60 * 1000;
+            const maxAgeMs = policy.retentionDays * 24 * 60 * 60 * 1000;
+            const retained = [];
 
-            files.forEach(fileObj => {
+            for (const fileObj of files) {
                 if (nowTime - fileObj.stats.mtimeMs > maxAgeMs) {
                     try { fs.unlinkSync(fileObj.path); } catch (e) { }
+                } else {
+                    retained.push(fileObj);
                 }
-            });
+            }
+
+            for (const fileObj of retained.slice(policy.maxArchiveFiles)) {
+                try { fs.unlinkSync(fileObj.path); } catch (e) { }
+            }
+
+            const countBounded = retained.slice(0, policy.maxArchiveFiles);
+            const maxArchiveBytes = policy.maxArchiveTotalSizeMb * 1024 * 1024;
+            let totalBytes = countBounded.reduce((sum, item) => sum + Number(item.stats.size || 0), 0);
+            for (let index = countBounded.length - 1; index >= 0 && totalBytes > maxArchiveBytes; index -= 1) {
+                const fileObj = countBounded[index];
+                try {
+                    fs.unlinkSync(fileObj.path);
+                    totalBytes -= Number(fileObj.stats.size || 0);
+                } catch (e) { }
+            }
         } catch (error) {
             if (this.originalError) {
                 this.originalError(`[SystemLogger] 日誌清理失敗: ${error.message}`);

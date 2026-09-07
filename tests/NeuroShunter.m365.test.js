@@ -12,19 +12,34 @@ const ResponseParser = require('../src/utils/ResponseParser');
 const MultiAgentHandler = require('../src/core/action_handlers/MultiAgentHandler');
 const SkillHandler = require('../src/core/action_handlers/SkillHandler');
 const CommandHandler = require('../src/core/action_handlers/CommandHandler');
+const { getAutomationModePreset } = require('../src/config/AutomationModes');
+
+const AUTOMATION_ENV_KEYS = [
+    'GOLEM_AUTO_APPROVE_ALL',
+    'GOLEM_SILENT_AUTO_APPROVE',
+    'GOLEM_TRUST_SYSTEM_COMMANDS',
+    'GOLEM_STRICT_SAFEGUARD',
+    'GOLEM_MAX_AUTO_TURNS',
+    'GOLEM_INTERVENTION_LEVEL',
+    'AUTONOMY_LEVEL',
+];
 
 describe('NeuroShunter M365 safety gates', () => {
-    let previousAutoApprove;
+    let previousAutomationEnv;
 
     beforeEach(() => {
         jest.clearAllMocks();
-        previousAutoApprove = process.env.GOLEM_AUTO_APPROVE_ALL;
-        process.env.GOLEM_AUTO_APPROVE_ALL = 'false';
+        previousAutomationEnv = Object.fromEntries(
+            AUTOMATION_ENV_KEYS.map((key) => [key, process.env[key]])
+        );
+        Object.assign(process.env, getAutomationModePreset('guided'));
     });
 
     afterEach(() => {
-        if (previousAutoApprove === undefined) delete process.env.GOLEM_AUTO_APPROVE_ALL;
-        else process.env.GOLEM_AUTO_APPROVE_ALL = previousAutoApprove;
+        for (const key of AUTOMATION_ENV_KEYS) {
+            if (previousAutomationEnv[key] === undefined) delete process.env[key];
+            else process.env[key] = previousAutomationEnv[key];
+        }
     });
 
     test('blocks model actions and memory writes when backend gates are closed', async () => {
@@ -52,6 +67,37 @@ describe('NeuroShunter M365 safety gates', () => {
         expect(MultiAgentHandler.execute).not.toHaveBeenCalled();
         expect(SkillHandler.execute).not.toHaveBeenCalled();
         expect(CommandHandler.execute).not.toHaveBeenCalled();
+    });
+
+    test('forwards hidden conversation-title metadata even when tool actions are disabled', async () => {
+        const onGolemConversationTitle = jest.fn().mockResolvedValue({ changed: true });
+        const ctx = {
+            reply: jest.fn().mockResolvedValue(),
+            shouldMentionSender: false,
+            platform: 'web',
+            onGolemConversationTitle,
+        };
+        const brain = {
+            memorize: jest.fn().mockResolvedValue(),
+            _appendChatLog: jest.fn(),
+            areActionsEnabled: jest.fn(() => false),
+            isLocalContextEnabled: jest.fn(() => false),
+        };
+        ResponseParser.parse.mockReturnValue({
+            memory: null,
+            conversationTitle: '整理 OneDrive 專案檔案',
+            reply: '我來幫你確認。',
+            actions: [],
+        });
+
+        await NeuroShunter.dispatch(ctx, 'raw-title-response', brain, {});
+
+        expect(onGolemConversationTitle).toHaveBeenCalledWith({
+            conversationTitle: '整理 OneDrive 專案檔案',
+            isSystemFeedback: false,
+        });
+        expect(ctx.reply).toHaveBeenCalledWith('我來幫你確認。');
+        expect(ctx.reply.mock.calls.flat().join('\n')).not.toContain('GOLEM_CONVERSATION_TITLE');
     });
 
     test('pauses enabled M365 actions in the original pending task gate', async () => {
@@ -87,6 +133,62 @@ describe('NeuroShunter M365 safety gates', () => {
             expect.stringContaining('待你在右側'),
             expect.objectContaining({ reply_markup: expect.any(Object) })
         );
+        expect(SkillHandler.execute).not.toHaveBeenCalled();
+        expect(CommandHandler.execute).not.toHaveBeenCalled();
+    });
+
+    test('balanced mode auto-runs only a safe L0 native command', async () => {
+        Object.assign(process.env, getAutomationModePreset('balanced'));
+        const ctx = {
+            reply: jest.fn().mockResolvedValue(),
+            shouldMentionSender: false,
+            platform: 'web',
+        };
+        const brain = {
+            webBackend: { id: 'm365-web', safeMode: true },
+            memorize: jest.fn().mockResolvedValue(),
+            _appendChatLog: jest.fn(),
+            areActionsEnabled: jest.fn(() => true),
+            isLocalContextEnabled: jest.fn(() => false),
+        };
+        const controller = { pendingTasks: new Map() };
+        ResponseParser.parse.mockReturnValue({
+            memory: null,
+            reply: '',
+            actions: [{ action: 'command', parameter: 'cat README.md' }],
+        });
+
+        await NeuroShunter.dispatch(ctx, 'raw', brain, controller);
+
+        expect(controller.pendingTasks.size).toBe(0);
+        expect(CommandHandler.execute).toHaveBeenCalledTimes(1);
+        expect(SkillHandler.execute).not.toHaveBeenCalled();
+    });
+
+    test('balanced mode still asks before MCP or Skill execution', async () => {
+        Object.assign(process.env, getAutomationModePreset('balanced'));
+        const ctx = {
+            reply: jest.fn().mockResolvedValue(),
+            shouldMentionSender: false,
+            platform: 'web',
+        };
+        const brain = {
+            webBackend: { id: 'm365-web', safeMode: true },
+            memorize: jest.fn().mockResolvedValue(),
+            _appendChatLog: jest.fn(),
+            areActionsEnabled: jest.fn(() => true),
+            isLocalContextEnabled: jest.fn(() => false),
+        };
+        const controller = { pendingTasks: new Map() };
+        ResponseParser.parse.mockReturnValue({
+            memory: null,
+            reply: '',
+            actions: [{ action: 'mcp_call', server: 'demo', tool: 'read', parameters: {} }],
+        });
+
+        await NeuroShunter.dispatch(ctx, 'raw', brain, controller);
+
+        expect(controller.pendingTasks.size).toBe(1);
         expect(SkillHandler.execute).not.toHaveBeenCalled();
         expect(CommandHandler.execute).not.toHaveBeenCalled();
     });
@@ -154,6 +256,8 @@ describe('NeuroShunter M365 safety gates', () => {
                 workspaceActionId: 'action-1',
             }),
         }));
+        expect(ctx.reply).toHaveBeenCalledWith('我正在確認，請稍候…');
+        expect(ctx.reply.mock.calls.flat().join('\n')).not.toContain('等待 Harness 核准與回傳結果');
         expect(CommandHandler.execute).not.toHaveBeenCalled();
     });
 
