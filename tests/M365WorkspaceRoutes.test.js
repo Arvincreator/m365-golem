@@ -100,6 +100,34 @@ describe('M365 workspace routes', () => {
         expect(JSON.stringify(body)).not.toContain(tempDir);
     });
 
+    test('draft endpoints enforce local Host, scope, CAS and no-store on a synthetic database', async () => {
+        await request('/api/m365/workspace/status');
+        const store = serverContext.m365WorkspaceStore;
+        const project = await store.createProject({ name: 'Synthetic draft route' });
+        const conversation = await store.createConversation(project.id, { title: 'Synthetic draft' });
+        const url = `/api/projects/${project.id}/conversations/${conversation.id}/draft`;
+        const headers = { host: 'localhost:3000' };
+        // Node fetch normalizes Host; raw HTTP exercises the server's exact authority guard.
+        const uxRequest = (pathname, options = {}) => new Promise((resolve, reject) => {
+            const req = require('http').request(`${baseUrl}${pathname}`, { method: options.method || 'GET', headers: { 'content-type': 'application/json', origin: 'http://localhost:3000', ...options.headers } }, res => {
+                let body = '';
+                res.on('data', chunk => { body += chunk; });
+                res.on('end', () => resolve({ response: { status: res.statusCode, headers: { get: key => res.headers[key] } }, body: JSON.parse(body) }));
+            });
+            req.on('error', reject); req.end(options.body);
+        });
+        const saved = await uxRequest(url, { method: 'POST', headers, body: JSON.stringify({ expectedRevision: 0, draft: { text: 'synthetic draft text' } }) });
+        expect(saved.response.status).toBe(200);
+        expect(saved.body.draft.revision).toBe(1);
+        const loaded = await uxRequest(url, { headers });
+        expect(loaded.response.headers.get('cache-control')).toBe('no-store');
+        expect(loaded.body.draft.text).toBe('synthetic draft text');
+        expect((await uxRequest(url, { method: 'POST', headers, body: JSON.stringify({ expectedRevision: 0, draft: {} }) })).response.status).toBe(409);
+        expect((await uxRequest(url, { headers: { ...headers, 'x-forwarded-for': '127.0.0.1' } })).response.status).toBe(403);
+        expect((await uxRequest(url, { headers: { host: 'outside.invalid:3000' } })).response.status).toBe(403);
+        expect((await uxRequest(`/api/projects/other-project/conversations/${conversation.id}/draft`, { headers })).response.status).toBe(403);
+    });
+
     test('opens the local-only folder picker through a user-initiated endpoint', async () => {
         const result = await request('/api/m365/workspace/pick-folder', {
             method: 'POST',

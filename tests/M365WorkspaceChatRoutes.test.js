@@ -4,6 +4,7 @@ const express = require('express');
 
 const mockStore = {
     getConversation: jest.fn(),
+    listProjectReferences: jest.fn(),
     getProject: jest.fn(),
     addMessage: jest.fn(),
     updateMessageDeliveryState: jest.fn(),
@@ -195,6 +196,7 @@ describe('workspace-aware M365 chat route', () => {
         });
         mockMarkReconcile.mockResolvedValue();
         mockReferenceFileService.list.mockReturnValue([]);
+        mockStore.listProjectReferences.mockResolvedValue(["ref-1", "ref-env"]);
         mockReferenceFileService.read.mockReturnValue(null);
         mockMcpManager.getServers.mockReturnValue([]);
         mockProjectWorkspaceService.ensureProject.mockReturnValue({
@@ -466,6 +468,15 @@ describe('workspace-aware M365 chat route', () => {
             'Continue this project.',
             expect.objectContaining({ limit: 8 })
         );
+    });
+
+    test('rejects unassigned or cross-project references before reading content or dispatching', async () => {
+        mockStore.listProjectReferences.mockResolvedValue([]);
+        const result = await postChat({ golemId: 'golem_A', projectId: 'project-1', conversationId: 'conversation-1', message: 'synthetic', referenceFileIds: ['other-project-reference'] });
+        expect(result.response.status).toBe(403);
+        expect(mockReferenceFileService.read).not.toHaveBeenCalled();
+        expect(mockHandleDashboardMessage).not.toHaveBeenCalled();
+        expect(mockStore.addMessage).not.toHaveBeenCalled();
     });
 
     test('adds only explicitly selected file text, MCP servers, Skills, and response mode to the Golem workspace envelope', async () => {

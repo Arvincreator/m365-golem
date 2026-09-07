@@ -193,7 +193,7 @@ export default function M365MessageContent({ content }: { content: string }) {
             {segments.map((segment, index) => segment.kind === "code" ? (
                 <CodeArtifactCard key={`code-${index}`} {...segment} />
             ) : (
-                <div key={`markdown-${index}`} className="prose prose-sm max-w-none break-words text-foreground dark:prose-invert prose-p:my-2 prose-pre:overflow-x-auto">
+                <div key={`markdown-${index}`} className="prose prose-base max-w-none break-words leading-[1.7] text-foreground dark:prose-invert prose-p:my-2 prose-pre:overflow-x-auto [&_table]:block [&_table]:max-w-full [&_table]:overflow-x-auto">
                     <ReactMarkdown remarkPlugins={[remarkGfm]} components={externalConversationLinkComponents}>{segment.content}</ReactMarkdown>
                 </div>
             ))}

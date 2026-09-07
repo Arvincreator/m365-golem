@@ -200,7 +200,7 @@ function PersonaDeleteConfirmDialog({
                     <DialogTitle className="text-foreground text-base">{isEnglish ? "Delete this persona?" : "確定要刪除此人格嗎？"}</DialogTitle>
                     <DialogDescription className="text-muted-foreground text-sm leading-relaxed">
                         {isEnglish ? (
-                            <>You are deleting template "<span className="text-foreground font-medium">{personaName}</span>". This cannot be undone.</>
+                            <>You are deleting template &quot;<span className="text-foreground font-medium">{personaName}</span>&quot;. This cannot be undone.</>
                         ) : (
                             <>您即將刪除樣板「<span className="text-foreground font-medium">{personaName}</span>」。此動作無法復原。</>
                         )}

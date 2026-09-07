@@ -556,6 +556,13 @@ module.exports = function(server) {
                     });
                 }
                 workspaceProject = await workspaceStore.getProject(workspaceConversation.projectId);
+                if (Array.isArray(referenceFileIds) && referenceFileIds.length) {
+                    const bindings = await workspaceStore.listProjectReferences(workspaceProject.id);
+                    if (referenceFileIds.some(id => !bindings.includes(id))) {
+                        return res.status(403).json({ success: false, error: 'M365_REFERENCE_SCOPE_INVALID',
+                            message: '知識來源尚未明確加入此專案，不能傳送。' });
+                    }
+                }
                 projectWorkspaceService = getM365ProjectWorkspaceService(server);
                 projectWorkspace = projectWorkspaceService.ensureProject(workspaceProject.id, {
                     workspacePath: workspaceProject.workspacePath,

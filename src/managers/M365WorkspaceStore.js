@@ -327,6 +327,87 @@ class M365WorkspaceStore {
                 [this._now()]
             );
         });
+        const versionThree = await this._get('SELECT version FROM schema_migrations WHERE version = 3');
+        if (!versionThree) {
+            // VACUUM INTO includes committed WAL data and retains encrypted field bytes.
+            // Keep a separate local backup; never copy a live database file with fs.copyFile.
+            await this._run('VACUUM INTO ?', [`${this.dbPath}.pre-ux-v3-${crypto.randomUUID()}.sqlite`]);
+            await this._transaction(async () => {
+                await this._ensureUxSchema();
+                await this._run('INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(3, ?)', [this._now()]);
+            });
+        }
+    }
+
+    async _ensureUxSchema() {
+        await this._run(`CREATE TABLE IF NOT EXISTS conversation_drafts (
+            conversation_id TEXT PRIMARY KEY REFERENCES conversations(id),
+            revision INTEGER NOT NULL,
+            payload_ciphertext TEXT NOT NULL, payload_iv TEXT NOT NULL, payload_tag TEXT NOT NULL,
+            updated_at TEXT NOT NULL)`);
+        await this._run(`CREATE TABLE IF NOT EXISTS project_reference_bindings (
+            project_id TEXT NOT NULL REFERENCES projects(id), reference_id TEXT NOT NULL,
+            PRIMARY KEY(project_id, reference_id))`);
+    }
+
+    async _uxScope(projectId, conversationId) {
+        const row = await this._get('SELECT * FROM conversations WHERE id = ?', [conversationId]);
+        if (!row || row.project_id !== projectId) throw Object.assign(new Error('Conversation does not belong to this project.'), { code: 'M365_SCOPE_INVALID', statusCode: 403 });
+        // Authenticate existing encrypted data before writing with a possibly wrong key.
+        this._decodeConversation(row);
+        return row;
+    }
+
+    async getDraft(projectId, conversationId) {
+        return this._enqueue(async () => {
+            await this._uxScope(projectId, conversationId);
+            await this._ensureUxSchema();
+            const row = await this._get('SELECT * FROM conversation_drafts WHERE conversation_id = ?', [conversationId]);
+            const { normalizeDraft } = require('../services/M365UxDraft');
+            return { ...normalizeDraft(row ? JSON.parse(this._decrypt(row, 'payload', `draft:${projectId}:${conversationId}`)) : {}),
+                projectId, conversationId, revision: row?.revision || 0, updatedAt: row?.updated_at || null };
+        });
+    }
+
+    async saveDraft(projectId, conversationId, expectedRevision, input) {
+        const { normalizeDraft } = require('../services/M365UxDraft');
+        const draft = normalizeDraft(input);
+        if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) throw Object.assign(new Error('Invalid expected revision.'), { statusCode: 400 });
+        return this._enqueue(async () => this._transaction(async () => {
+            await this._uxScope(projectId, conversationId);
+            await this._ensureUxSchema();
+            const row = await this._get('SELECT * FROM conversation_drafts WHERE conversation_id = ?', [conversationId]);
+            if (row) this._decrypt(row, 'payload', `draft:${projectId}:${conversationId}`);
+            if ((row?.revision || 0) !== expectedRevision) throw Object.assign(new Error('草稿已在另一個視窗更新；本視窗內容仍保留，請先處理版本衝突。'), { code: 'M365_DRAFT_CONFLICT', statusCode: 409 });
+            const revision = expectedRevision + 1;
+            const updatedAt = this._now();
+            await this._run(`INSERT INTO conversation_drafts VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(conversation_id) DO UPDATE SET revision=excluded.revision,
+                payload_ciphertext=excluded.payload_ciphertext, payload_iv=excluded.payload_iv,
+                payload_tag=excluded.payload_tag, updated_at=excluded.updated_at`,
+                [conversationId, revision, ...this._encryptedParams(JSON.stringify(draft), `draft:${projectId}:${conversationId}`), updatedAt]);
+            return { ...draft, projectId, conversationId, revision, updatedAt };
+        }));
+    }
+
+    async listProjectReferences(projectId) {
+        return this._enqueue(async () => {
+            const project = await this._get('SELECT * FROM projects WHERE id = ?', [projectId]);
+            if (!project) throw Object.assign(new Error('Project not found.'), { statusCode: 404 });
+            this._decodeProject(project);
+            await this._ensureUxSchema();
+            return (await this._all('SELECT reference_id FROM project_reference_bindings WHERE project_id = ?', [projectId])).map(row => row.reference_id);
+        });
+    }
+
+    async bindProjectReference(projectId, referenceId) {
+        return this._enqueue(async () => {
+            const project = await this._get('SELECT * FROM projects WHERE id = ?', [projectId]);
+            if (!project) throw Object.assign(new Error('Project not found.'), { statusCode: 404 });
+            this._decodeProject(project);
+            await this._ensureUxSchema();
+            await this._run('INSERT OR IGNORE INTO project_reference_bindings VALUES (?, ?)', [projectId, referenceId]);
+        });
     }
 
     _now() {

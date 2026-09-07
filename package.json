@@ -30,7 +30,9 @@
     "// --- Windows 安裝入口 ---": "",
     "win:setup": "Install-M365-Golem.bat",
     "// --- 自動化 ---": "",
-    "postinstall": "echo [INFO] M365 Golem dependencies installed."
+    "postinstall": "echo [INFO] M365 Golem dependencies installed.",
+    "test:ux": "jest --runInBand tests/M365UxDraft.test.js tests/M365UxController.test.js tests/M365WorkspaceChatRoutes.test.js tests/M365WorkspaceUiRegression.test.js",
+    "test:e2e:ux": "node scripts/test-ux-browser.cjs"
   },
   "keywords": [
     "golem",

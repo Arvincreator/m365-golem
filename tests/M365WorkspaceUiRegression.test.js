@@ -4,7 +4,7 @@ const fs = require('fs');
 const path = require('path');
 
 describe('M365 workspace UI regressions', () => {
-    const read = (relativePath) => fs.readFileSync(path.resolve(__dirname, '..', relativePath), 'utf8');
+    const read = (relativePath) => fs.readFileSync(path.resolve(__dirname, '..', relativePath), 'utf8').replace(/\r\n/g, '\n');
 
     test('clears stale project and conversation selections after the server tree is loaded', () => {
         const source = read('web-dashboard/src/app/dashboard/layout.tsx');
@@ -15,7 +15,7 @@ describe('M365 workspace UI regressions', () => {
 
     test('clears a prior chat error after valid context loads or the selection disappears', () => {
         const source = read('web-dashboard/src/app/dashboard/chat/page.tsx');
-        expect(source).toContain('await Promise.all([loadMessages(), loadRuns(), loadPendingLocalActions(), loadPendingResponses()]);\n        setError("");');
+        expect(source).toContain('await Promise.all([loadMessages(), loadRuns(), loadPendingLocalActions(), loadPendingResponses()]);\n        if (ticket.current()) setError("");');
         expect(source).toContain('setPendingLocalActions([]);\n            setActionExecutionQueue([]);\n            setPendingResponses([]);\n            setError("");');
     });
 
@@ -41,7 +41,7 @@ describe('M365 workspace UI regressions', () => {
         expect(source).toContain('collectDroppedAttachmentCandidates');
         expect(source).toContain('node.setAttribute("webkitdirectory", "")');
         expect(source).toContain('onDrop={(event) => void handleAttachmentDrop(event)}');
-        expect(source).toContain('正在等待 M365 完成 OneDrive 上傳並啟用送出鍵');
+        expect(source).toContain('M365 處理與送出結果以對話狀態為準');
     });
 
     test('sends expanded Prompt Pool shortcuts through the M365 workspace envelope', () => {
@@ -56,7 +56,7 @@ describe('M365 workspace UI regressions', () => {
         const source = read('web-dashboard/src/app/dashboard/chat/page.tsx');
         expect(source).toContain('<option value="auto">自動</option>');
         expect(source).toContain('<option value="quick">快速回應</option>');
-        expect(source).toContain('<option value="thoughtful">深度思考</option>');
+        expect(source).toContain('<option value="thoughtful">仔細</option>');
         expect(source).not.toContain('<option value="thoughtful">自動思考</option>');
     });
 
@@ -101,9 +101,9 @@ describe('M365 workspace UI regressions', () => {
         expect(source).toContain('工具執行中');
         expect(source).toContain('等待 Observation');
         expect(source).toContain('進行中');
-        expect(source).toContain('`計畫 ${run.status === "COMPLETED" ? runDetail.plan.steps.length');
+        expect(source).toContain('`計畫 ${runDetail.plan.steps.filter');
         expect(source).toContain('宿主執行 ${run.currentStep}/${run.maxSteps}');
-        expect(source).toContain('const displayedStatus = run.status === "COMPLETED" ? "completed" : step.status;');
+        expect(source).toContain('const displayedStatus = step.status;');
         expect(source).toContain('runAction(run, "complete"');
         expect(source).toContain('確認已完成');
         expect(source).toContain('每輪都會先判斷');
