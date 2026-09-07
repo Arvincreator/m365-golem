@@ -5,6 +5,10 @@ const fs = require('fs');
 const path = require('path');
 const sqlite3 = require('sqlite3').verbose();
 const { v4: uuidv4 } = require('uuid');
+const {
+    isPlaceholderConversationTitle,
+    normalizeGeneratedConversationTitle,
+} = require('../services/M365ConversationTitle');
 
 const RUN_STATUSES = Object.freeze([
     'DRAFT',
@@ -57,6 +61,7 @@ const RUN_TRANSITIONS = Object.freeze({
 
 const WORKSPACE_MODES = new Set(['managed', 'create', 'existing']);
 const PROJECT_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/;
+const GOAL_MODE_MAX_STEPS = 2147483647;
 
 function workspaceError(code, message, details = null) {
     const error = new Error(message);
@@ -322,6 +327,95 @@ class M365WorkspaceStore {
                 'INSERT INTO schema_migrations(version, applied_at) VALUES(2, ?)',
                 [this._now()]
             );
+        });
+        const versionThree = await this._get('SELECT version FROM schema_migrations WHERE version = 3');
+        if (!versionThree) {
+            // VACUUM INTO includes committed WAL data and retains encrypted field bytes.
+            // Keep a separate local backup; never copy a live database file with fs.copyFile.
+            await this._run('VACUUM INTO ?', [`${this.dbPath}.pre-ux-v3-${crypto.randomUUID()}.sqlite`]);
+            await this._transaction(async () => {
+                await this._ensureUxSchema();
+                await this._run('INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(3, ?)', [this._now()]);
+            });
+        }
+        const versionFour = await this._get('SELECT version FROM schema_migrations WHERE version = 4');
+        if (!versionFour) await this._transaction(async () => {
+            await this._run('ALTER TABLE runs ADD COLUMN goal_mode INTEGER NOT NULL DEFAULT 0 CHECK (goal_mode IN (0, 1))');
+            await this._run(
+                'INSERT INTO schema_migrations(version, applied_at) VALUES(4, ?)',
+                [this._now()]
+            );
+        });
+    }
+
+    async _ensureUxSchema() {
+        await this._run(`CREATE TABLE IF NOT EXISTS conversation_drafts (
+            conversation_id TEXT PRIMARY KEY REFERENCES conversations(id),
+            revision INTEGER NOT NULL,
+            payload_ciphertext TEXT NOT NULL, payload_iv TEXT NOT NULL, payload_tag TEXT NOT NULL,
+            updated_at TEXT NOT NULL)`);
+        await this._run(`CREATE TABLE IF NOT EXISTS project_reference_bindings (
+            project_id TEXT NOT NULL REFERENCES projects(id), reference_id TEXT NOT NULL,
+            PRIMARY KEY(project_id, reference_id))`);
+    }
+
+    async _uxScope(projectId, conversationId) {
+        const row = await this._get('SELECT * FROM conversations WHERE id = ?', [conversationId]);
+        if (!row || row.project_id !== projectId) throw Object.assign(new Error('Conversation does not belong to this project.'), { code: 'M365_SCOPE_INVALID', statusCode: 403 });
+        // Authenticate existing encrypted data before writing with a possibly wrong key.
+        this._decodeConversation(row);
+        return row;
+    }
+
+    async getDraft(projectId, conversationId) {
+        return this._enqueue(async () => {
+            await this._uxScope(projectId, conversationId);
+            await this._ensureUxSchema();
+            const row = await this._get('SELECT * FROM conversation_drafts WHERE conversation_id = ?', [conversationId]);
+            const { normalizeDraft } = require('../services/M365UxDraft');
+            return { ...normalizeDraft(row ? JSON.parse(this._decrypt(row, 'payload', `draft:${projectId}:${conversationId}`)) : {}),
+                projectId, conversationId, revision: row?.revision || 0, updatedAt: row?.updated_at || null };
+        });
+    }
+
+    async saveDraft(projectId, conversationId, expectedRevision, input) {
+        const { normalizeDraft } = require('../services/M365UxDraft');
+        const draft = normalizeDraft(input);
+        if (!Number.isSafeInteger(expectedRevision) || expectedRevision < 0) throw Object.assign(new Error('Invalid expected revision.'), { statusCode: 400 });
+        return this._enqueue(async () => this._transaction(async () => {
+            await this._uxScope(projectId, conversationId);
+            await this._ensureUxSchema();
+            const row = await this._get('SELECT * FROM conversation_drafts WHERE conversation_id = ?', [conversationId]);
+            if (row) this._decrypt(row, 'payload', `draft:${projectId}:${conversationId}`);
+            if ((row?.revision || 0) !== expectedRevision) throw Object.assign(new Error('草稿已在另一個視窗更新；本視窗內容仍保留，請先處理版本衝突。'), { code: 'M365_DRAFT_CONFLICT', statusCode: 409 });
+            const revision = expectedRevision + 1;
+            const updatedAt = this._now();
+            await this._run(`INSERT INTO conversation_drafts VALUES (?, ?, ?, ?, ?, ?)
+                ON CONFLICT(conversation_id) DO UPDATE SET revision=excluded.revision,
+                payload_ciphertext=excluded.payload_ciphertext, payload_iv=excluded.payload_iv,
+                payload_tag=excluded.payload_tag, updated_at=excluded.updated_at`,
+                [conversationId, revision, ...this._encryptedParams(JSON.stringify(draft), `draft:${projectId}:${conversationId}`), updatedAt]);
+            return { ...draft, projectId, conversationId, revision, updatedAt };
+        }));
+    }
+
+    async listProjectReferences(projectId) {
+        return this._enqueue(async () => {
+            const project = await this._get('SELECT * FROM projects WHERE id = ?', [projectId]);
+            if (!project) throw Object.assign(new Error('Project not found.'), { statusCode: 404 });
+            this._decodeProject(project);
+            await this._ensureUxSchema();
+            return (await this._all('SELECT reference_id FROM project_reference_bindings WHERE project_id = ?', [projectId])).map(row => row.reference_id);
+        });
+    }
+
+    async bindProjectReference(projectId, referenceId) {
+        return this._enqueue(async () => {
+            const project = await this._get('SELECT * FROM projects WHERE id = ?', [projectId]);
+            if (!project) throw Object.assign(new Error('Project not found.'), { statusCode: 404 });
+            this._decodeProject(project);
+            await this._ensureUxSchema();
+            await this._run('INSERT OR IGNORE INTO project_reference_bindings VALUES (?, ?)', [projectId, referenceId]);
         });
     }
 
@@ -706,6 +800,39 @@ class M365WorkspaceStore {
         });
     }
 
+    async updateConversationTitleIfPlaceholder(conversationId, titleValue) {
+        const title = normalizeGeneratedConversationTitle(titleValue);
+        return this._enqueue(async () => {
+            const current = await this._get('SELECT * FROM conversations WHERE id = ?', [conversationId]);
+            if (!current) throw workspaceError('M365_CONVERSATION_NOT_FOUND', 'Conversation not found.');
+
+            const decoded = this._decodeConversation(current);
+            if (!title) {
+                return { changed: false, reason: 'invalid_title', conversation: decoded };
+            }
+            if (current.status !== 'active') {
+                return { changed: false, reason: 'conversation_not_active', conversation: decoded };
+            }
+            if (!isPlaceholderConversationTitle(decoded.title)) {
+                return { changed: false, reason: 'title_already_set', conversation: decoded };
+            }
+
+            const now = this._now();
+            await this._run(`
+                UPDATE conversations SET
+                    title_ciphertext = ?, title_iv = ?, title_tag = ?, updated_at = ?
+                WHERE id = ?
+            `, [...this._encryptedParams(title, `conversations:${conversationId}:title`), now, conversationId]);
+            return {
+                changed: true,
+                reason: 'updated',
+                conversation: this._decodeConversation(
+                    await this._get('SELECT * FROM conversations WHERE id = ?', [conversationId])
+                ),
+            };
+        });
+    }
+
     async setConversationBinding(conversationId, binding = {}) {
         const bindingState = String(binding.bindingState || 'bound');
         if (!['unbound', 'bound', 'reconcile_required', 'broken'].includes(bindingState)) {
@@ -874,8 +1001,11 @@ class M365WorkspaceStore {
         const objective = requireText(input.objective, 'objective', 20000);
         const constraints = optionalText(input.constraints, 'constraints', 20000);
         const verification = requireText(input.verification, 'verification', 20000);
+        const goalMode = input.goalMode === true;
         const rawMaxSteps = Number(input.maxSteps || 6);
-        const maxSteps = Number.isFinite(rawMaxSteps) ? Math.max(1, Math.min(Math.floor(rawMaxSteps), 12)) : 6;
+        const maxSteps = goalMode
+            ? GOAL_MODE_MAX_STEPS
+            : (Number.isFinite(rawMaxSteps) ? Math.max(1, Math.min(Math.floor(rawMaxSteps), 12)) : 6);
         const startImmediately = input.startImmediately === true;
         const initialStatus = startImmediately ? 'RUNNING' : 'WAITING_START_APPROVAL';
         const origin = String(input.origin || (startImmediately ? 'copilot' : 'user')).trim().slice(0, 40) || 'user';
@@ -905,8 +1035,8 @@ class M365WorkspaceStore {
                     objective_ciphertext, objective_iv, objective_tag,
                     constraints_ciphertext, constraints_iv, constraints_tag,
                     verification_ciphertext, verification_iv, verification_tag,
-                    status, max_steps, current_step, created_at, started_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+                    status, max_steps, current_step, goal_mode, created_at, started_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
             `, [
                 id,
                 conversationId,
@@ -915,15 +1045,17 @@ class M365WorkspaceStore {
                 ...this._encryptedParams(verification, `runs:${id}:verification`),
                 initialStatus,
                 maxSteps,
+                goalMode ? 1 : 0,
                 now,
                 startImmediately ? now : null,
                 now,
             ]);
-            await this._appendRunEventDirect(id, 'run_created', { maxSteps, origin, startImmediately });
+            await this._appendRunEventDirect(id, 'run_created', { maxSteps, goalMode, origin, startImmediately });
             await this._appendCheckpointDirect(id, null, {
                 status: initialStatus,
                 currentStep: 0,
                 pendingApproval: startImmediately ? null : 'run_start',
+                goalMode,
                 origin,
             });
             return this._decodeRun(await this._get('SELECT * FROM runs WHERE id = ?', [id]));
@@ -941,6 +1073,7 @@ class M365WorkspaceStore {
             status: row.status,
             maxSteps: row.max_steps,
             currentStep: row.current_step,
+            goalMode: row.goal_mode === 1,
             errorCode: row.error_code,
             createdAt: row.created_at,
             startedAt: row.started_at,
@@ -1318,5 +1451,6 @@ class M365WorkspaceStore {
 module.exports = M365WorkspaceStore;
 module.exports.RUN_STATUSES = RUN_STATUSES;
 module.exports.RUN_TRANSITIONS = RUN_TRANSITIONS;
+module.exports.GOAL_MODE_MAX_STEPS = GOAL_MODE_MAX_STEPS;
 module.exports.parseEncryptionKey = parseEncryptionKey;
 module.exports.workspaceError = workspaceError;

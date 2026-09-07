@@ -327,7 +327,7 @@ describe('Prompt Pool routes', () => {
         expect(auditRes.body.records[0].details.repairedCount).toBeGreaterThanOrEqual(2);
     });
 
-    test('tracks shortcut usage and exposes recent usage ranking', async () => {
+    test('tracks M365 shortcut usage and exposes recent usage ranking', async () => {
         const createRes = await requestJson(baseUrl, '/api/prompt-pool', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -344,8 +344,8 @@ describe('Prompt Pool routes', () => {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
                 shortcut: '/weekly',
-                source: 'telegram',
-                platform: 'telegram',
+                source: 'm365_chat',
+                platform: 'm365',
             }),
         });
         expect(track1.status).toBe(200);
@@ -355,9 +355,9 @@ describe('Prompt Pool routes', () => {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
-                shortcut: '/weekly@golem_a',
-                source: 'web_dashboard',
-                platform: 'web',
+                shortcut: '/weekly',
+                source: 'm365_chat',
+                platform: 'm365',
             }),
         });
         expect(track2.status).toBe(200);
@@ -470,7 +470,7 @@ describe('Prompt Pool routes', () => {
         expect(trendTotal).toBe(2);
     });
 
-    test('usage-trend endpoint returns per-shortcut curve and validates unknown shortcut', async () => {
+    test('retired usage-trend endpoint is not exposed', async () => {
         await requestJson(baseUrl, '/api/prompt-pool', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -513,18 +513,6 @@ describe('Prompt Pool routes', () => {
         })}\n`);
 
         const alphaRes = await requestJson(baseUrl, `/api/prompt-pool/usage-trend?shortcut=${encodeURIComponent('/alpha')}&days=14`);
-        expect(alphaRes.status).toBe(200);
-        expect(alphaRes.body.success).toBe(true);
-        expect(alphaRes.body.shortcut).toBe('/alpha');
-        expect(alphaRes.body.days).toBe(14);
-        expect(Array.isArray(alphaRes.body.trend)).toBe(true);
-        expect(alphaRes.body.trend).toHaveLength(14);
-        expect(alphaRes.body.totalUseCount).toBe(2);
-        expect(alphaRes.body.peakDailyUse).toBeGreaterThanOrEqual(1);
-        expect(alphaRes.body.averagePerDay).toBeGreaterThan(0);
-
-        const unknownRes = await requestJson(baseUrl, `/api/prompt-pool/usage-trend?shortcut=${encodeURIComponent('/unknown')}&days=14`);
-        expect(unknownRes.status).toBe(404);
-        expect(unknownRes.body.error).toContain('not found');
+        expect(alphaRes.status).toBe(404);
     });
 });

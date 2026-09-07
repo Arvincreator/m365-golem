@@ -9,9 +9,21 @@ const MCP_CONFIG_PATH = path.resolve(process.cwd(), 'data', 'mcp-servers.json');
 const LOCAL_COMMAND_RE = /(terminal|shell|bash|zsh|cmd|命令|指令|終端機|本機|專案|repo|資料夾|檔案|目錄|路徑|安裝|npm|pnpm|yarn|node|python|git|ls|pwd|cd|cat|sed|grep|rg|build|test|lint|run|execute|執行|編譯|啟動|server)/i;
 const LOCAL_ARTIFACT_BUILD_RE = /(?:(?:製作|建立|建置|開發|實作|編寫|撰寫|寫(?:一個|個|出)?|create|build|develop|implement).{0,40}(?:互動(?:式)?(?:網頁|網站)|網頁|網站|web(?:site|page|app)?|html|css|javascript|程式|應用程式|app)|(?:互動(?:式)?(?:網頁|網站)|網頁|網站|web(?:site|page|app)?|html|css|javascript|程式|應用程式|app).{0,40}(?:製作|建立|建置|開發|實作|編寫|撰寫|寫(?:一個|個|出)?|create|build|develop|implement))/i;
 const EXPLICIT_REMOTE_ARTIFACT_TARGET_RE = /(?:在|到|於|透過|使用).{0,8}(?:sharepoint|onedrive|teams|notion|github|slack|microsoft\s*365|\bm365\b|瀏覽器|browser)/i;
+const LOCAL_DOCUMENT_BUILD_RE = /(?:製作|建立|新增|產生|撰寫|儲存|create|generate|save|write).{0,40}(?:word|docx|excel|xlsx|powerpoint|pptx|pdf|文件|報告|試算表|簡報)/i;
+const LOCAL_DOCUMENT_TARGET_RE = /(?:工作區|專案資料夾|桌面|本機|本地|project\s+workspace|workspace|desktop|local)/i;
+
+function isLocalArtifactBuild(text) {
+    const document = LOCAL_DOCUMENT_BUILD_RE.test(text) && LOCAL_DOCUMENT_TARGET_RE.test(text)
+        && (!EXPLICIT_REMOTE_ARTIFACT_TARGET_RE.test(text)
+            || /(?:在|到|於|on|to).{0,12}(?:工作區|專案資料夾|桌面|本機|本地|project\s+workspace|workspace|desktop|local)/i.test(text));
+    return document || (LOCAL_ARTIFACT_BUILD_RE.test(text) && !EXPLICIT_REMOTE_ARTIFACT_TARGET_RE.test(text));
+}
 const EXTERNAL_SYSTEM_RE = /(@gmail|@google|calendar|gmail|drive|onedrive|sharepoint|microsoft\s*365|\bm365\b|mcp|devtools|notion|slack|teams|github[^a-z]|telegram|discord|瀏覽器自動化|外部服務|第三方)/i;
 const M365_DATA_RE = /(sharepoint|one\s*drive|onedrive|microsoft\s*365|\bm365\b|\.sharepoint\.(?:com|us|de|cn)|sharepoint-mil\.us)/i;
 const M365_SEARCH_RE = /(搜尋|查找|全文搜尋|全域搜尋|找出.{0,24}(?:檔案|文件)|\bsearch\b|\bfind\b.{0,24}\b(?:files?|documents?)\b)/i;
+const M365_FOLDER_CONTENT_RE = /(?:(?:列出|列舉|查看|檢視|取得|獲取|讀取|盤點).{0,24}(?:sharepoint|one\s*drive|onedrive|資料夾|folder).{0,24}(?:內容|檔案|文件|清單|列表|根目錄)|(?:sharepoint|one\s*drive|onedrive|資料夾|folder).{0,24}(?:內容|檔案|文件|清單|列表|根目錄).{0,24}(?:列出|列舉|查看|檢視|取得|獲取|讀取|盤點))/i;
+const M365_FILE_CONTENT_RE = /(?:(?:取得|獲取|讀取|下載|開啟|分析).{0,24}(?:sharepoint|one\s*drive|onedrive|檔案|文件).{0,16}(?:內容|全文|資料)|(?:sharepoint|one\s*drive|onedrive|檔案|文件).{0,24}(?:內容|全文|資料).{0,16}(?:取得|獲取|讀取|下載|開啟|分析))/i;
+const M365_CAPABILITY_PROBE_RE = /(?:(?:可以|能(?:不能)?|是否能|看(?:得)?到|讀(?:得)?到|存取|連線|使用).{0,32}(?:sharepoint|one\s*drive|onedrive|microsoft\s*365|\bm365\b)|(?:sharepoint|one\s*drive|onedrive|microsoft\s*365|\bm365\b).{0,32}(?:可以|能|可用|看(?:得)?到|讀(?:得)?到|存取|連線)|(?:can\s+you|are\s+you\s+able\s+to|do\s+you\s+have\s+access\s+to).{0,32}(?:sharepoint|one\s*drive|onedrive|microsoft\s*365|\bm365\b))/i;
 const STOPWORDS = new Set([
     'the', 'and', 'for', 'with', 'from', 'this', 'that', 'what', 'when', 'where', 'how',
     '你', '我', '他', '她', '它', '我們', '你們', '請', '幫我', '可以', '一下', '這個', '那個',
@@ -52,27 +64,23 @@ function inferIntentBoosts(text) {
     add(/(browser|chrome|devtools|網頁|頁面|點擊|輸入|表單|console|network|lighthouse|截圖|瀏覽器)/i, ['chrome-devtools']);
     add(/(搜尋引擎|meta search|metasearch|網路搜尋|公開資料|查資料|duckduckgo|html\.duckduckgo)/i, ['duckduckgo-search', 'chrome-devtools']);
     add(/(搜尋後|深入查看|深入網頁|繼續查看這個網頁|deep dive|follow-up crawl)/i, ['duckduckgo-devtools-bridge', 'duckduckgo-search', 'chrome-devtools']);
-    add(/(git|commit|branch|diff|pull request|pr|版本|分支)/i, ['git']);
-    add(/(記憶|memory|回憶|以前|之前|歷史|找對話|搜尋對話)/i, ['memory', 'session-search']);
-    add(/(排程|提醒|schedule|定時|每天|明天|下週|cron)/i, ['chronos', 'collab-calendar']);
+    add(/(排程|提醒|schedule|定時|每天|明天|下週|cron)/i, ['collab-calendar']);
     add(/(行程|行事曆|日曆|calendar|今天有什麼|明天有什麼|這週|下週|新增行程|加入行程|排行程|有什麼約|約了什麼|協作日曆)/i, ['collab-calendar']);
-    add(/(圖片|影像|畫圖|生成圖|image|prompt)/i, ['image-prompt']);
-    add(/(youtube|影片|字幕)/i, ['youtube']);
-    add(/(notebooklm|研究包|study pack|mind map|audio overview|slide deck|flashcards|quiz)/i, ['notebooklm-studio']);
-    add(/(spotify|音樂|播放清單)/i, ['spotify']);
-    add(/(代理|agent|multi-agent|協作|委派|delegate)/i, ['multi-agent', 'delegate-task']);
     add(/(檔案|附件|參考資料|reference)/i, ['reference-files']);
 
     const isM365DataTask = M365_DATA_RE.test(t);
     if (isM365DataTask) {
+        add(M365_CAPABILITY_PROBE_RE, ['m365-session-bridge/m365_bridge_status']);
         add(/(狀態|連線|在線|status|connect)/i, ['m365-session-bridge/m365_bridge_status']);
         add(/(列出|列舉|查看.*資料夾|資料夾.*檔案|有哪些檔案|folder.*(?:list|content)|list.*folder|enumerate)/i, ['m365-session-bridge/m365_list_folder']);
+        add(M365_FOLDER_CONTENT_RE, ['m365-session-bridge/m365_list_folder']);
+        add(M365_FILE_CONTENT_RE, ['m365-session-bridge/m365_list_folder', 'm365-session-bridge/m365_download_file']);
         add(/(下載|download)/i, ['m365-session-bridge/m365_download_file']);
         add(/(上傳|upload)/i, ['m365-session-bridge/m365_upload_file']);
         add(/(複製|copy)/i, ['m365-session-bridge/m365_copy_file']);
         add(/(移動|move)/i, ['m365-session-bridge/m365_move_file']);
         add(/(重新命名|改名|rename)/i, ['m365-session-bridge/m365_rename_file', 'm365-session-bridge/m365_rename_folder']);
-        add(/(建立|新增|create).{0,8}(資料夾|folder)/i, ['m365-session-bridge/m365_create_folder']);
+        add(/(?:(建立|新增|create).{0,16}(資料夾|folder)|(資料夾|folder).{0,24}(建立|新增|create))/i, ['m365-session-bridge/m365_create_folder']);
         add(/(版本紀錄|版本歷程|歷史版本|version history|list.*version)/i, ['m365-session-bridge/m365_list_file_versions']);
         add(/(還原|restore).{0,8}(版本|version)/i, ['m365-session-bridge/m365_restore_file_version']);
         add(/(簽出|check.?out)/i, ['m365-session-bridge/m365_checkout_file']);
@@ -166,7 +174,7 @@ function summarizeCatalogDescription(value, maxChars = 180) {
 function isLikelyCommandTask(query) {
     const text = String(query || '');
     if (!text.trim()) return false;
-    if (LOCAL_ARTIFACT_BUILD_RE.test(text) && !EXPLICIT_REMOTE_ARTIFACT_TARGET_RE.test(text)) return true;
+    if (isLocalArtifactBuild(text)) return true;
     if (!LOCAL_COMMAND_RE.test(text)) return false;
     if (EXTERNAL_SYSTEM_RE.test(text)) return false;
     return true;
@@ -174,8 +182,14 @@ function isLikelyCommandTask(query) {
 
 function loadCoreSlashCommands() {
     try {
-        const defs = require('../config/commands');
-        const keep = new Set(['/new', '/new_memory', '/skills', '/learn', '/install', '/toolset', '/search', '/project']);
+        const ConfigManager = require('../config');
+        const isM365 = ConfigManager.CONFIG.GOLEM_BACKEND === 'm365-web';
+        const defs = isM365
+            ? require('../config/m365Commands')
+            : require('../config/commands');
+        const keep = isM365
+            ? new Set(['/new'])
+            : new Set(['/new', '/new_memory', '/skills', '/learn', '/install', '/toolset', '/search', '/project']);
         return (Array.isArray(defs) ? defs : [])
             .filter((item) => item && keep.has(String(item.command || '').trim()))
             .map((item) => ({
@@ -198,19 +212,29 @@ class ToolRouter {
     }
 
     async routeAsync(query, options = {}) {
-        // 若有向量索引，先做語意搜尋取得 boost 清單
-        let vectorBoostIds = new Set();
+        const vectorBoostIds = new Set();
+        const semanticMatches = [];
+        const diagnostics = { mode: 'keyword_fallback', reason: 'index_unavailable', matches: semanticMatches };
         if (this.toolVectorIndex) {
+            let timer;
             try {
-                const vectorResults = await this.toolVectorIndex.search(query, { limit: 10 });
-                for (const r of vectorResults) {
-                    if (r.score > 0.35) vectorBoostIds.add(r.id); // 相似度門檻
+                const results = await Promise.race([
+                    this.toolVectorIndex.search(query, { limit: 16, throwOnError: true, includeCapabilities: true }),
+                    new Promise((_, reject) => { timer = setTimeout(() => reject(Object.assign(new Error('Vector lookup timed out'), { code: 'VECTOR_TIMEOUT' })), 2500); }),
+                ]);
+                diagnostics.mode = 'hybrid';
+                diagnostics.reason = results.length ? 'vector_search_succeeded' : 'no_vector_matches';
+                for (const match of results) {
+                    if (Number.isFinite(match.score) && match.score > 0.35) {
+                        vectorBoostIds.add(match.id);
+                        semanticMatches.push({ id: match.id, score: match.score });
+                    }
                 }
-            } catch (e) {
-                console.warn(`[ToolRouter] 向量搜尋失敗，退回關鍵字模式: ${e.message}`);
-            }
+            } catch (error) {
+                diagnostics.reason = error.code === 'VECTOR_TIMEOUT' ? 'vector_timeout' : error.code === 'VECTOR_INDEX_EMPTY' ? 'index_empty' : 'vector_search_failed';
+            } finally { clearTimeout(timer); }
         }
-        return this.route(query, { ...options, vectorBoostIds });
+        return this.route(query, { ...options, vectorBoostIds, semanticMatches, diagnostics });
     }
 
     route(query, options = {}) {
@@ -348,10 +372,22 @@ class ToolRouter {
             ? []
             : intentMatchedMcpTools.slice(0, maxMcpTools);
 
-        const commandRecommended = requestClass.shouldRoute && isLikelyCommandTask(query);
+        const semanticLocal = (options.semanticMatches || [])
+            .filter(match => ['capability/local-authoring', 'capability/local-inspection'].includes(match.id) && match.score >= 0.55)
+            .sort((a, b) => b.score - a.score)[0];
+        const nativeScore = (options.semanticMatches || []).find(match => match.id === 'capability/native-m365')?.score || 0;
+        const remoteOnly = EXPLICIT_REMOTE_ARTIFACT_TARGET_RE.test(String(query || ''))
+            && !/(?:在|到|於|on|to).{0,12}(?:工作區|專案資料夾|桌面|本機|本地|project\s+workspace|workspace|desktop|local)/i.test(String(query || ''));
+        const explanationOnly = requestClass.passive || (
+            /(?:解釋|說明|介紹|比較|explain).*(?:原理|概念|是什麼|concept|principle)/i.test(String(query || ''))
+            && !/(?:幫我|替我|直接|然後|並)/.test(String(query || ''))
+        );
+        const semanticCommand = !!semanticLocal && semanticLocal.score >= nativeScore + 0.03
+            && !explanationOnly && !requestClass.skillCatalog && !remoteOnly;
+        const keywordCommand = requestClass.shouldRoute && isLikelyCommandTask(query);
+        const commandRecommended = keywordCommand || semanticCommand;
         const localArtifactBuild = commandRecommended
-            && LOCAL_ARTIFACT_BUILD_RE.test(String(query || ''))
-            && !EXPLICIT_REMOTE_ARTIFACT_TARGET_RE.test(String(query || ''));
+            && (isLocalArtifactBuild(String(query || '')) || (semanticCommand && semanticLocal.id === 'capability/local-authoring'));
         const commandLane = {
             recommended: commandRecommended,
             reason: localArtifactBuild
@@ -369,6 +405,13 @@ class ToolRouter {
             connectorBoundary,
             mcpTools: routedMcpTools,
             commandLane,
+            diagnostics: {
+                ...(options.diagnostics || { mode: 'keyword_fallback', reason: 'synchronous_route', matches: [] }),
+                commandSource: semanticCommand ? 'semantic' : keywordCommand ? 'keyword' : 'none',
+                commandRejected: semanticLocal && !semanticCommand ? (explanationOnly ? 'explanation_only' : remoteOnly ? 'remote_destination' : requestClass.skillCatalog ? 'catalog_only' : 'ambiguous_capability') : null,
+                selectedTools: [...skills.map(item => item.id), ...routedMcpTools.map(item => item.id)],
+            },
+            nativeGroundingSuggested: nativeScore >= 0.55 && (nativeScore >= (semanticLocal?.score || 0) || M365_DATA_RE.test(String(query || ''))),
             slashCommands: loadCoreSlashCommands(),
             activeScene: this.activeScene,
         };
@@ -385,12 +428,19 @@ class ToolRouter {
     }
 
     _formatRoutingHint(result) {
+        this.lastDiagnostics = result.diagnostics;
+        // Ephemeral, turn-local execution metadata for the host supervisor.
+        // It contains no user query or tool result and is replaced every turn.
+        this.lastRoute = result;
+        // Tool IDs and scores only: never persist the user's query or source content here.
+        console.info('[ToolRouter:diagnostics]', JSON.stringify(result.diagnostics));
         if (
             result.skills.length === 0
             && result.mcpTools.length === 0
             && !result.commandLane.recommended
             && !result.catalogRequest?.skills
             && !result.connectorBoundary
+            && !result.nativeGroundingSuggested
         ) return '';
 
         const lines = [
@@ -398,6 +448,9 @@ class ToolRouter {
             `[System note: 以下是本輪依使用者訊息自動產生的工具建議。若任務符合，優先使用；若不符合，可以忽略。當工具能取得事實、操作外部系統或執行專門能力時，不要只用文字猜測。Active scene: ${result.activeScene}]`,
         ];
 
+        lines.push('- Retrieved capabilities are candidates, not proof of availability or authorization. Choose the next step from the actual user goal and available inputs. Inspect capabilities before promising outputs; retain all Action Gate checks.');
+        lines.push('- Separate native source retrieval, local authoring, and remote writes. Failure in one lane blocks only steps requiring its missing result. Use already available source content only within its visible evidence; never invent missing content.');
+        if (result.nativeGroundingSuggested) lines.push('- Native Microsoft 365 grounding may help this task if available in this session. This is not a callable Golem action; native research does not prove local file creation or remote writes.');
         if (result.catalogRequest?.skills) {
             lines.push(`Current available Skill catalog (${result.skillCatalog.length}; authoritative for this turn):`);
             if (result.skillCatalog.length === 0) {
@@ -419,16 +472,21 @@ class ToolRouter {
         if (result.connectorBoundary?.code === 'm365_exact_url_only') {
             lines.push('M365 connector boundary:');
             lines.push(`- ${result.connectorBoundary.message}`);
-            lines.push('- Do not emit a GOLEM_ACTION for tenant-wide or semantic M365 search with this connector. Explain the limitation and ask for an exact SharePoint/OneDrive URL, or state that a separate officially authorized connector/API is required.');
+            lines.push('- This is only a boundary of the URL-based connector; it is not evidence that the current Microsoft 365 Copilot session lacks native access. First try the native Microsoft 365 file/content grounding available in this signed-in session.');
+            lines.push('- Do not emit a GOLEM_ACTION for tenant-wide or semantic M365 search with this connector. If native grounding returns a visible result or citation, answer from that evidence. Only if the native attempt cannot produce a grounded result, ask the user in plain language for the specific SharePoint/OneDrive file or folder link.');
+            lines.push('- Keep [GOLEM_REPLY] user-friendly. Do not expose the names Work IQ, connector, Bridge, MCP, Action, Observation, tool-routing, harness, protocol, schema, or other internal execution details unless the user explicitly asks how the system works.');
             lines.push('</tool-routing>');
             return lines.join('\n');
         }
 
         if (result.commandLane.recommended) {
+            if (result.diagnostics.commandSource === 'semantic') lines.push('- The local lane was retrieved semantically. Confirm that an actual local operation is requested; a similarity match alone must not trigger execution.');
             lines.push('Relevant command lane:');
             if (result.commandLane.reason === 'local_project_artifact_authoring') {
                 lines.push('- command: local project artifact creation or modification detected. Use the assigned project workspace to inspect, create/edit, and verify the real files; do not substitute a long inline draft unless the user explicitly asked only for a snippet.');
-                lines.push('- Exact action shape: {"action":"command","parameter":"<one bounded native command>"}. Emit the smallest appropriate command action now. When the outcome needs dependent inspect/build/verify work, maintain GOLEM_PLAN and issue only its current bounded action.');
+                lines.push('- Local capability boundary: local document creation does not depend on a working SharePoint or OneDrive connection. If the source content is already visibly available, use it within its evidence limits. If required source content is missing, request only that missing input; do not claim all local authoring is unavailable.');
+                lines.push('- Inspect the actual local runtime and document libraries before choosing how to create a file. Honor an explicitly requested local destination, resolve its real path rather than guessing, avoid overwriting existing files, and verify the resulting file format and readable contents before reporting success. Never rename plain text to .docx or invent an installed document tool.');
+                lines.push('- Exact action shape: {"action":"command","parameter":"<one bounded native command>"}. When the user requests execution, emit the smallest appropriate command action; an informational question does not authorize creating files. When the outcome needs dependent inspect/build/verify work, maintain GOLEM_PLAN and issue only its current bounded action.');
             } else {
                 lines.push('- command: local OS/repo operation detected. For the current Windows harness, inspect its working directory with this exact shell action: {"action":"command","parameter":"echo %CD%"}. Replace the command only when another native operation is required.');
                 lines.push('- The user already requested this read/list/inspect/check operation. Emit the smallest read-only command action now; do not merely say that you could propose it. The local approval gate will ask for confirmation.');
@@ -459,6 +517,22 @@ class ToolRouter {
                 lines.push(`- mcp_call server="${tool.server}" tool="${tool.name}": ${tool.description || 'no description'}${schemaSummary ? ` (${schemaSummary})` : ''}${policy}`);
                 lines.push(`  Use this exact action shape:\n  ${compactJson(tool.example)}`);
             }
+        }
+
+        if (result.mcpTools.some((tool) => tool.server === 'm365-session-bridge' && tool.name === 'm365_bridge_status')) {
+            lines.push('M365 access-probe rule:');
+            lines.push('- A question about whether OneDrive or SharePoint files are accessible is a request to check, not a reason to refuse based on missing prior tool results. First try the native Microsoft 365 file/content grounding available in this signed-in Copilot session.');
+            lines.push('- If this response does not contain a visible grounded file result or citation, you must emit the listed read-only status action in this same response. Do not replace the check with suggestions, example queries, or a request for a filename, and do not give an access conclusion before the check.');
+            lines.push('- A successful status result proves only that assistance is available; it does not prove that every file is visible. If a specific link is required, ask for that link in plain language after the check.');
+            lines.push('- Keep [GOLEM_REPLY] user-friendly. Do not expose the names Work IQ, Bridge, MCP, Action, Observation, tool-routing, harness, protocol, schema, or other internal execution details unless the user explicitly asks how the system works.');
+        }
+
+        if (result.mcpTools.some((tool) => tool.server === 'm365-session-bridge' && ['m365_list_folder', 'm365_download_file'].includes(tool.name))) {
+            lines.push('M365 exact-target handoff rule:');
+            lines.push('- These tools are available in this Golem workspace. Do not say that the local Microsoft 365 file connection or its listing/download capability is unavailable when the tools are listed here.');
+            lines.push('- They require an exact SharePoint/OneDrive folder or file URL. If the user asks for a multi-stage outcome and the exact URL is not known yet, use a durable plan: first use native Microsoft 365 grounding to locate and visibly cite the target, record that native stage with plan_checkpoint, then use the listed exact-target tool in the next plan turn.');
+            lines.push('- m365_list_folder returns the direct entries of one exact folder. m365_download_file retrieves one exact file for a later local inspection step. Neither tool is a tenant-wide semantic search engine.');
+            lines.push('- Do not stop after explaining this sequence. Start the first real stage now, and keep [GOLEM_REPLY] in plain user language without internal tool or protocol names.');
         }
 
         lines.push('Decision rules:');

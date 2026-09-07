@@ -147,6 +147,8 @@ describe('M365 GOLEM_PLAN protocol', () => {
             result: 'ok',
         });
         expect(observation).toContain('[GOLEM_OBSERVATION]');
+        expect(observation).toContain('describe only useful progress or results in plain user language');
+        expect(observation).toContain('never expose internal workflow names');
         expect(observation).toContain('"source": "golem_host"');
         expect(observation).toContain('"plan_id": "run_1"');
         expect(observation).toContain('"status": "succeeded"');

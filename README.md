@@ -9,18 +9,24 @@ Chat API，也不要求把 Microsoft 帳密、MFA、Cookie 或 Token 交給 Gole
 
 ## 主要能力
 
-- Codex 式「專案 → 多個對話」工作區，同一專案共享獨立的工作規則與脈絡。
+- Codex 式「專案 → 多個對話」工作區，同一專案共享工作紀錄、規則、決策、
+  目前狀態、專案偏好，以及過去有效做法、失敗原因與避免再次踩坑的經驗。
 - 建立專案時可使用 Golem 預設位置、在指定位置建立新資料夾，或連結既有的
   本機工作資料夾；不同專案的 `AGENTS.md` 與記憶彼此隔離。
 - 第一次對話載入 Golem 身分、專案背景、Action 規則與工具使用方式。
 - 每輪只篩選並注入最相關的 Skills／MCP 工具，不把整本工具庫送進對話。
+- 每輪會帶入近期專案狀態與語意相關記憶；需要較早紀錄時，Golem 可在目前
+  專案範圍內查詢，不會讀取其他專案的記憶。
 - 工具動作透過原版 Action Gate 執行，Observation 回到同一個專案對話。
 - 複雜工作可由 Copilot 自行產生最多 12 步的自主計畫；每次只提出一個 Action，
   收到本機 Observation 後才可推進下一步。右側可收合面板會持續顯示目前步驟、
   完成進度，以及正在等待核准、工具執行或 Observation 的狀態。
-- 對話框可新增檔案、選擇整個資料夾或直接拖曳；檔案會經本機安全檢查後，
-  由可見 Edge 上傳到目前的 M365 Copilot 對話，並等待 OneDrive 處理完成與
-  送出鍵真正啟用後才送出。
+- 同一個多步驟工作的中間進度會集中在主對話的一張收合卡；執行時顯示動態狀態，
+  展開後才顯示逐步紀錄。M365 的 `Plain Text` 與程式碼框會還原成獨立內容卡。
+- 對話框可新增或拖曳個別檔案；檔案會經本機安全檢查後，由可見 Edge 上傳到
+  目前的 M365 Copilot 對話，並等待 OneDrive 處理完成與送出鍵真正啟用後才送出。
+- 選擇本機資料夾時只建立本輪的路徑參照，不預先列出或上傳其中檔案。Golem
+  會先查看有限的單層清單，再依任務需要搜尋檔名及讀取個別文字檔。
 - 內建 M365 Session Bridge，可操作**精確網址**指向的 SharePoint Online 或
   OneDrive for Business 檔案與資料夾。
 - 專案本機資料加密保存；登入與 MFA 始終在可見 Edge 由使用者親自完成。
@@ -55,8 +61,11 @@ Chat API，也不要求把 Microsoft 帳密、MFA、Cookie 或 Token 交給 Gole
    - 點「載入解壓縮」；
    - 選擇
      `integrations\m365-session-bridge\apps\edge-extension\dist`。
-6. 雙擊 `Start-Golem.bat`。
-7. 在自動開啟的可見 Edge 視窗自行完成登入與 MFA，再從本機工作台開始對話。
+6. 從桌面雙擊安裝器建立的 `M365 Golem` 捷徑；也可雙擊安裝資料夾內的 `Start-M365-Golem.vbs`。
+7. 工作台會以獨立的 Edge 應用程式視窗開啟，不會顯示 Node.js 或 MCP 的命令列視窗，也不會塞進使用者正在使用的一般瀏覽器分頁。
+8. 需要 Microsoft 365 登入或 MFA 時，仍會另行顯示可見 Edge，由使用者親自完成。
+
+`Start-Golem.bat` 保留給舊捷徑與排錯使用；日常啟動請使用桌面捷徑或 `Start-M365-Golem.vbs`。重複啟動時會沿用已執行的背景服務，不會再開第二套。Golem 回覆中的 HTTP/HTTPS 連結會另開一般瀏覽器視窗或分頁，不會把 Golem 工作台導走。
 
 也可以在 PowerShell 執行：
 
@@ -79,17 +88,21 @@ npm.cmd run package:windows
 
 輸出位於 `release`，並附 SHA-256 校驗檔與 ZIP 內的安裝檔案清單。
 
-## 對話附件與參考檔案
+## 對話附件與知識來源
 
-- `新增檔案`／`新增資料夾`／拖曳：把原始檔加入**這一輪**對話，經確認後會
-  上傳到目前 M365 Copilot Chat。每輪最多 10 個檔案、每檔最多 25 MiB、合計
-  最多 50 MiB；資料夾中的 `.git`、`node_modules`、建置輸出與隱藏項目會略過。
-- `選擇參考檔案`：沿用 Golem 的本機索引，只把已索引文字注入提示，不上傳
-  原始檔，適合重複使用的專案參考資料。
+- `新增檔案`／拖曳檔案：把原始檔加入**這一輪**對話，經確認後會上傳到目前
+  M365 Copilot Chat。每輪最多 10 個檔案、每檔最多 25 MiB、合計最多 50 MiB。
+- `選擇本機資料夾`：每輪最多加入 3 個按需來源。選取時不列出、不索引、也不
+  上傳資料夾內容；Golem 每次最多列出 100 個直屬項目，或做有限的檔名搜尋，
+  再只讀取任務所需的個別文字／程式碼檔。隱藏、依賴、建置、符號連結與可能
+  含憑證的檔案會拒絕；單檔最多讀取 1 MiB，回傳內容最多 20,000 字。被讀取的
+  必要內容會成為同一 M365 對話的 Observation。拖曳整個資料夾不會啟動掃描。
+- `選擇知識來源`：沿用 Golem 的本機索引，只把已索引文字注入提示，不上傳
+  原始檔，適合重複使用的專案知識。
 - 常見 Office 文件、PDF、文字／程式碼與圖片格式可加入；最終是否接受仍由
   使用者的 M365 租戶、授權與當下 Copilot 網頁入口決定。
-- 暫存檔只綁定目前專案與對話，送出完成或失敗後即清除；對話紀錄只保存檔名，
-  不另存一份原始附件。
+- 暫存檔與資料夾參照只綁定目前專案與對話；對話紀錄只保存附件檔名及已選資料夾
+  名稱，不另存一份原始附件或資料夾內容。草稿中的本機路徑會加密保存。
 
 ## 內建 M365 Session Bridge
 
@@ -97,17 +110,17 @@ Bridge 隨本倉庫一起發布，不需要使用者另外下載另一個專案�
 
 1. 從 `integrations/m365-session-bridge` 的 TypeScript 原始碼重建元件；
 2. 只在目前 Windows 使用者的 `HKCU` 註冊 Edge Native Messaging host；
-3. 將 `m365-session-bridge` 合併到本機 `data/mcp-servers.json`；
+3. 將 `m365-session-bridge` 與隔離執行的 `chrome-devtools` 合併到本機 `data/mcp-servers.json`，並預設啟用；
 4. 在 `%LOCALAPPDATA%\M365-Golem\m365-session-bridge` 建立每台電腦專屬的
    政策、IPC 秘密與稽核紀錄。
 
-它只支援精確 SharePoint Online／OneDrive for Business 網址與檔案操作，**不是**
+它支援精確 SharePoint Online／OneDrive for Business 網址的查詢，以及經核准的建立資料夾、上傳、複製、移動、改名與版本／中繼資料操作，**不是**
 Microsoft Graph、Outlook、Teams、Calendar 或整個 M365 的搜尋連接器。初始政策：
 
-- 寫入預設關閉；
-- 覆寫、永久刪除、外部分享、權限修改、批次刪除及任意 HTTP 永遠預設禁止；
+- 建立資料夾、無覆寫上傳、複製、移動、重新命名與中繼資料更新預設可用，但目標站台必須先核准；
+- 覆寫、移至資源回收筒、永久刪除、外部分享、權限修改、批次刪除及任意 HTTP 預設禁止；
 - 未列入的支援站台必須經本機原生核准視窗確認；
-- 本機檔案範圍預設只允許目前 M365 Golem 專案根目錄；
+- 本機檔案範圍預設只允許目前 M365 Golem 專案根目錄；若專案連結到外部資料夾，可在 Golem 左側「更多工具 → M365 Bridge」加入該特定資料夾，磁碟根目錄會被拒絕；
 - Microsoft 365 權限仍完全來自使用者現有的 Edge 登入與租戶授權。
 
 Bridge 不會讓 Golem 自動取得整個 M365。若需要 Outlook、Teams、Calendar 或一般
@@ -130,7 +143,9 @@ SharePoint 搜尋，應另外使用權限範圍清楚的官方連接器。
 
 | 指令 | 用途 |
 | --- | --- |
-| `npm.cmd run dashboard` | 啟動本機工作台與可見 Edge |
+| `Start-M365-Golem.vbs` | 背景啟動本機服務，並以獨立 Edge 應用程式視窗開啟工作台 |
+| `Start-Golem.bat --check` | 檢查啟動前提，不開啟工作台 |
+| `npm.cmd run dashboard` | 開發者用的前景啟動方式 |
 | `npm.cmd run install:m365` | 執行完整 Windows 安裝 |
 | `npm.cmd run install:m365:plan` | 唯讀檢查全新安裝前提 |
 | `npm.cmd run package:windows` | 建立不含測試與本機資料的 Windows 安裝 ZIP |

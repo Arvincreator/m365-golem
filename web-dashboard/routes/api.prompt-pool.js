@@ -2,6 +2,7 @@ const express = require('express');
 const fs = require('fs');
 const path = require('path');
 const { buildOperationGuard } = require('../server/security');
+const ConfigManager = require('../../src/config');
 
 const PROMPT_POOL_DIR = path.resolve(process.cwd(), 'data', 'dashboard');
 const PROMPT_POOL_PATH = path.join(PROMPT_POOL_DIR, 'prompt-pool.json');
@@ -36,10 +37,11 @@ function createPromptId() {
 }
 
 function normalizeShortcut(value) {
-    const shortcut = String(value || '').trim();
-    if (!shortcut) {
+    const raw = String(value || '').trim();
+    if (!raw) {
         throw createHttpError(400, '快捷指令不可為空');
     }
+    const shortcut = raw.startsWith('/') ? raw : `/${raw}`;
     if (shortcut.length > MAX_SHORTCUT_LENGTH) {
         throw createHttpError(400, `快捷指令不可超過 ${MAX_SHORTCUT_LENGTH} 字元`);
     }
@@ -69,13 +71,8 @@ function normalizeNote(value) {
     return note.slice(0, MAX_NOTE_LENGTH);
 }
 
-function stripTelegramBotMentionSuffix(value) {
-    const shortcut = String(value || '').trim();
-    return shortcut.replace(/^((?:\/)?[a-z0-9_]{1,32})@[a-z0-9_]{3,}$/i, '$1');
-}
-
 function toShortcutKey(value) {
-    const raw = stripTelegramBotMentionSuffix(value).toLowerCase();
+    const raw = String(value || '').trim().toLowerCase();
     if (!raw) return '';
     return raw.replace(/^\/+/, '');
 }
@@ -150,6 +147,24 @@ function appendPromptPoolAuditRecord(record) {
     } catch (error) {
         console.warn('[PromptPool] Failed to append audit record:', error.message);
     }
+}
+
+function recordM365PromptPoolUse({ shortcut, actorIp = '' } = {}) {
+    const shortcutRaw = String(shortcut || '').trim();
+    const shortcutKey = toShortcutKey(shortcutRaw);
+    if (!shortcutKey) return false;
+    appendPromptPoolAuditRecord({
+        ts: new Date().toISOString(),
+        event: 'prompt_pool_use',
+        actorIp: String(actorIp || '').slice(0, 120),
+        details: {
+            shortcut: shortcutRaw || `/${shortcutKey}`,
+            shortcutKey,
+            source: 'm365_chat_composer',
+            platform: 'm365-web',
+        },
+    });
+    return true;
 }
 
 function readPromptPoolAuditRecords(limit = 50) {
@@ -358,7 +373,9 @@ function getSystemCommandSet() {
     if (cachedSystemCommandSet) return cachedSystemCommandSet;
 
     try {
-        const commands = require('../../src/config/commands.js');
+        const commands = ConfigManager.CONFIG.GOLEM_BACKEND === 'm365-web'
+            ? require('../../src/config/m365Commands.js')
+            : require('../../src/config/commands.js');
         const set = new Set();
         if (Array.isArray(commands)) {
             for (const item of commands) {
@@ -744,47 +761,6 @@ module.exports = function registerPromptPoolRoutes(server) {
         }
     });
 
-    router.get('/api/prompt-pool/usage-trend', (req, res) => {
-        try {
-            const rawShortcut = String(req.query.shortcut || '').trim();
-            if (!rawShortcut) {
-                return res.status(400).json({ error: 'Missing shortcut' });
-            }
-
-            const shortcutKey = toShortcutKey(rawShortcut);
-            if (!shortcutKey) {
-                return res.status(400).json({ error: 'Invalid shortcut' });
-            }
-
-            const items = readPromptPool();
-            const target = items.find((item) => toShortcutKey(item.shortcut) === shortcutKey);
-            if (!target) {
-                return res.status(404).json({ error: 'Prompt shortcut not found' });
-            }
-
-            const safeDays = Math.max(1, Math.min(Number(req.query.days) || DEFAULT_USAGE_TREND_DAYS, 90));
-            const records = readAllPromptPoolAuditRecords();
-            const trend = buildUsageTrend(records, safeDays, shortcutKey);
-            const totalUseCount = trend.reduce((sum, point) => sum + Number(point.count || 0), 0);
-            const peakDailyUse = trend.reduce((peak, point) => Math.max(peak, Number(point.count || 0)), 0);
-            const averagePerDay = trend.length > 0 ? Number((totalUseCount / trend.length).toFixed(2)) : 0;
-
-            return res.json({
-                success: true,
-                shortcut: target.shortcut,
-                shortcutKey,
-                days: safeDays,
-                trend,
-                totalUseCount,
-                peakDailyUse,
-                averagePerDay,
-            });
-        } catch (error) {
-            console.error('[PromptPool] Failed to fetch usage trend:', error);
-            return res.status(500).json({ error: 'Failed to fetch usage trend' });
-        }
-    });
-
     router.post('/api/prompt-pool/track-use', requirePromptPoolWrite, (req, res) => {
         try {
             const shortcutRaw = String(req.body?.shortcut || req.body?.shortcutKey || '').trim();
@@ -1071,3 +1047,4 @@ module.exports.__test__ = {
     isReservedSystemCommandShortcut,
     getSystemCommandSet,
 };
+module.exports.recordM365PromptPoolUse = recordM365PromptPoolUse;

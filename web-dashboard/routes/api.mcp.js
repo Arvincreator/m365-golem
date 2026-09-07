@@ -1,9 +1,27 @@
 const express = require('express');
 const { buildOperationGuard } = require('../server/security');
+const {
+    requestBridgeControl,
+    sanitizeEntryPayload,
+    sanitizeSettingsPayload,
+} = require('../server/m365BridgeControlProxy');
 
 module.exports = function registerMcpRoutes(server) {
     const router = express.Router();
     const requireMcpWrite = buildOperationGuard(server, 'mcp_write');
+
+    const sendBridgeResponse = (res, result) => {
+        const status = Number.isInteger(result && result.status) ? result.status : 502;
+        return res.status(status >= 200 && status <= 599 ? status : 502).json(result && result.body ? result.body : {});
+    };
+
+    const sendBridgeError = (res, error) => {
+        const status = Number.isInteger(error && error.statusCode) ? error.statusCode : 400;
+        return res.status(status).json({
+            error: error && error.code ? error.code : 'M365_BRIDGE_POLICY_INVALID',
+            message: error && error.message ? error.message : 'Bridge policy request failed',
+        });
+    };
 
     const sanitizeServerName = (name) => {
         const cleaned = String(name || '').trim();
@@ -125,6 +143,56 @@ module.exports = function registerMcpRoutes(server) {
         } catch (e) {
             console.error('[MCP] List servers error:', e);
             return res.status(500).json({ error: e.message });
+        }
+    });
+
+    router.get('/api/mcp/bridge/policy', async (req, res) => {
+        try {
+            return sendBridgeResponse(res, await requestBridgeControl({
+                method: 'GET',
+                pathname: '/api/policy',
+            }));
+        } catch (error) {
+            return sendBridgeError(res, error);
+        }
+    });
+
+    router.patch('/api/mcp/bridge/settings', requireMcpWrite, async (req, res) => {
+        try {
+            const body = sanitizeSettingsPayload(req.body);
+            return sendBridgeResponse(res, await requestBridgeControl({
+                method: 'PATCH',
+                pathname: '/api/settings',
+                body,
+            }));
+        } catch (error) {
+            return sendBridgeError(res, error);
+        }
+    });
+
+    router.post('/api/mcp/bridge/entries', requireMcpWrite, async (req, res) => {
+        try {
+            const body = sanitizeEntryPayload(req.body);
+            return sendBridgeResponse(res, await requestBridgeControl({
+                method: 'POST',
+                pathname: '/api/entries',
+                body,
+            }));
+        } catch (error) {
+            return sendBridgeError(res, error);
+        }
+    });
+
+    router.delete('/api/mcp/bridge/entries', requireMcpWrite, async (req, res) => {
+        try {
+            const body = sanitizeEntryPayload(req.body);
+            return sendBridgeResponse(res, await requestBridgeControl({
+                method: 'DELETE',
+                pathname: '/api/entries',
+                body,
+            }));
+        } catch (error) {
+            return sendBridgeError(res, error);
         }
     });
 

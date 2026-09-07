@@ -81,18 +81,6 @@ module.exports = [
     { command: '/callme', description: '設定 Golem 對你的稱呼，例如：/callme Arvin。' },
     { command: '/skills', description: '列出目前已安裝、已同步到索引的 Golem 系統能力。' },
     { command: '/export', description: '匯出指定使用者技能為 GOLEM_SKILL 膠囊，方便搬移或分享。' },
-    {
-        command: '/wiki',
-        description: '管理 Golem 的 Wiki 知識庫：儲存、列出、讀取、搜尋或刪除長期知識頁面。',
-        options: [
-            { name: 'save <主題>', description: '將目前對話或知識整理成 wiki 頁面' },
-            { name: 'list', description: '列出所有 wiki 頁面' },
-            { name: 'read <路徑>', description: '讀取指定 wiki 頁面' },
-            { name: 'search <關鍵字>', description: '搜尋相關 wiki 頁面' },
-            { name: 'lint', description: '檢查知識庫健康狀態' },
-            { name: 'log', description: '查看 wiki 更新日誌' }
-        ]
-    },
     { command: '/compress', description: '手動壓縮目前會話記憶，節省長對話上下文空間。' },
     {
         command: '/refine',

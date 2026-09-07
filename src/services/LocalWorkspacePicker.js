@@ -73,7 +73,7 @@ class LocalWorkspacePicker {
 
         const stdout = await new Promise((resolve, reject) => {
             this.execFile(this.powershellPath, args, {
-                windowsHide: false,
+                windowsHide: true,
                 timeout: this.timeoutMs,
                 maxBuffer: 1024 * 1024,
                 encoding: 'utf8',

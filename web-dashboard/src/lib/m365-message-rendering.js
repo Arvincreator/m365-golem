@@ -26,7 +26,10 @@ const LANGUAGE_ALIASES = new Map([
     ["c++", "cpp"],
     ["cpp", "cpp"],
     ["text", "text"],
+    ["txt", "text"],
     ["plaintext", "text"],
+    ["plain text", "text"],
+    ["plain-text", "text"],
 ]);
 
 function normalizeLanguage(value) {
@@ -59,14 +62,19 @@ function readRenderedGutterBlock(lines, languageIndex) {
         cursor += 2;
     }
 
-    // Three consecutive gutter/code pairs are specific enough to distinguish
-    // M365's rendered code viewer from an ordinary numbered list.
-    if (codeLines.length < 3) return null;
+    // A standalone supported language label followed by a separate numeric
+    // gutter is M365's code-viewer shape. Single-line Plain Text cards are
+    // common for paths and identifiers, so requiring three pairs loses them.
+    if (codeLines.length < 1) return null;
 
     let sourceWasCollapsed = false;
     if (/^(?:顯示更多行|show more lines)$/i.test(String(lines[cursor] || "").trim())) {
         sourceWasCollapsed = true;
         cursor += 1;
+    }
+
+    while (codeLines.length > 0 && /^`{2,3}$/.test(codeLines[codeLines.length - 1].trim())) {
+        codeLines.pop();
     }
 
     return {
@@ -78,6 +86,48 @@ function readRenderedGutterBlock(lines, languageIndex) {
             sourceWasCollapsed,
         },
     };
+}
+
+function isM365ExecutionTraceMessage(message) {
+    if (!message || message.role === "user" || !message.runId || !message.stepId) return false;
+    if (message.source === "system") return true;
+    const content = String(message.content || "").trim();
+    return /，正在執行並確認中(?:…|\.\.\.)$/u.test(content)
+        || /^❌\s*這一步未完成，正在調整後續處理。?$/u.test(content);
+}
+
+function buildM365ConversationTimeline(messages) {
+    const source = Array.isArray(messages) ? messages : [];
+    const tracesByRunId = new Map();
+    for (const message of source) {
+        if (!isM365ExecutionTraceMessage(message)) continue;
+        const runId = String(message.runId);
+        const traces = tracesByRunId.get(runId) || [];
+        traces.push(message);
+        tracesByRunId.set(runId, traces);
+    }
+
+    const lastTraceIds = new Map();
+    for (const [runId, traces] of tracesByRunId.entries()) {
+        lastTraceIds.set(runId, traces[traces.length - 1]?.id);
+    }
+
+    const timeline = [];
+    for (const message of source) {
+        if (!isM365ExecutionTraceMessage(message)) {
+            timeline.push({ kind: "message", message });
+            continue;
+        }
+        const runId = String(message.runId);
+        if (lastTraceIds.get(runId) !== message.id) continue;
+        timeline.push({
+            kind: "execution",
+            runId,
+            anchorId: message.id,
+            messages: tracesByRunId.get(runId) || [message],
+        });
+    }
+    return timeline;
 }
 
 function readMarkdownFence(lines, fenceIndex) {
@@ -134,7 +184,9 @@ function isNearChatBottom(metrics, threshold = 96) {
 }
 
 module.exports = {
+    buildM365ConversationTimeline,
     isNearChatBottom,
+    isM365ExecutionTraceMessage,
     normalizeLanguage,
     parseM365MessageContent,
 };

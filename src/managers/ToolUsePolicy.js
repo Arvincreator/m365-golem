@@ -2,11 +2,12 @@ function normalize(value) {
     return String(value || '').toLowerCase();
 }
 
-const EXPLICIT_ACTION_RE = /(幫我|直接|執行|打開|開啟|點擊|輸入|填|建立|建置|製作|開發|實作|編寫|撰寫|新增|儲存|更新|刪除|送出|發送|排程|提醒|查|讀|搜尋|分析|檢查|列出|列舉|取得|下載|上傳|複製|移動|重新命名|改名|簽出|簽入|還原|回收|debug|修|run|execute|open|click|fill|create|build|develop|implement|save|update|delete|send|schedule|search|inspect|analy[sz]e|check|list|enumerate|download|upload|copy|move|rename|checkout|checkin|restore)/i;
+const EXPLICIT_ACTION_RE = /(幫我|直接|執行|打開|開啟|點擊|輸入|填|建立|建置|製作|開發|實作|編寫|撰寫|新增|儲存|更新|刪除|送出|發送|排程|提醒|查|讀|搜尋|分析|檢查|檢視|盤點|列出|列舉|取得|獲取|找到|下載|上傳|複製|移動|重新命名|改名|簽出|簽入|還原|回收|debug|修|run|execute|open|click|fill|create|build|develop|implement|save|update|delete|send|schedule|search|inspect|analy[sz]e|check|list|enumerate|download|upload|copy|move|rename|checkout|checkin|restore)/i;
 const PASSIVE_RE = /(怎麼|如何|為什麼|解釋|說明|建議|想法|概念|原理|比較|教我|what is|why|explain|suggest|recommend|compare|idea)/i;
-const OPERATIONAL_RE = /(幫我|直接|執行|打開|開啟|點擊|輸入|建立|建置|製作|開發|實作|編寫|撰寫|新增|儲存|更新|刪除|送出|發送|排程|提醒|查|讀|搜尋|分析|檢查|列出|列舉|取得|下載|上傳|複製|移動|重新命名|改名|簽出|簽入|還原|回收|debug|修|run|execute|open|click|fill|create|build|develop|implement|save|update|delete|send|schedule|search|inspect|check|list|enumerate|download|upload|copy|move|rename|checkout|checkin|restore)/i;
+const OPERATIONAL_RE = /(幫我|直接|執行|打開|開啟|點擊|輸入|建立|建置|製作|開發|實作|編寫|撰寫|新增|儲存|更新|刪除|送出|發送|排程|提醒|查|讀|搜尋|分析|檢查|檢視|盤點|列出|列舉|取得|獲取|找到|下載|上傳|複製|移動|重新命名|改名|簽出|簽入|還原|回收|debug|修|run|execute|open|click|fill|create|build|develop|implement|save|update|delete|send|schedule|search|inspect|check|list|enumerate|download|upload|copy|move|rename|checkout|checkin|restore)/i;
 const TOOL_CAPABILITY_RE = /(你有|有沒有|是否有|可用嗎|能用嗎|支援|available|have|has|enabled|啟用).*(mcp|工具|tool|server|skills?|技能|chrome-devtools|devtools)/i;
 const SKILL_CATALOG_RE = /(?:(?:有哪些|有什麼|列出|顯示|查看|清單|列表|目前|現在).{0,24}(?:skills?|技能)|(?:skills?|技能).{0,24}(?:有哪些|有什麼|可用|啟用|清單|列表|列出|顯示|查看)|\blist\s+(?:available\s+)?skills?\b|\bwhat\s+skills?\b)/i;
+const M365_CAPABILITY_PROBE_RE = /(?:(?:可以|能(?:不能)?|是否能|看(?:得)?到|讀(?:得)?到|存取|連線|使用).{0,32}(?:sharepoint|one\s*drive|onedrive|microsoft\s*365|\bm365\b)|(?:sharepoint|one\s*drive|onedrive|microsoft\s*365|\bm365\b).{0,32}(?:可以|能|可用|看(?:得)?到|讀(?:得)?到|存取|連線)|(?:can\s+you|are\s+you\s+able\s+to|do\s+you\s+have\s+access\s+to).{0,32}(?:sharepoint|one\s*drive|onedrive|microsoft\s*365|\bm365\b))/i;
 
 const HIGH_RISK_RE = /(\bdelete\b|\bremove\b|刪除|\bdestroy\b|\bdrop\b|\breset\b|\brm\b|\bkill\b|\bformat\b|付款|\bpay\b|\bpurchase\b|\bbuy\b|\bsend_email\b|\bsend\b|發送|寄出|\bpost\b|\bpublish\b|公開|\bdeploy\b|\bpush\b|\bmerge\b)/i;
 const ACTION_RE = /(click|fill|type|submit|navigate|new_page|close_page|drag|emulate|handle_dialog|create|save|update|write|schedule|commit|push|merge|reincarnate|evolution|moltbot|wiki\/delete|delete|刪除|建立|新增|儲存|更新|點擊|輸入|送出|排程)/i;
@@ -20,7 +21,9 @@ class ToolUsePolicy {
         const text = normalize(query);
         const explicitAction = EXPLICIT_ACTION_RE.test(text);
         const skillCatalog = SKILL_CATALOG_RE.test(text);
-        const capabilityProbe = TOOL_CAPABILITY_RE.test(text) || skillCatalog;
+        const capabilityProbe = TOOL_CAPABILITY_RE.test(text)
+            || M365_CAPABILITY_PROBE_RE.test(text)
+            || skillCatalog;
         const passive = PASSIVE_RE.test(text) && !OPERATIONAL_RE.test(text);
         const casual = !explicitAction && !PASSIVE_RE.test(text) && text.length < 80;
 

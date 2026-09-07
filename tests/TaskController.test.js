@@ -7,6 +7,133 @@ jest.mock('../src/core/Executor', () => {
 const TaskController = require('../src/core/TaskController');
 
 describe('TaskController', () => {
+    test('tool discovery returns selected guides without invoking shell or executing discovered tools', async () => {
+        const controller = new TaskController({ golemId: 'test-golem' });
+        const toolRouter = { buildRoutingHintAsync: jest.fn().mockResolvedValue('<tool-routing>selected guide</tool-routing>') };
+        try {
+            const result = await controller.runSequence({ brain: { toolRouter } }, [
+                { action: 'command', parameter: 'golem_check tools create a local document' },
+            ]);
+            expect(toolRouter.buildRoutingHintAsync).toHaveBeenCalledWith('create a local document');
+            expect(result).toContain('selected guide');
+            expect(result).toContain('no proposed tool has been executed');
+            expect(controller.internalExecutor).toBeFalsy();
+        } finally { controller.destroy(); }
+    });
+
+    test('queries only the active project memory without invoking the shell', async () => {
+        const controller = new TaskController({ golemId: 'test-golem' });
+        const projectMemoryService = {
+            getRelevantMemories: jest.fn().mockResolvedValue([{
+                id: 'pm_aaaaaaaaaaaaaaaa',
+                kind: 'lesson',
+                importance: 'core',
+                content: 'Do not repeat a plan-only turn without its current action.',
+                tags: ['pitfall'],
+                updatedAt: '2026-09-07T00:00:00.000Z',
+                retrievalReason: 'relevant',
+            }]),
+        };
+        const ctx = {
+            workspaceProjectId: 'project-1',
+            workspaceRoot: 'C:\\local\\m365-projects\\project-1',
+            m365ProjectWorkspaceService: projectMemoryService,
+        };
+        try {
+            const result = await controller.runSequence(ctx, [
+                { action: 'command', parameter: 'golem-memory 之前有哪些踩坑經驗' },
+            ], 0, { _resolveToolVectorEmbedder: jest.fn(() => null) });
+            expect(projectMemoryService.getRelevantMemories).toHaveBeenCalledWith(
+                'project-1',
+                '之前有哪些踩坑經驗',
+                expect.objectContaining({ workspacePath: ctx.workspaceRoot, limit: 12, recentLimit: 4 })
+            );
+            expect(result).toContain('[ProjectMemoryQuery]');
+            expect(result).toContain('plan-only turn');
+            expect(controller.internalExecutor).toBeFalsy();
+        } finally { controller.destroy(); }
+    });
+
+    test('returns recent project memory when no query is supplied', async () => {
+        const controller = new TaskController({ golemId: 'test-golem' });
+        const projectMemoryService = {
+            getRecentMemories: jest.fn().mockReturnValue([{
+                id: 'pm_bbbbbbbbbbbbbbbb',
+                kind: 'worklog',
+                importance: 'normal',
+                content: 'Verified the latest project output.',
+                tags: ['verification'],
+                updatedAt: '2026-09-07T01:00:00.000Z',
+                retrievalReason: 'recent',
+            }]),
+        };
+        const ctx = {
+            workspaceProjectId: 'project-1',
+            workspaceRoot: 'C:\\local\\m365-projects\\project-1',
+            m365ProjectWorkspaceService: projectMemoryService,
+        };
+        try {
+            const result = await controller.runSequence(ctx, [
+                { action: 'command', parameter: 'golem-memory' },
+            ]);
+            expect(projectMemoryService.getRecentMemories).toHaveBeenCalledWith(
+                'project-1',
+                { workspacePath: ctx.workspaceRoot, limit: 12 }
+            );
+            expect(result).toContain('Verified the latest project output.');
+            expect(controller.internalExecutor).toBeFalsy();
+        } finally { controller.destroy(); }
+    });
+
+    test('refuses a project-memory query outside an active project without invoking the shell', async () => {
+        const controller = new TaskController({ golemId: 'test-golem' });
+        try {
+            const result = await controller.runSequence({}, [
+                { action: 'command', parameter: 'golem-memory previous failures' },
+            ]);
+            expect(result).toContain('requires an active scoped project workspace');
+            expect(controller.internalExecutor).toBeFalsy();
+        } finally { controller.destroy(); }
+    });
+
+    test('reads a selected local folder through the bounded host service without invoking shell', async () => {
+        const controller = new TaskController({ golemId: 'test-golem' });
+        const folderService = {
+            list: jest.fn(() => ({ operation: 'list', entries: [{ name: 'brief.md', type: 'file' }] })),
+        };
+        const reference = { id: 'folder_test', name: 'Selected', path: 'C:\\Selected' };
+        try {
+            const result = await controller.runSequence({
+                m365LocalFolderService: folderService,
+                workspaceLocalFolders: [reference],
+            }, [{ action: 'command', parameter: 'golem-folder list folder_test' }]);
+
+            expect(folderService.list).toHaveBeenCalledWith(reference, '.');
+            expect(result).toContain('Bounded local-folder list completed');
+            expect(result).toContain('brief.md');
+            expect(controller.internalExecutor).toBeFalsy();
+        } finally { controller.destroy(); }
+    });
+
+    test('rejects unavailable or incomplete folder commands without invoking shell', async () => {
+        const controller = new TaskController({ golemId: 'test-golem' });
+        const folderService = { read: jest.fn() };
+        try {
+            const missingPath = await controller.runSequence({
+                m365LocalFolderService: folderService,
+                workspaceLocalFolders: [{ id: 'folder_test', path: 'C:\\Selected' }],
+            }, [{ action: 'command', parameter: 'golem-folder read folder_test' }]);
+            const unknownReference = await controller.runSequence({
+                m365LocalFolderService: folderService,
+                workspaceLocalFolders: [],
+            }, [{ action: 'command', parameter: 'golem-folder read folder_test brief.md' }]);
+
+            expect(missingPath).toContain('requires a relative text-file path');
+            expect(unknownReference).toContain('reference is unavailable');
+            expect(folderService.read).not.toHaveBeenCalled();
+            expect(controller.internalExecutor).toBeFalsy();
+        } finally { controller.destroy(); }
+    });
     beforeEach(() => {
         delete process.env.COMMAND_WHITELIST;
         delete process.env.GOLEM_TRUST_SYSTEM_COMMANDS;
@@ -67,6 +194,44 @@ describe('TaskController', () => {
         controller.destroy();
     });
 
+    test('blocks Goal-mode commands that escape the assigned project workspace', async () => {
+        const controller = new TaskController({ golemId: 'test-golem' });
+        const ctx = {
+            reply: jest.fn().mockResolvedValue(undefined),
+            workspaceRoot: 'C:\\local\\m365-projects\\project-1',
+            workspaceGoalMode: true,
+        };
+
+        const outside = await controller.runSequence(ctx, [
+            { action: 'command', parameter: 'dir "D:\\Other\\secret"' },
+        ]);
+        const traversal = await controller.runSequence(ctx, [
+            { action: 'command', parameter: 'dir ..' },
+        ]);
+
+        expect(outside).toContain('Goal-mode workspace boundary blocked this command');
+        expect(outside).toContain('outside the assigned project workspace');
+        expect(traversal).toContain('Parent-directory traversal is not allowed');
+        expect(controller.internalExecutor).toBeFalsy();
+        controller.destroy();
+    });
+
+    test('allows a Goal-mode command that stays inside the assigned project workspace', async () => {
+        const controller = new TaskController({ golemId: 'test-golem' });
+        const workspaceRoot = 'C:\\local\\m365-projects\\project-1';
+        const command = `dir "${workspaceRoot}\\reports"`;
+
+        const result = await controller.runSequence({
+            reply: jest.fn().mockResolvedValue(undefined),
+            workspaceRoot,
+            workspaceGoalMode: true,
+        }, [{ action: 'command', parameter: command }], 0, null, { approvalGranted: true });
+
+        expect(result).toContain('[Step 1 Success]');
+        expect(controller.internalExecutor.run).toHaveBeenCalledWith(command, { cwd: workspaceRoot });
+        controller.destroy();
+    });
+
     test('runSequence should still require approval for complex command', async () => {
         const controller = new TaskController({ golemId: 'test-golem' });
         const ctx = { reply: jest.fn().mockResolvedValue(undefined) };
@@ -83,6 +248,44 @@ describe('TaskController', () => {
             expect.any(Object)
         );
         expect(controller.pendingTasks.size).toBe(1);
+    });
+
+    test('a scoped M365 approval avoids a duplicate warning prompt', async () => {
+        const controller = new TaskController({ golemId: 'test-golem' });
+        const ctx = { reply: jest.fn().mockResolvedValue(undefined) };
+
+        const result = await controller.runSequence(
+            ctx,
+            [{ action: 'command', parameter: 'cat README.md' }],
+            0,
+            null,
+            { approvalGranted: true }
+        );
+
+        controller.destroy();
+
+        expect(result).toContain('[Step 1 Success]');
+        expect(ctx.reply).not.toHaveBeenCalled();
+        expect(controller.pendingTasks.size).toBe(0);
+    });
+
+    test('a scoped M365 approval never bypasses a destructive hard block', async () => {
+        const controller = new TaskController({ golemId: 'test-golem' });
+        controller.security.evaluateCommandLevel = jest.fn(() => 0);
+        const ctx = { reply: jest.fn().mockResolvedValue(undefined) };
+
+        const result = await controller.runSequence(
+            ctx,
+            [{ action: 'command', parameter: 'rm -rf /' }],
+            0,
+            null,
+            { approvalGranted: true }
+        );
+
+        controller.destroy();
+
+        expect(result).toContain('指令被系統攔截');
+        expect(controller.internalExecutor).toBeUndefined();
     });
 
     test('runSequence should assemble sys_admin through package runtime path', async () => {

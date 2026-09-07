@@ -36,15 +36,6 @@ type FileSystemFileEntryLike = FileSystemEntryLike & {
     file: (success: (file: File) => void, failure?: (error: unknown) => void) => void;
 };
 
-type FileSystemDirectoryEntryLike = FileSystemEntryLike & {
-    createReader: () => {
-        readEntries: (
-            success: (entries: FileSystemEntryLike[]) => void,
-            failure?: (error: unknown) => void
-        ) => void;
-    };
-};
-
 function formatMiB(bytes: number): string {
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
@@ -111,35 +102,6 @@ function entryFile(entry: FileSystemFileEntryLike): Promise<File> {
     return new Promise((resolve, reject) => entry.file(resolve, reject));
 }
 
-async function readDirectoryEntries(entry: FileSystemDirectoryEntryLike): Promise<FileSystemEntryLike[]> {
-    const reader = entry.createReader();
-    const all: FileSystemEntryLike[] = [];
-    while (true) {
-        const batch = await new Promise<FileSystemEntryLike[]>((resolve, reject) => reader.readEntries(resolve, reject));
-        if (batch.length === 0) return all;
-        all.push(...batch);
-    }
-}
-
-async function walkEntry(
-    entry: FileSystemEntryLike,
-    parentPath: string,
-    output: AttachmentCandidate[]
-): Promise<void> {
-    if (output.length >= MAX_M365_ATTACHMENTS * 4) return;
-    const displayPath = parentPath ? `${parentPath}/${entry.name}` : entry.name;
-    if (pathIsIgnored(displayPath)) return;
-    if (entry.isFile) {
-        const file = await entryFile(entry as FileSystemFileEntryLike);
-        output.push({ file, displayPath });
-        return;
-    }
-    if (entry.isDirectory) {
-        const children = await readDirectoryEntries(entry as FileSystemDirectoryEntryLike);
-        for (const child of children) await walkEntry(child, displayPath, output);
-    }
-}
-
 export async function collectDroppedAttachmentCandidates(dataTransfer: DataTransfer): Promise<AttachmentCandidate[]> {
     const candidates: AttachmentCandidate[] = [];
     const items = Array.from(dataTransfer.items || []);
@@ -148,10 +110,20 @@ export async function collectDroppedAttachmentCandidates(dataTransfer: DataTrans
             webkitGetAsEntry?: () => FileSystemEntryLike | null;
         }).webkitGetAsEntry;
         const entry = typeof getEntry === "function" ? getEntry.call(item) : null;
-        if (entry) await walkEntry(entry, "", candidates);
+        if (entry?.isDirectory) {
+            throw new Error("資料夾不會整批上傳。請使用＋選單的「選擇本機資料夾」，讓 Golem 按需讀取。");
+        }
+        if (entry?.isFile) {
+            const file = await entryFile(entry as FileSystemFileEntryLike);
+            candidates.push({ file, displayPath: file.name });
+        }
     }
     if (candidates.length > 0) return candidates;
-    return Array.from(dataTransfer.files || []).map((file) => ({ file, displayPath: file.name }));
+    const files = Array.from(dataTransfer.files || []);
+    if (files.some((file) => Boolean(file.webkitRelativePath))) {
+        throw new Error("資料夾不會整批上傳。請使用＋選單的「選擇本機資料夾」，讓 Golem 按需讀取。");
+    }
+    return files.map((file) => ({ file, displayPath: file.name }));
 }
 
 export function fileToBase64(file: File): Promise<string> {

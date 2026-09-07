@@ -1,6 +1,7 @@
 const ConfigManager = require('../src/config');
 const SkillPackageRegistry = require('../src/managers/SkillPackageRegistry');
 const COMMAND_DEFS = require('../src/config/commands');
+const M365_COMMAND_DEFS = require('../src/config/m365Commands');
 const { toolsetManager } = require('../src/managers/ToolsetManager');
 
 describe('M365 retired feature subtraction', () => {
@@ -33,5 +34,11 @@ describe('M365 retired feature subtraction', () => {
             '/cryptos',
             '/cryptoboard',
         ]));
+    });
+
+    test('advertises only the locally handled M365 slash command', () => {
+        expect(M365_COMMAND_DEFS).toEqual([
+            expect.objectContaining({ command: '/new' }),
+        ]);
     });
 });

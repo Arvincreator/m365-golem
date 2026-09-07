@@ -100,7 +100,7 @@ async function activateM365Conversation(golemId, conversation) {
     if (conversation.bindingState === 'reconcile_required') {
         throw serviceError(
             'M365_RECONCILIATION_REQUIRED',
-            'This conversation has an ambiguous prior dispatch and must be reconciled before another message is sent.',
+            '上一則訊息的傳送狀態尚未確認。請使用畫面上的「再次確認」按鈕，確認後即可繼續。',
             409
         );
     }
@@ -132,9 +132,39 @@ async function activateM365Conversation(golemId, conversation) {
     return snapshot;
 }
 
-async function captureM365ConversationBinding(store, golemId, conversation) {
-    const brain = resolveM365Brain(golemId);
-    const snapshot = brain.getM365ConversationSnapshot();
+function boundedNumber(value, fallback, min, max) {
+    const parsed = Number(value);
+    if (!Number.isFinite(parsed)) return fallback;
+    return Math.min(max, Math.max(min, parsed));
+}
+
+async function captureM365ConversationBinding(store, golemId, conversation, options = {}) {
+    const brain = options.brain || resolveM365Brain(golemId);
+    const timeoutMs = boundedNumber(
+        options.timeoutMs ?? process.env.M365_CONVERSATION_BIND_TIMEOUT_MS,
+        12000,
+        0,
+        60000
+    );
+    const pollIntervalMs = boundedNumber(
+        options.pollIntervalMs ?? process.env.M365_CONVERSATION_BIND_POLL_MS,
+        250,
+        1,
+        5000
+    );
+    const startedAt = Date.now();
+    let snapshot = await brain.getM365ConversationSnapshot();
+
+    // A newly created M365 chat can display the completed answer before Edge
+    // replaces /chat with the durable /chat/conversation/<id> URL. Give that
+    // normal navigation a bounded chance to settle before requiring recovery.
+    while (snapshot.status === 'expected_host'
+        && (!snapshot.isConversation || !snapshot.conversationId)
+        && Date.now() - startedAt < timeoutMs) {
+        await new Promise((resolve) => setTimeout(resolve, pollIntervalMs));
+        snapshot = await brain.getM365ConversationSnapshot();
+    }
+
     if (snapshot.status !== 'expected_host' || !snapshot.isConversation || !snapshot.conversationId) {
         throw serviceError(
             'M365_CONVERSATION_BINDING_PENDING',

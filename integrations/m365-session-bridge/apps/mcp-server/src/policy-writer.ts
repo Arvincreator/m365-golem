@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import * as path from "node:path";
 import { defaultPolicyPath } from "./policy-store.js";
 import {
   BridgeError,
@@ -8,7 +9,7 @@ import {
 } from "@m365-bridge/protocol";
 import { isSharePointOnlineHost } from "@m365-bridge/policy";
 
-export type EditablePolicyList = "allowedHosts" | "allowedSites" | "deniedHosts" | "deniedSites";
+export type EditablePolicyList = "allowedHosts" | "allowedSites" | "deniedHosts" | "deniedSites" | "allowedLocalPaths";
 export type PolicyListAction = "add" | "remove";
 
 function readRawPolicy(): Policy {
@@ -37,6 +38,26 @@ function normalizeHostEntry(raw: string): string {
   return value;
 }
 
+function normalizeLocalPathEntry(raw: string): string {
+  const value = raw.trim().replace(/^"(.*)"$/, "$1");
+  if (!value || value.includes("\0")) {
+    throw new BridgeError(ErrorCode.INVALID_INPUT, "Local path entries must not be empty");
+  }
+  if (/^%[A-Za-z_][A-Za-z0-9_]*%(?:[\\/].*)?$/.test(value)) {
+    return value;
+  }
+
+  const pathApi = path.win32.isAbsolute(value) ? path.win32 : path.posix;
+  if (!pathApi.isAbsolute(value)) {
+    throw new BridgeError(ErrorCode.INVALID_INPUT, "Local path entries must be absolute project folders");
+  }
+  const normalized = pathApi.normalize(value);
+  if (normalized.toLowerCase() === pathApi.parse(normalized).root.toLowerCase()) {
+    throw new BridgeError(ErrorCode.INVALID_INPUT, "A filesystem root is too broad; choose a specific project folder");
+  }
+  return normalized.replace(/[\\/]+$/, "");
+}
+
 export function normalizeSiteEntry(raw: string): string {
   const trimmed = raw.trim();
   if (trimmed === "" || trimmed === "/") return "";
@@ -57,6 +78,7 @@ export function normalizeSiteEntry(raw: string): string {
 }
 
 function normalizeListEntry(list: EditablePolicyList, raw: string): string {
+  if (list === "allowedLocalPaths") return normalizeLocalPathEntry(raw);
   return list.endsWith("Hosts") ? normalizeHostEntry(raw) : normalizeSiteEntry(raw);
 }
 

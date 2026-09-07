@@ -1,5 +1,8 @@
 "use client";
 
+import { RunAttention } from "@/features/m365-workspace/components/RunAttention";
+import { WorkspaceInspector } from "@/features/m365-workspace/components/WorkspaceInspector";
+
 import React, { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     ArrowDown,
@@ -23,6 +26,7 @@ import {
     Send,
     ShieldCheck,
     Square,
+    Target,
     Paperclip,
     UserRound,
     X,
@@ -30,9 +34,15 @@ import {
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import M365MessageContent from "@/components/M365MessageContent";
-import { apiGet, apiPost } from "@/lib/api-client";
+import { externalConversationLinkComponents } from "@/components/ExternalConversationLink";
+import { useConversationDraft, otherAttachmentBytes } from "@/features/m365-workspace/hooks/useConversationDraft";
+import { shouldSubmit } from "@/features/m365-workspace/lib/composer-input";
+import { LatestQuery } from "@/features/m365-workspace/lib/latest-query";
+import { MessageToolbar } from "@/features/m365-workspace/components/MessageToolbar";
+import type { Draft } from "@/features/m365-workspace/lib/draft-controller";
+import { apiGet, apiPost, isApiAbortError } from "@/lib/api-client";
 import { apiUrl } from "@/lib/api";
-import { isNearChatBottom } from "@/lib/m365-message-rendering";
+import { buildM365ConversationTimeline, isNearChatBottom } from "@/lib/m365-message-rendering";
 import { socket } from "@/lib/socket";
 import { cn } from "@/lib/utils";
 import {
@@ -100,8 +110,35 @@ type PendingM365Response = {
 };
 
 type ResponseMode = "auto" | "quick" | "thoughtful";
-type ApprovalMode = "manual" | "auto";
+type AutomationMode = "guided" | "balanced" | "autopilot" | "silent";
 type ComposerPicker = "files" | "mcp" | "skills" | null;
+type ConversationTimelineItem =
+    | { kind: "message"; message: M365Message }
+    | { kind: "execution"; runId: string; anchorId: string; messages: M365Message[] };
+
+function localFolderName(folderPath: string): string {
+    const normalized = String(folderPath || "").replace(/[\\/]+$/, "");
+    return normalized.split(/[\\/]/).filter(Boolean).pop() || normalized;
+}
+
+function localFolderId(): string {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return `folder_${crypto.randomUUID()}`;
+    return `folder_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
+
+const AUTOMATION_MODE_NOTICE: Record<AutomationMode, string> = {
+    guided: "本機工具逐項顯示核准卡。",
+    balanced: "受信任且不超過 L1 的指令可自動執行，其他動作仍會要求核准。",
+    autopilot: "通過安全分級的動作可自動執行，仍保留回報與回合上限。",
+    silent: "通過安全分級的動作會自動執行，並減少中間訊息。",
+};
+
+const AUTOMATION_MODE_LABEL: Record<AutomationMode, string> = {
+    guided: "保守確認",
+    balanced: "平衡模式",
+    autopilot: "自動駕駛",
+    silent: "靜默自動",
+};
 
 type ReferenceFileOption = {
     id: string;
@@ -123,6 +160,14 @@ type SkillOption = {
     name: string;
     description?: string;
     action: string;
+    kind?: "executable" | "prompt_only";
+};
+
+type PromptShortcutOption = {
+    id: string;
+    shortcut: string;
+    prompt: string;
+    note?: string;
 };
 
 function errorMessage(error: unknown): string {
@@ -143,34 +188,135 @@ function isRunTerminal(run: M365Run): boolean {
     return ["FAILED", "CANCELED", "COMPLETED"].includes(run.status);
 }
 
-function isCollapsibleActionMessage(message: M365Message): boolean {
-    if (message.role === "user") return false;
-    return /M365 工作台已暫停一項工具動作|\[GOLEM_ACTION\]|"action"\s*:\s*"(?:command|mcp_call|multi_agent)"/i.test(message.content);
+function executionHeadline(content: string): string {
+    return String(content || "")
+        .trim()
+        .replace(/，正在執行並確認中(?:…|\.\.\.)$/u, "")
+        .replace(/^❌\s*/, "")
+        .slice(0, 72) || "正在處理目前步驟";
 }
 
-function CollapsibleActionMessage({ content }: { content: string }) {
+function RunExecutionCard({ messages, run }: { messages: M365Message[]; run: M365Run | null }) {
+    const latest = messages[messages.length - 1];
+    const stepCount = new Set(messages.map((message) => message.stepId).filter(Boolean)).size;
+    const running = Boolean(run && ["QUEUED", "RUNNING"].includes(run.status));
+    const needsAttention = Boolean(run && ["WAITING_USER", "WAITING_APPROVAL", "RECONCILE_REQUIRED", "BLOCKED"].includes(run.status));
+    const completed = run?.status === "COMPLETED";
+    const stopped = Boolean(run && ["FAILED", "CANCELED"].includes(run.status));
+    const statusLabel = running ? "正在執行" : needsAttention ? "需要你的處理" : completed ? "執行完成" : stopped ? "執行已停止" : "執行紀錄";
+
     return (
-        <details className="group min-w-[min(68vw,420px)]">
-            <summary className="flex cursor-pointer list-none items-center justify-between gap-3 rounded-xl px-1 py-0.5 text-sm font-medium marker:content-none">
-                <span className="flex min-w-0 items-center gap-2">
-                    <ShieldCheck className="h-4 w-4 shrink-0 text-amber-500" />
-                    <span className="truncate">工具動作等待核准</span>
-                </span>
-                <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
-            </summary>
-            <div className="prose prose-sm mt-3 max-w-none break-words border-t border-border/70 pt-3 text-foreground dark:prose-invert prose-p:my-2 prose-pre:max-h-64 prose-pre:overflow-auto">
-                <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+        <article role="status" aria-live="polite" aria-label={`Golem ${statusLabel}`} className="mr-auto w-full max-w-[620px]">
+            <details className={cn(
+                "group overflow-hidden rounded-2xl border bg-secondary/30 shadow-sm",
+                running ? "border-cyan-500/35" : needsAttention ? "border-amber-500/40" : "border-border"
+            )}>
+                <summary className="flex cursor-pointer list-none items-center gap-3 px-4 py-3 marker:content-none">
+                    <span className={cn(
+                        "flex h-8 w-8 shrink-0 items-center justify-center rounded-full",
+                        running ? "bg-cyan-500/12 text-cyan-600 dark:text-cyan-300" :
+                            needsAttention ? "bg-amber-500/12 text-amber-600" :
+                                completed ? "bg-emerald-500/12 text-emerald-600" : "bg-secondary text-muted-foreground"
+                    )}>
+                        {running ? <Loader2 className="h-4 w-4 animate-spin" /> :
+                            needsAttention ? <AlertTriangle className="h-4 w-4" /> :
+                                completed ? <CheckCircle2 className="h-4 w-4" /> : <ListChecks className="h-4 w-4" />}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                        <span className="flex items-center gap-2 text-sm font-semibold">
+                            {statusLabel}
+                            {running && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-cyan-500" aria-hidden="true" />}
+                        </span>
+                        <span className="mt-0.5 block truncate text-xs text-muted-foreground">{executionHeadline(latest?.content || "")}</span>
+                    </span>
+                    <span className="shrink-0 text-[11px] text-muted-foreground">{stepCount} 個步驟</span>
+                    <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
+                </summary>
+                <div className="border-t border-border/70 px-4 py-3">
+                    <p className="mb-2 text-[11px] text-muted-foreground">詳細執行過程</p>
+                    <ol className="space-y-2">
+                        {messages.map((message, index) => (
+                            <li key={message.id} className="flex gap-2 text-xs leading-5">
+                                <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-border bg-background text-[10px] font-semibold text-muted-foreground">{index + 1}</span>
+                                <span className="min-w-0 flex-1 break-words text-foreground/85">{message.content}</span>
+                                <span className="shrink-0 text-[10px] text-muted-foreground">{formatLocalDate(message.createdAt)}</span>
+                            </li>
+                        ))}
+                    </ol>
+                </div>
+            </details>
+        </article>
+    );
+}
+
+function GolemActivityBubble() {
+    return (
+        <article
+            role="status"
+            aria-live="polite"
+            aria-label="Golem 正在處理"
+            className="mr-auto flex max-w-full flex-col items-start"
+        >
+            <div className="mb-1 flex items-center gap-2">
+                <div className="flex h-6 w-6 shrink-0 items-center justify-center rounded-full border border-primary/20 bg-primary/10">
+                    <Bot className="h-3 w-3 text-primary" />
+                </div>
+                <span className="text-xs font-bold text-primary">Golem</span>
             </div>
-        </details>
+            <div className="inline-flex min-h-11 items-center rounded-2xl rounded-tl-none border border-border bg-secondary/50 px-5 py-3 shadow-sm">
+                <span className="sr-only">Golem 正在處理</span>
+                <span aria-hidden="true" className="flex h-5 items-center gap-1.5">
+                    {[0, 140, 280].map((delay) => (
+                        <span
+                            key={delay}
+                            className="h-2 w-2 rounded-full bg-primary animate-bounce motion-reduce:animate-pulse"
+                            style={{ animationDelay: `${delay}ms`, animationDuration: "900ms" }}
+                        />
+                    ))}
+                </span>
+            </div>
+        </article>
     );
 }
 
 export default function M365ChatPage() {
-    const {
-        hydrated,
-        activeProjectId,
-        activeConversationId,
-    } = useM365WorkspaceSelection();
+    const selection = useM365WorkspaceSelection();
+    if (!selection.hydrated || !selection.activeProjectId || !selection.activeConversationId) return <div className="p-8">請從左側選擇或建立專案對話。</div>;
+    return <ScopedM365Chat key={JSON.stringify([selection.activeProjectId, selection.activeConversationId])} projectId={selection.activeProjectId} conversationId={selection.activeConversationId} />;
+}
+
+function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConversationId }: { projectId: string; conversationId: string }) {
+    const hydrated = true;
+    const draftState = useConversationDraft(activeProjectId, activeConversationId);
+    const { controller, draft } = draftState;
+    const input = draft.text;
+    const responseMode = draft.responseMode;
+    const selectedReferenceFileIds = draft.referenceFileIds;
+    const selectedMcpServerNames = draft.mcpServerNames;
+    const selectedSkillIds = draft.skillIds;
+    const selectedLocalFolders = draft.localFolders;
+    const pendingAttachments = draftState.files;
+    const setInput = (text: string) => controller.update({ text });
+    const setResponseMode = (mode: ResponseMode) => controller.update({ responseMode: mode });
+    const setSelectedReferenceFileIds = (value: string[] | ((value: string[]) => string[])) => controller.update({ referenceFileIds: typeof value === "function" ? value(controller.getSnapshot().draft.referenceFileIds) : value });
+    const setSelectedMcpServerNames = (value: string[] | ((value: string[]) => string[])) => controller.update({ mcpServerNames: typeof value === "function" ? value(controller.getSnapshot().draft.mcpServerNames) : value });
+    const setSelectedSkillIds = (value: string[] | ((value: string[]) => string[])) => controller.update({ skillIds: typeof value === "function" ? value(controller.getSnapshot().draft.skillIds) : value });
+    const setSelectedLocalFolders = (value: Draft["localFolders"] | ((value: Draft["localFolders"]) => Draft["localFolders"])) => controller.update({
+        localFolders: typeof value === "function" ? value(controller.getSnapshot().draft.localFolders) : value,
+    });
+    const setPendingAttachments = useCallback((value: PendingM365Attachment[] | ((value: PendingM365Attachment[]) => PendingM365Attachment[])) => {
+        const files = typeof value === "function" ? value(controller.getSnapshot().files) : value;
+        const missing = controller.getSnapshot().draft.attachmentDescriptors.filter(item => item.state === "needs_reselect"
+            && !files.some(file => file.file.name === item.fileName && file.file.size === item.size && file.file.lastModified === item.lastModified));
+        controller.update({ attachmentDescriptors: [...missing, ...files.map(item => ({ id: item.id, fileName: item.file.name, size: item.file.size, lastModified: item.file.lastModified, state: "local_selected" }))] }, files);
+    }, [controller]);
+    const [referenceBindings, setReferenceBindings] = useState<string[]>([]);
+    const [remoteDraft, setRemoteDraft] = useState<Draft | null>(null);
+    const [queries] = useState(() => new LatestQuery());
+    const alive = useRef(true);
+    const composing = useRef(false);
+    const sendGuard = useRef(false);
+    useEffect(() => { alive.current = true; return () => { alive.current = false; queries.dispose(); }; }, [queries]);
     const [project, setProject] = useState<M365Project | null>(null);
     const [projectWorkspace, setProjectWorkspace] = useState<M365ProjectWorkspace | null>(null);
     const [conversation, setConversation] = useState<M365Conversation | null>(null);
@@ -182,10 +328,9 @@ export default function M365ChatPage() {
     const [recheckingRequestId, setRecheckingRequestId] = useState("");
     const [toolActionsEnabled, setToolActionsEnabled] = useState(true);
     const [decidingActionId, setDecidingActionId] = useState("");
-    const [input, setInput] = useState("");
-    const [responseMode, setResponseMode] = useState<ResponseMode>("auto");
-    const [approvalMode, setApprovalMode] = useState<ApprovalMode>("manual");
-    const [savingApprovalMode, setSavingApprovalMode] = useState(false);
+    const [automationMode, setAutomationMode] = useState<AutomationMode>("guided");
+    const [goalMode, setGoalMode] = useState(false);
+    const [savingAutomationMode, setSavingAutomationMode] = useState(false);
     const [composerMenuOpen, setComposerMenuOpen] = useState(false);
     const [composerPicker, setComposerPicker] = useState<ComposerPicker>(null);
     const [composerResourcesLoading, setComposerResourcesLoading] = useState(true);
@@ -193,12 +338,10 @@ export default function M365ChatPage() {
     const [referenceFiles, setReferenceFiles] = useState<ReferenceFileOption[]>([]);
     const [mcpServers, setMcpServers] = useState<McpServerOption[]>([]);
     const [skills, setSkills] = useState<SkillOption[]>([]);
-    const [selectedReferenceFileIds, setSelectedReferenceFileIds] = useState<string[]>([]);
-    const [selectedMcpServerNames, setSelectedMcpServerNames] = useState<string[]>([]);
-    const [selectedSkillIds, setSelectedSkillIds] = useState<string[]>([]);
-    const [pendingAttachments, setPendingAttachments] = useState<PendingM365Attachment[]>([]);
+    const [promptShortcuts, setPromptShortcuts] = useState<PromptShortcutOption[]>([]);
     const [attachmentWarnings, setAttachmentWarnings] = useState<string[]>([]);
     const [attachmentProgress, setAttachmentProgress] = useState("");
+    const [pickingLocalFolder, setPickingLocalFolder] = useState(false);
     const [dragActive, setDragActive] = useState(false);
     const [showAgentsEditor, setShowAgentsEditor] = useState(false);
     const [loading, setLoading] = useState(true);
@@ -206,22 +349,50 @@ export default function M365ChatPage() {
     const [activating, setActivating] = useState(false);
     const [error, setError] = useState("");
     const [notice, setNotice] = useState("");
-    const [showRuns, setShowRuns] = useState(true);
+    const [showRuns, setShowRuns] = useState(false);
     const [runSaving, setRunSaving] = useState(false);
     const [runDetail, setRunDetail] = useState<M365RunDetail | null>(null);
-    const [runInput, setRunInput] = useState("");
+    const [replyingToRun, setReplyingToRun] = useState(false);
     const [followingLatest, setFollowingLatest] = useState(true);
     const scrollRef = useRef<HTMLDivElement>(null);
+    const conversationContentRef = useRef<HTMLDivElement>(null);
     const followingLatestRef = useRef(true);
+    const followRequestIdRef = useRef<string | null>(null);
+    const followCompletionTimerRef = useRef<number | null>(null);
     const initialConversationScrollRef = useRef(false);
+    const golemActivityWasVisibleRef = useRef(false);
     const composerRef = useRef<HTMLTextAreaElement>(null);
+    const inspectorTriggerRef = useRef<HTMLButtonElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
-    const folderInputRef = useRef<HTMLInputElement>(null);
+
+    useEffect(() => {
+        const textarea = composerRef.current;
+        if (textarea) { textarea.style.height = "48px"; textarea.style.height = `${Math.min(240, textarea.scrollHeight)}px`; }
+    }, [input, loading]);
+    useEffect(() => {
+        apiGet<{ referenceFileIds: string[] }>(apiUrl(`/api/projects/${encodeURIComponent(activeProjectId)}/reference-bindings`), undefined, { retries: 0 })
+            .then(data => { if (alive.current) setReferenceBindings(data.referenceFileIds); })
+            .catch(() => { if (alive.current) setComposerResourceError("無法確認知識來源的專案授權，暫不可選取。"); });
+        setShowRuns(window.localStorage.getItem("m365-ux-inspector") === "open");
+    }, [activeProjectId]);
 
     const currentRun = useMemo(
         () => runs.find((run) => !isRunTerminal(run)) || runs[0] || null,
         [runs]
     );
+    const runsById = useMemo(() => new Map(runs.map((run) => [run.id, run])), [runs]);
+    const conversationTimeline = useMemo(
+        () => buildM365ConversationTimeline(messages) as ConversationTimelineItem[],
+        [messages]
+    );
+    const promptShortcutSuggestions = useMemo(() => {
+        const typed = input.trimStart();
+        if (!typed.startsWith("/") || /\s/.test(typed)) return [];
+        const needle = typed.toLocaleLowerCase();
+        return promptShortcuts
+            .filter((item) => (item.shortcut.startsWith("/") ? item.shortcut : `/${item.shortcut}`).toLocaleLowerCase().startsWith(needle))
+            .slice(0, 6);
+    }, [input, promptShortcuts]);
     const pendingApproval = useMemo(
         () => runDetail?.approvals.find((approval) => approval.status === "pending") || null,
         [runDetail]
@@ -229,6 +400,10 @@ export default function M365ChatPage() {
     const completedRequestIds = useMemo(() => new Set(
         messages.filter((message) => message.role === "assistant" && message.requestId).map((message) => message.requestId as string)
     ), [messages]);
+    const pausedResponseRequestIds = useMemo(
+        () => new Set(pendingResponses.map((item) => item.requestId)),
+        [pendingResponses]
+    );
     const queuedDialogueCount = useMemo(() => messages.filter(
         (message) => message.role === "user" && message.deliveryState === "local"
     ).length, [messages]);
@@ -236,13 +411,15 @@ export default function M365ChatPage() {
         (message) => message.role === "user"
             && ["dispatch_started", "confirmed"].includes(message.deliveryState)
             && (!message.requestId || !completedRequestIds.has(message.requestId))
-    ).length, [completedRequestIds, messages]);
+            && (!message.requestId || !pausedResponseRequestIds.has(message.requestId))
+    ).length, [completedRequestIds, messages, pausedResponseRequestIds]);
+    const showGolemActivity = sending || activeDialogueCount > 0;
     const latestMessageKey = useMemo(() => {
         const latest = messages[messages.length - 1];
         return latest
-            ? `${activeConversationId || "none"}:${latest.id}:${latest.deliveryState}:${latest.content.length}:${latest.createdAt}`
-            : `${activeConversationId || "none"}:empty`;
-    }, [activeConversationId, messages]);
+            ? `${activeConversationId || "none"}:${latest.id}:${latest.deliveryState}:${latest.content.length}:${latest.createdAt}:active:${activeDialogueCount}`
+            : `${activeConversationId || "none"}:empty:active:${activeDialogueCount}`;
+    }, [activeConversationId, activeDialogueCount, messages]);
 
     const scrollToLatest = useCallback((behavior: ScrollBehavior = "smooth") => {
         const target = scrollRef.current;
@@ -255,6 +432,11 @@ export default function M365ChatPage() {
     const handleConversationScroll = useCallback(() => {
         const target = scrollRef.current;
         if (!target) return;
+        if (followRequestIdRef.current) {
+            followingLatestRef.current = true;
+            setFollowingLatest(true);
+            return;
+        }
         const next = isNearChatBottom(target);
         followingLatestRef.current = next;
         setFollowingLatest((current) => current === next ? current : next);
@@ -262,23 +444,27 @@ export default function M365ChatPage() {
 
     const loadMessages = useCallback(async () => {
         if (!activeConversationId) return [];
+        const ticket = queries.begin("loadMessages");
         const data = await apiGet<{ messages: M365Message[] }>(
             apiUrl(`/api/conversations/${encodeURIComponent(activeConversationId)}/messages?limit=500`),
-            undefined,
+            { signal: ticket.signal },
             { retries: 0 }
         );
+        if (!ticket.current()) return [];
         const items = data.messages || [];
         setMessages(items);
         return items;
-    }, [activeConversationId]);
+    }, [activeConversationId, queries]);
 
     const loadRuns = useCallback(async () => {
         if (!activeConversationId) return;
+        const ticket = queries.begin("loadRuns");
         const data = await apiGet<{ runs: M365Run[] }>(
             apiUrl(`/api/conversations/${encodeURIComponent(activeConversationId)}/runs`),
-            undefined,
+            { signal: ticket.signal },
             { retries: 0 }
         );
+        if (!ticket.current()) return;
         const items = data.runs || [];
         setRuns(items);
         const selected = items.find((run) => !isRunTerminal(run)) || items[0] || null;
@@ -288,11 +474,11 @@ export default function M365ChatPage() {
         }
         const detail = await apiGet<M365RunDetail>(
             apiUrl(`/api/runs/${encodeURIComponent(selected.id)}`),
-            undefined,
+            { signal: ticket.signal },
             { retries: 0 }
         );
-        setRunDetail(detail);
-    }, [activeConversationId]);
+        if (ticket.current()) setRunDetail(detail);
+    }, [activeConversationId, queries]);
 
     const loadPendingLocalActions = useCallback(async () => {
         if (!activeConversationId) {
@@ -300,55 +486,65 @@ export default function M365ChatPage() {
             setActionExecutionQueue([]);
             return;
         }
+        const ticket = queries.begin("loadPendingLocalActions");
         const data = await apiGet<{ actionsEnabled: boolean; items: PendingLocalAction[]; executionQueue?: ActionExecutionItem[] }>(
             apiUrl(`/api/chat/pending-actions?golemId=golem_A&conversationId=${encodeURIComponent(activeConversationId)}`),
-            undefined,
+            { signal: ticket.signal },
             { retries: 0 }
         );
+        if (!ticket.current()) return;
         setToolActionsEnabled(data.actionsEnabled !== false);
         setPendingLocalActions(data.items || []);
         setActionExecutionQueue(data.executionQueue || []);
-    }, [activeConversationId]);
+    }, [activeConversationId, queries]);
 
     const loadPendingResponses = useCallback(async () => {
         if (!activeConversationId) {
             setPendingResponses([]);
             return;
         }
+        const ticket = queries.begin("loadPendingResponses");
         const data = await apiGet<{ items: PendingM365Response[] }>(
             apiUrl(`/api/chat/pending-responses?conversationId=${encodeURIComponent(activeConversationId)}`),
-            undefined,
+            { signal: ticket.signal },
             { retries: 0 }
         );
+        if (!ticket.current()) return;
         setPendingResponses(data.items || []);
-    }, [activeConversationId]);
+    }, [activeConversationId, queries]);
 
     const loadProjectWorkspace = useCallback(async () => {
         if (!activeProjectId) return null;
+        const ticket = queries.begin("loadProjectWorkspace");
         const data = await apiGet<{ workspace: M365ProjectWorkspace }>(
             apiUrl(`/api/projects/${encodeURIComponent(activeProjectId)}/workspace`),
-            undefined,
+            { signal: ticket.signal },
             { retries: 0 }
         );
+        if (!ticket.current()) return null;
         setProjectWorkspace(data.workspace);
         return data.workspace;
-    }, [activeProjectId]);
+    }, [activeProjectId, queries]);
 
     const loadContext = useCallback(async () => {
         if (!activeProjectId || !activeConversationId) return;
+        const ticket = queries.begin("loadContext");
+        try {
         const [projectData, conversationData] = await Promise.all([
             apiGet<{ project: M365Project }>(apiUrl(`/api/projects/${encodeURIComponent(activeProjectId)}`)),
             apiGet<{ conversation: M365Conversation }>(apiUrl(`/api/conversations/${encodeURIComponent(activeConversationId)}`)),
             loadProjectWorkspace(),
         ]);
+        if (!ticket.current()) return;
         if (conversationData.conversation.projectId !== projectData.project.id) {
             throw new Error("目前選取的對話不屬於這個專案，請回到專案頁重新選擇。");
         }
         setProject(projectData.project);
         setConversation(conversationData.conversation);
         await Promise.all([loadMessages(), loadRuns(), loadPendingLocalActions(), loadPendingResponses()]);
-        setError("");
-    }, [activeConversationId, activeProjectId, loadMessages, loadPendingLocalActions, loadPendingResponses, loadProjectWorkspace, loadRuns]);
+        if (ticket.current()) setError("");
+        } catch (requestError) { if (ticket.current()) throw requestError; }
+    }, [activeConversationId, activeProjectId, loadMessages, loadPendingLocalActions, loadPendingResponses, loadProjectWorkspace, loadRuns, queries]);
 
     useEffect(() => {
         if (!hydrated || !activeProjectId || !activeConversationId) {
@@ -368,13 +564,12 @@ export default function M365ChatPage() {
         let mounted = true;
         setLoading(true);
         loadContext()
-            .catch((requestError) => mounted && setError(errorMessage(requestError)))
+            .catch((requestError) => mounted && !isApiAbortError(requestError) && setError(errorMessage(requestError)))
             .finally(() => mounted && setLoading(false));
         return () => { mounted = false; };
     }, [activeConversationId, activeProjectId, hydrated, loadContext]);
 
     useEffect(() => {
-        setPendingAttachments([]);
         setAttachmentWarnings([]);
         setAttachmentProgress("");
         setDragActive(false);
@@ -383,25 +578,26 @@ export default function M365ChatPage() {
     useEffect(() => {
         followingLatestRef.current = true;
         initialConversationScrollRef.current = false;
+        golemActivityWasVisibleRef.current = false;
+        followRequestIdRef.current = null;
+        if (followCompletionTimerRef.current !== null) window.clearTimeout(followCompletionTimerRef.current);
+        followCompletionTimerRef.current = null;
         setFollowingLatest(true);
     }, [activeConversationId]);
 
     useEffect(() => {
         let mounted = true;
-        const savedMode = window.localStorage.getItem("m365-golem-response-mode");
-        if (["auto", "quick", "thoughtful"].includes(String(savedMode))) {
-            setResponseMode(savedMode as ResponseMode);
-        }
 
         setComposerResourcesLoading(true);
         Promise.allSettled([
             apiGet<{ files?: ReferenceFileOption[] }>(apiUrl("/api/reference-files"), undefined, { retries: 0 }),
             apiGet<{ servers?: McpServerOption[] }>(apiUrl("/api/mcp/servers"), undefined, { retries: 0 }),
             apiGet<{ skills?: SkillOption[] }>(apiUrl("/api/chat/skill-options"), undefined, { retries: 0 }),
-            apiGet<{ approvalMode?: ApprovalMode }>(apiUrl("/api/chat/preferences"), undefined, { retries: 0 }),
+            apiGet<{ items?: PromptShortcutOption[] }>(apiUrl("/api/prompt-pool"), undefined, { retries: 0 }),
+            apiGet<{ automationMode?: AutomationMode; approvalMode?: "manual" | "auto" }>(apiUrl("/api/chat/preferences"), undefined, { retries: 0 }),
         ]).then((results) => {
             if (!mounted) return;
-            const [fileResult, mcpResult, skillResult, preferenceResult] = results;
+            const [fileResult, mcpResult, skillResult, promptResult, preferenceResult] = results;
             if (fileResult.status === "fulfilled") {
                 setReferenceFiles((fileResult.value.files || []).filter((file) => (
                     file.enabled !== false
@@ -415,8 +611,15 @@ export default function M365ChatPage() {
             if (skillResult.status === "fulfilled") {
                 setSkills(skillResult.value.skills || []);
             }
-            if (preferenceResult.status === "fulfilled" && ["manual", "auto"].includes(String(preferenceResult.value.approvalMode))) {
-                setApprovalMode(preferenceResult.value.approvalMode as ApprovalMode);
+            if (promptResult.status === "fulfilled") {
+                setPromptShortcuts(promptResult.value.items || []);
+            }
+            if (preferenceResult.status === "fulfilled") {
+                const resolvedMode = preferenceResult.value.automationMode
+                    || (preferenceResult.value.approvalMode === "auto" ? "autopilot" : "guided");
+                if (["guided", "balanced", "autopilot", "silent"].includes(resolvedMode)) {
+                    setAutomationMode(resolvedMode as AutomationMode);
+                }
             }
             if (results.some((result) => result.status === "rejected")) {
                 setComposerResourceError("部分工具清單暫時無法載入；一般文字對話仍可使用。");
@@ -433,7 +636,7 @@ export default function M365ChatPage() {
             const detail = (event as CustomEvent<{ conversationId?: string }>).detail;
             if (detail?.conversationId && detail.conversationId !== activeConversationId) return;
             setError("");
-            loadContext().catch((requestError) => setError(errorMessage(requestError)));
+            loadContext().catch((requestError) => { if (!isApiAbortError(requestError)) setError(errorMessage(requestError)); });
         };
         window.addEventListener("m365-workspace-updated", handleWorkspaceUpdate);
         return () => window.removeEventListener("m365-workspace-updated", handleWorkspaceUpdate);
@@ -442,6 +645,10 @@ export default function M365ChatPage() {
     useEffect(() => {
         const handleLog = (payload: SocketLog) => {
             if (payload?.conversationId !== activeConversationId) return;
+            if (payload.type === "conversation_title") {
+                loadContext().catch(() => undefined);
+                return;
+            }
             loadMessages().catch(() => undefined);
             loadRuns().catch(() => undefined);
             loadPendingLocalActions().catch(() => undefined);
@@ -450,7 +657,7 @@ export default function M365ChatPage() {
         };
         socket.on("log", handleLog);
         return () => { socket.off("log", handleLog); };
-    }, [activeConversationId, loadMessages, loadPendingLocalActions, loadPendingResponses, loadProjectWorkspace, loadRuns]);
+    }, [activeConversationId, loadContext, loadMessages, loadPendingLocalActions, loadPendingResponses, loadProjectWorkspace, loadRuns]);
 
     useEffect(() => {
         if (!activeConversationId) return;
@@ -458,9 +665,10 @@ export default function M365ChatPage() {
             loadPendingLocalActions().catch(() => undefined);
             loadPendingResponses().catch(() => undefined);
             loadMessages().catch(() => undefined);
+            loadRuns().catch(() => undefined);
         }, 2500);
         return () => window.clearInterval(timer);
-    }, [activeConversationId, loadMessages, loadPendingLocalActions, loadPendingResponses]);
+    }, [activeConversationId, loadMessages, loadPendingLocalActions, loadPendingResponses, loadRuns]);
 
     useEffect(() => {
         const target = scrollRef.current;
@@ -472,19 +680,62 @@ export default function M365ChatPage() {
         const frame = window.requestAnimationFrame(() => {
             if (isInitialPosition) {
                 scrollToLatest("auto");
-            } else if (followingLatestRef.current) {
-                scrollToLatest("smooth");
+            } else if (followingLatestRef.current || followRequestIdRef.current) {
+                scrollToLatest("auto");
             }
         });
         return () => window.cancelAnimationFrame(frame);
     }, [latestMessageKey, loading, messages.length, scrollToLatest]);
+
+    useEffect(() => {
+        if (!showGolemActivity) {
+            golemActivityWasVisibleRef.current = false;
+            return;
+        }
+        if (golemActivityWasVisibleRef.current) return;
+        golemActivityWasVisibleRef.current = true;
+        if (!followingLatestRef.current && !followRequestIdRef.current) return;
+        const frame = window.requestAnimationFrame(() => scrollToLatest("auto"));
+        return () => window.cancelAnimationFrame(frame);
+    }, [scrollToLatest, showGolemActivity]);
+
+    useEffect(() => {
+        const content = conversationContentRef.current;
+        if (!content || typeof ResizeObserver === "undefined") return;
+        const observer = new ResizeObserver(() => {
+            if (!followingLatestRef.current && !followRequestIdRef.current) return;
+            window.requestAnimationFrame(() => scrollToLatest("auto"));
+        });
+        observer.observe(content);
+        return () => observer.disconnect();
+    }, [activeConversationId, scrollToLatest]);
+
+    useEffect(() => {
+        const requestId = followRequestIdRef.current;
+        if (!requestId || requestId === "pending") return;
+        const response = messages.find((message) => message.role === "assistant" && message.requestId === requestId);
+        if (!response) return;
+        const responseRun = response.runId ? runsById.get(response.runId) : null;
+        if (responseRun && ["QUEUED", "RUNNING"].includes(responseRun.status)) return;
+        if (followCompletionTimerRef.current !== null) window.clearTimeout(followCompletionTimerRef.current);
+        followCompletionTimerRef.current = window.setTimeout(() => {
+            if (followRequestIdRef.current !== requestId) return;
+            scrollToLatest("auto");
+            followRequestIdRef.current = null;
+            followCompletionTimerRef.current = null;
+        }, 1200);
+        return () => {
+            if (followCompletionTimerRef.current !== null) window.clearTimeout(followCompletionTimerRef.current);
+            followCompletionTimerRef.current = null;
+        };
+    }, [latestMessageKey, messages, runsById, scrollToLatest]);
 
     const toggleReferenceFile = (id: string) => {
         setComposerResourceError("");
         setSelectedReferenceFileIds((current) => {
             if (current.includes(id)) return current.filter((item) => item !== id);
             if (current.length >= 3) {
-                setComposerResourceError("每次最多選擇 3 個參考檔案。");
+                setComposerResourceError("每次最多選擇 3 個知識來源。");
                 return current;
             }
             return [...current, id];
@@ -519,10 +770,13 @@ export default function M365ChatPage() {
         setAttachmentWarnings([]);
         setPendingAttachments((current) => {
             const merged = mergeAttachmentCandidates(current, candidates);
+            if (otherAttachmentBytes(controller) + merged.attachments.reduce((sum, item) => sum + item.file.size, 0) > 50 * 1024 * 1024) {
+                setAttachmentWarnings(["所有對話的待選附件合計最多 50 MiB，請先移除其他對話附件。"]); return current;
+            }
             setAttachmentWarnings(merged.warnings);
             return merged.attachments;
         });
-    }, []);
+    }, [controller, setPendingAttachments]);
 
     const addFiles = (files: FileList | null) => {
         if (!files) return;
@@ -530,6 +784,44 @@ export default function M365ChatPage() {
             file,
             displayPath: file.webkitRelativePath || file.name,
         })));
+    };
+
+    const pickLocalFolder = async () => {
+        if (pickingLocalFolder || sending) return;
+        if (selectedLocalFolders.length >= 3) {
+            setAttachmentWarnings(["每輪最多選擇 3 個本機資料夾來源。"]);
+            return;
+        }
+        setPickingLocalFolder(true);
+        setAttachmentWarnings([]);
+        try {
+            const result = await apiPost<{ cancelled: boolean; path: string | null }>(
+                apiUrl("/api/m365/workspace/pick-folder"),
+                {
+                    description: "選擇要讓 Golem 按需查看的本機資料夾",
+                    initialPath: selectedLocalFolders[selectedLocalFolders.length - 1]?.path || project?.workspacePath || undefined,
+                },
+                undefined,
+                { retries: 0 }
+            );
+            if (result.cancelled || !result.path) return;
+            const resolvedPath = result.path;
+            setSelectedLocalFolders((current) => {
+                if (current.some((folder) => folder.path.toLowerCase() === resolvedPath.toLowerCase())) {
+                    setAttachmentWarnings(["此資料夾已加入本輪來源"]);
+                    return current;
+                }
+                return [...current, {
+                    id: localFolderId(),
+                    name: localFolderName(resolvedPath),
+                    path: resolvedPath,
+                }];
+            });
+        } catch (pickError) {
+            setAttachmentWarnings([errorMessage(pickError)]);
+        } finally {
+            setPickingLocalFolder(false);
+        }
     };
 
     const removePendingAttachment = (id: string) => {
@@ -560,7 +852,7 @@ export default function M365ChatPage() {
         ).catch(() => undefined);
     };
 
-    const stagePendingAttachmentBatch = async (): Promise<string> => {
+    const stagePendingAttachmentBatch = async (pendingAttachments: PendingM365Attachment[]): Promise<string> => {
         if (!project || !conversation || pendingAttachments.length === 0) return "";
         const batch = await apiPost<{ batchId: string }>(
             apiUrl("/api/m365/attachments/batches"),
@@ -594,74 +886,104 @@ export default function M365ChatPage() {
 
     const changeResponseMode = (mode: ResponseMode) => {
         setResponseMode(mode);
-        window.localStorage.setItem("m365-golem-response-mode", mode);
+
     };
 
-    const changeApprovalMode = async (mode: ApprovalMode) => {
-        if (mode === approvalMode || savingApprovalMode) return;
-        if (mode === "auto" && !window.confirm(
-            "自動核准會讓新提出的工具動作通過安全閘後直接執行，可能修改本機檔案或外部系統。破壞性規則仍會攔截。確定開啟嗎？"
+    const changeAutomationMode = async (mode: AutomationMode) => {
+        if (mode === automationMode || savingAutomationMode) return;
+        if (["autopilot", "silent"].includes(mode) && !window.confirm(
+            `${mode === "silent" ? "靜默自動" : "自動駕駛"}會讓通過安全分級的工具動作直接執行，可能修改本機檔案或外部系統；硬性破壞規則仍會攔截。確定開啟嗎？`
         )) return;
 
-        setSavingApprovalMode(true);
+        setSavingAutomationMode(true);
         setError("");
         try {
-            const result = await apiPost<{ approvalMode: ApprovalMode }>(apiUrl("/api/chat/preferences"), { approvalMode: mode });
-            setApprovalMode(result.approvalMode);
-            setNotice(mode === "auto" ? "已開啟自動核准；工具仍須通過本機安全閘。" : "已切回逐項核准工具動作。");
+            const result = await apiPost<{ automationMode: AutomationMode }>(apiUrl("/api/chat/preferences"), { automationMode: mode });
+            setAutomationMode(result.automationMode);
+            setNotice(`已切換為${AUTOMATION_MODE_LABEL[mode]}。${AUTOMATION_MODE_NOTICE[mode]}`);
             await loadPendingLocalActions().catch(() => undefined);
         } catch (requestError) {
             setError(errorMessage(requestError));
         } finally {
-            setSavingApprovalMode(false);
+            setSavingAutomationMode(false);
         }
     };
 
     const sendMessage = async (event: FormEvent) => {
         event.preventDefault();
-        const text = input.trim();
-        if ((!text && pendingAttachments.length === 0) || !project || !conversation || sending) return;
+        if (sendGuard.current || draftState.status === "loading" || draftState.status === "conflict") return;
+        if ((!input.trim() && pendingAttachments.length === 0 && selectedLocalFolders.length === 0) || !project || !conversation) return;
+        if (draft.attachmentDescriptors.some(item => !pendingAttachments.some(file => file.id === item.id))) {
+            setError("附件需要重新選取原檔，或移除附件提示後再傳送。"); return;
+        }
         if (conversation.bindingState === "reconcile_required") {
             setError("這個對話的上次傳送結果不明。請先在 Edge 核對，再使用人工核對功能恢復。系統不會自動重送。");
             return;
         }
+        sendGuard.current = true;
+        followRequestIdRef.current = "pending";
+        scrollToLatest("auto");
         setSending(true);
         setError("");
         setNotice("");
         setAttachmentWarnings([]);
         let attachmentBatchId = "";
+        let acceptedRequestId = "";
         try {
-            attachmentBatchId = await stagePendingAttachmentBatch();
-            await apiPost<{ requestId: string }>(apiUrl("/api/chat"), {
+            const snapshot = await controller.beginSubmit();
+            if (!snapshot) {
+                followRequestIdRef.current = null;
+                return;
+            }
+            const submitted = snapshot.draft;
+            const text = submitted.quote ? `引用回答：\n${submitted.quote.excerpt}\n\n追問：\n${submitted.text.trim()}` : submitted.text.trim();
+            attachmentBatchId = await stagePendingAttachmentBatch(snapshot.files);
+            const accepted = await apiPost<{ requestId: string }>(apiUrl("/api/chat"), {
                 golemId: "golem_A",
                 projectId: project.id,
                 conversationId: conversation.id,
                 message: text,
-                responseMode,
-                selectedMcpServers: selectedMcpServerNames,
-                selectedSkillIds,
-                referenceFileIds: selectedReferenceFileIds,
+                responseMode: submitted.responseMode,
+                selectedMcpServers: submitted.mcpServerNames,
+                selectedSkillIds: submitted.skillIds,
+                referenceFileIds: submitted.referenceFileIds,
+                selectedLocalFolderIds: submitted.localFolders.map((folder) => folder.id),
                 attachmentBatchId: attachmentBatchId || undefined,
+                goalMode,
             });
-            setInput("");
-            setPendingAttachments([]);
-            setAttachmentProgress(attachmentBatchId
-                ? "附件已交給可見 Edge；正在等待 M365 完成 OneDrive 上傳並啟用送出鍵，請勿手動補按 Enter。"
-                : "");
-            setSelectedReferenceFileIds([]);
-            setSelectedMcpServerNames([]);
-            setSelectedSkillIds([]);
+            if (!accepted.requestId) throw new Error("傳送結果未確認；請先核對對話，不要直接重送。");
+            acceptedRequestId = accepted.requestId;
+            followRequestIdRef.current = accepted.requestId;
+            await controller.accepted(snapshot);
+            if (!alive.current) return;
+            setAttachmentProgress(attachmentBatchId ? "附件已交付本機服務；M365 處理與送出結果以對話狀態為準。" : "");
             setComposerMenuOpen(false);
             setNotice("訊息已加入對話隊列；你可以繼續輸入下一則，Golem 會依序送往 M365。");
-            await loadMessages();
+            await loadMessages().catch((refreshError) => {
+                if (!isApiAbortError(refreshError)) {
+                    setNotice("訊息已加入對話隊列；本機畫面暫時未更新，系統會自動重新載入。");
+                }
+            });
         } catch (requestError) {
-            if (attachmentBatchId) await cancelStagedAttachmentBatch(attachmentBatchId);
+            if (!alive.current) return;
+            if (acceptedRequestId) {
+                if (!isApiAbortError(requestError)) {
+                    setNotice("訊息已加入對話隊列；後續本機處理未完成，請先查看工作狀態，不會自動重送。");
+                    await loadContext().catch(() => undefined);
+                }
+                return;
+            }
+            if (followRequestIdRef.current === "pending") followRequestIdRef.current = null;
             setSending(false);
             setAttachmentProgress("");
-            setError(errorMessage(requestError));
-            await loadContext().catch(() => undefined);
+            setError(isApiAbortError(requestError)
+                ? "傳送連線已中止；內容仍保留。請先核對是否已排隊，不會自動重送。"
+                : `${errorMessage(requestError)} 內容已保留；請先核對是否已排隊，不會自動重送。`);
+            if (!isApiAbortError(requestError)) await loadContext().catch(() => undefined);
         } finally {
-            setSending(false);
+            sendGuard.current = false;
+            controller.endSubmit();
+            if (alive.current) setSending(false);
         }
     };
 
@@ -720,9 +1042,17 @@ export default function M365ChatPage() {
         setError("");
         try {
             await apiPost(apiUrl(`/api/runs/${encodeURIComponent(run.id)}/${action}`), body);
-            await Promise.all([loadRuns(), loadMessages()]);
+            const refreshed = await Promise.allSettled([loadRuns(), loadMessages()]);
+            const refreshFailure = refreshed.find(
+                (result): result is PromiseRejectedResult => result.status === "rejected" && !isApiAbortError(result.reason)
+            );
+            if (refreshFailure) setNotice("操作已接受；本機畫面暫時未更新，系統會自動重新載入。");
+            return true;
         } catch (requestError) {
-            setError(errorMessage(requestError));
+            setError(isApiAbortError(requestError)
+                ? "操作連線已中止；請先查看目前工作狀態，不會自動重送。"
+                : errorMessage(requestError));
+            return false;
         } finally {
             setRunSaving(false);
         }
@@ -819,7 +1149,7 @@ export default function M365ChatPage() {
         <div className="relative flex min-h-0 flex-1 overflow-hidden">
             <section className="flex min-w-0 flex-1 flex-col bg-background p-4 md:p-6">
                 <header className="mb-4 flex-shrink-0">
-                    <div className="flex flex-col justify-between gap-3 md:flex-row md:items-center">
+                    <div className="flex flex-col justify-between gap-3 lg:flex-row lg:items-center">
                         <div className="min-w-0">
                             <div className="flex items-center gap-1.5 text-xs text-muted-foreground">
                                 <span className="truncate">{project.name}</span>
@@ -835,7 +1165,7 @@ export default function M365ChatPage() {
                                     conversation.bindingState === "reconcile_required" && "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300",
                                     conversation.bindingState === "broken" && "border-destructive/30 bg-destructive/10 text-destructive"
                                 )}>
-                                    {getBindingLabel(conversation.bindingState)}
+                                    {getBindingLabel(conversation.bindingState)} · 登入有效性尚未檢查
                                 </span>
                             </div>
                         </div>
@@ -851,7 +1181,9 @@ export default function M365ChatPage() {
                             </button>
                             <button
                                 type="button"
-                                onClick={() => setShowRuns((value) => !value)}
+                                ref={inspectorTriggerRef}
+                                aria-expanded={showRuns}
+                                onClick={() => { setShowRuns(!showRuns); window.localStorage.setItem("m365-ux-inspector", showRuns ? "closed" : "open"); }}
                                 className="inline-flex h-9 items-center gap-2 rounded-xl bg-primary px-3 text-xs font-medium text-primary-foreground"
                             >
                                 <ListChecks className="h-3.5 w-3.5" />來源與執行
@@ -860,6 +1192,8 @@ export default function M365ChatPage() {
                     </div>
                 </header>
 
+                {pendingApproval && <div className="mb-3 rounded-xl border border-amber-500 p-3 text-sm"><p>{pendingApproval.request}</p><button disabled={runSaving} onClick={() => decideRunApproval(pendingApproval.id, "approved")}>核准繼續</button><button className="ml-4" disabled={runSaving} onClick={() => decideRunApproval(pendingApproval.id, "denied")}>拒絕並停止</button></div>}
+                {pendingLocalActions.length > 0 && <div className="mb-3 rounded-xl border border-amber-500 p-3 text-sm">{pendingLocalActions.map(action => <div key={action.id}><p>{action.title} · {action.summary}</p><button disabled={Boolean(decidingActionId)} onClick={() => decideLocalAction(action.id, "approved")}>核准工具動作</button><button className="ml-4" disabled={Boolean(decidingActionId)} onClick={() => decideLocalAction(action.id, "denied")}>拒絕工具動作</button></div>)}</div>}
                 {(error || notice || pendingResponses.length > 0 || conversation.bindingState === "reconcile_required") && (
                     <div className="mb-3 space-y-2">
                         {error && <div className="rounded-xl border border-destructive/30 bg-destructive/10 px-4 py-2.5 text-sm text-destructive">{error}</div>}
@@ -911,7 +1245,7 @@ export default function M365ChatPage() {
                 <div className="flex flex-1 flex-col overflow-hidden rounded-xl border border-border bg-card">
                 <div className="relative min-h-0 flex-1">
                 <div ref={scrollRef} onScroll={handleConversationScroll} className="custom-scrollbar h-full overflow-y-auto p-4">
-                    <div className="mx-auto max-w-4xl space-y-4">
+                    <div ref={conversationContentRef} className="mx-auto max-w-[840px] space-y-5">
                         {(activeDialogueCount > 0 || queuedDialogueCount > 0) && (
                             <div className="flex items-center gap-2 rounded-xl border border-cyan-500/20 bg-cyan-500/5 px-3 py-2 text-xs text-cyan-800 dark:text-cyan-200">
                                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -926,7 +1260,11 @@ export default function M365ChatPage() {
                                     首次傳送會在可見 Edge 建立新的 M365 Copilot 對話，並加入本專案的固定指示。帳密、MFA 與敏感資訊仍由你親自操作。
                                 </p>
                             </div>
-                        ) : messages.map((message) => {
+                        ) : conversationTimeline.map((item) => {
+                            if (item.kind === "execution") {
+                                return <RunExecutionCard key={`execution-${item.runId}`} messages={item.messages} run={runsById.get(item.runId) || null} />;
+                            }
+                            const message = item.message;
                             const isUser = message.role === "user";
                             const isWarning = ["ambiguous", "failed"].includes(message.deliveryState) || message.role === "system";
                             return (
@@ -942,28 +1280,27 @@ export default function M365ChatPage() {
                                             {isUser ? <UserRound className="h-3 w-3 text-blue-600 dark:text-blue-300" /> : <Bot className="h-3 w-3 text-primary" />}
                                         </div>
                                         <span className={cn("text-xs font-bold", isUser ? "text-blue-600 dark:text-blue-400" : "text-primary")}>
-                                            {isUser ? "User" : message.role === "assistant" ? "golem_A" : "System"}
+                                            {isUser ? "User" : message.role === "assistant" ? "Golem" : "系統"}
                                         </span>
                                         <span className="text-[10px] text-muted-foreground">{formatLocalDate(message.createdAt)}</span>
                                     </div>
                                     <div className="min-w-0">
                                         <div className={cn(
-                                            "inline-block rounded-2xl border p-3 text-left text-sm shadow-sm",
+                                            "inline-block max-w-full rounded-2xl border p-3 text-left text-base leading-7",
                                             isUser
                                                 ? "rounded-tr-none border-blue-500/20 bg-blue-600/10 text-blue-900 dark:text-blue-100"
-                                                : "rounded-tl-none border-border bg-secondary/50 text-foreground/90",
+                                                : "border-transparent bg-transparent text-foreground/90",
                                             isWarning && "border-amber-500/35 bg-amber-500/10"
                                         )}>
-                                            {isCollapsibleActionMessage(message) ? (
-                                                <CollapsibleActionMessage content={message.content} />
-                                            ) : message.role === "assistant" ? (
+                                            {message.role === "assistant" ? (
                                                 <M365MessageContent content={message.content} />
                                             ) : (
                                                 <div className="prose prose-sm max-w-none break-words text-foreground dark:prose-invert prose-p:my-2 prose-pre:overflow-x-auto">
-                                                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+                                                    <ReactMarkdown remarkPlugins={[remarkGfm]} components={externalConversationLinkComponents}>{message.content}</ReactMarkdown>
                                                 </div>
                                             )}
                                         </div>
+                                        {message.role === "assistant" && <MessageToolbar message={message} onQuote={quote => { controller.update({ quote }); composerRef.current?.focus(); }} />}
                                         <div className={cn("mt-1 flex items-center gap-2 text-[10px] text-muted-foreground", isUser && "justify-end")}>
                                             <span className={cn(isWarning && "text-amber-700 dark:text-amber-300")}>{deliveryLabel(message)}</span>
                                         </div>
@@ -971,15 +1308,7 @@ export default function M365ChatPage() {
                                 </article>
                             );
                         })}
-                        {sending && (
-                            <div className="flex items-center gap-3 text-sm text-muted-foreground">
-                                <div className="flex h-8 w-8 items-center justify-center rounded-full border border-border bg-card"><Bot className="h-4 w-4" /></div>
-                                <div className="flex items-center gap-2 rounded-2xl border border-border bg-card px-4 py-3">
-                                    <Loader2 className="h-4 w-4 animate-spin text-primary" />
-                                    正在把訊息加入對話隊列…
-                                </div>
-                            </div>
-                        )}
+                        {showGolemActivity && <GolemActivityBubble />}
                     </div>
                 </div>
                 {!followingLatest && messages.length > 0 && (
@@ -995,6 +1324,8 @@ export default function M365ChatPage() {
                 )}
                 </div>
 
+                <RunAttention run={currentRun} detail={runDetail} busy={runSaving} replying={replyingToRun} onReplyingChange={setReplyingToRun} act={runAction} />
+
                 <form
                     onSubmit={sendMessage}
                     onDragEnter={(event) => { event.preventDefault(); if (!sending) setDragActive(true); }}
@@ -1003,8 +1334,15 @@ export default function M365ChatPage() {
                         if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragActive(false);
                     }}
                     onDrop={(event) => void handleAttachmentDrop(event)}
-                    className="relative border-t border-border bg-card/50 p-3"
+                    className={cn("relative border-t border-border bg-card/50 p-3", replyingToRun && "hidden")}
                 >
+                    <div className="mb-2 text-xs text-muted-foreground" role="status">
+                        {draftState.status === "saved" ? "已在本機加密保存" : draftState.status === "saving" ? "保存中…" : draftState.status === "loading" ? "載入草稿…" : "尚未保存"}
+                        {draftState.error && <span className="ml-2 text-amber-700">{draftState.error}</span>}
+                        {draftState.error && <button type="button" className="ml-2 underline" onClick={() => controller.readRemote().then(setRemoteDraft).catch(() => setError("無法讀取保存版本，請檢查本機服務。"))}>比較保存版本</button>}
+                    </div>
+                    {draft.quote && <div className="mb-2 rounded border-l-2 border-primary p-2 text-sm"><p className="line-clamp-3 whitespace-pre-wrap">引用：{draft.quote.excerpt}</p><button type="button" onClick={() => controller.update({ quote: null })}>移除引用</button></div>}
+                    {draft.attachmentDescriptors.filter(item => !pendingAttachments.some(file => file.id === item.id)).map(item => <div key={item.id} className="text-xs text-amber-700">{item.fileName}：需要重新選取原檔 <button type="button" onClick={() => controller.update({ attachmentDescriptors: draft.attachmentDescriptors.filter(value => value.id !== item.id) })}>移除提示</button></div>)}
                     <input
                         ref={fileInputRef}
                         type="file"
@@ -1013,45 +1351,56 @@ export default function M365ChatPage() {
                         className="hidden"
                         onChange={(event) => { addFiles(event.target.files); event.target.value = ""; }}
                     />
-                    <input
-                        ref={(node) => {
-                            folderInputRef.current = node;
-                            if (node) {
-                                node.setAttribute("webkitdirectory", "");
-                                node.setAttribute("directory", "");
-                            }
-                        }}
-                        type="file"
-                        multiple
-                        accept={M365_ATTACHMENT_ACCEPT}
-                        className="hidden"
-                        onChange={(event) => { addFiles(event.target.files); event.target.value = ""; }}
-                    />
                     {dragActive && (
                         <div className="pointer-events-none absolute inset-2 z-50 flex items-center justify-center rounded-2xl border-2 border-dashed border-primary bg-background/95 text-sm font-medium text-primary shadow-xl">
-                            <FileUp className="mr-2 h-5 w-5" />放開即可加入檔案或資料夾
+                            <FileUp className="mr-2 h-5 w-5" />放開即可加入檔案
                         </div>
                     )}
                     <div className="mx-auto max-w-4xl">
                         <div className="rounded-2xl border border-border bg-secondary/35 p-2 shadow-sm transition focus-within:border-primary/45 focus-within:ring-1 focus-within:ring-primary/30">
+                            {promptShortcutSuggestions.length > 0 && (
+                                <div className="mb-2 space-y-1 rounded-xl border border-border bg-popover p-1.5 shadow-lg">
+                                    <p className="px-2 py-1 text-[10px] font-semibold uppercase tracking-[0.12em] text-muted-foreground">Prompt 指令池</p>
+                                    {promptShortcutSuggestions.map((item) => (
+                                        <button
+                                            key={item.id}
+                                            type="button"
+                                            onClick={() => {
+                                                setInput(`${item.shortcut.startsWith("/") ? item.shortcut : `/${item.shortcut}`} `);
+                                                window.setTimeout(() => composerRef.current?.focus(), 0);
+                                            }}
+                                            className="flex w-full items-start gap-3 rounded-lg px-2 py-2 text-left hover:bg-accent"
+                                        >
+                                            <code className="shrink-0 text-xs font-semibold text-primary">{item.shortcut.startsWith("/") ? item.shortcut : `/${item.shortcut}`}</code>
+                                            <span className="min-w-0">
+                                                <span className="block truncate text-xs text-foreground">{item.note || item.prompt}</span>
+                                                {item.note && <span className="mt-0.5 block truncate text-[10px] text-muted-foreground">{item.prompt}</span>}
+                                            </span>
+                                        </button>
+                                    ))}
+                                </div>
+                            )}
                             <textarea
                                 ref={composerRef}
                                 value={input}
                                 onChange={(event) => setInput(event.target.value)}
+                                aria-label="訊息草稿"
+                                onCompositionStart={() => { composing.current = true; }}
+                                onCompositionEnd={() => { composing.current = false; }}
                                 onKeyDown={(event) => {
-                                    if (event.key === "Enter" && !event.shiftKey) {
+                                    if (shouldSubmit({ ...event, isComposing: event.nativeEvent.isComposing, keyCode: event.nativeEvent.keyCode }, composing.current, composerMenuOpen || Boolean(composerPicker))) {
                                         event.preventDefault();
                                         event.currentTarget.form?.requestSubmit();
                                     }
                                 }}
                                 rows={1}
                                 maxLength={100000}
-                                disabled={sending || conversation.bindingState === "reconcile_required"}
-                                className="max-h-32 min-h-[42px] w-full resize-none bg-transparent px-2 py-2 text-sm text-foreground outline-none placeholder:text-muted-foreground/50 disabled:cursor-not-allowed"
+                                disabled={draftState.status === "loading" || conversation.bindingState === "reconcile_required"}
+                                className="max-h-[240px] min-h-[48px] w-full resize-none bg-transparent px-2 py-2 text-base leading-7 text-foreground outline-none placeholder:text-muted-foreground/50 disabled:cursor-not-allowed"
                                 placeholder={conversation.bindingState === "reconcile_required" ? "請先完成人工核對" : "傳送訊息給此專案的 M365 Copilot 對話…"}
                             />
 
-                            {(pendingAttachments.length > 0 || selectedReferenceFileIds.length > 0 || selectedMcpServerNames.length > 0 || selectedSkillIds.length > 0) && (
+                            {(pendingAttachments.length > 0 || selectedLocalFolders.length > 0 || selectedReferenceFileIds.length > 0 || selectedMcpServerNames.length > 0 || selectedSkillIds.length > 0) && (
                                 <div className="mb-2 flex flex-wrap gap-1.5 px-1">
                                     {pendingAttachments.map((item) => (
                                         <button
@@ -1068,10 +1417,25 @@ export default function M365ChatPage() {
                                             <X className="h-3 w-3 shrink-0 text-muted-foreground" />
                                         </button>
                                     ))}
+                                    {selectedLocalFolders.map((folder) => (
+                                        <button
+                                            key={folder.id}
+                                            type="button"
+                                            onClick={() => setSelectedLocalFolders((current) => current.filter((item) => item.id !== folder.id))}
+                                            disabled={sending}
+                                            className="inline-flex max-w-72 items-center gap-1 rounded-lg border border-violet-500/30 bg-violet-500/5 px-2 py-1 text-[11px] hover:bg-violet-500/10 disabled:opacity-60"
+                                            title={`移除本機資料夾來源：${folder.path}`}
+                                        >
+                                            <FolderUp className="h-3 w-3 shrink-0 text-violet-500" />
+                                            <span className="truncate">{folder.path}</span>
+                                            <span className="shrink-0 text-muted-foreground">按需讀取</span>
+                                            <X className="h-3 w-3 shrink-0 text-muted-foreground" />
+                                        </button>
+                                    ))}
                                     {selectedReferenceFileIds.map((id) => {
                                         const file = referenceFiles.find((item) => item.id === id);
                                         return (
-                                            <button key={id} type="button" onClick={() => toggleReferenceFile(id)} className="inline-flex max-w-48 items-center gap-1 rounded-lg border border-border bg-background px-2 py-1 text-[11px] hover:bg-accent" title="移除參考檔案">
+                                            <button key={id} type="button" onClick={() => toggleReferenceFile(id)} className="inline-flex max-w-48 items-center gap-1 rounded-lg border border-border bg-background px-2 py-1 text-[11px] hover:bg-accent" title="移除知識來源">
                                                 <FileText className="h-3 w-3 shrink-0 text-primary" />
                                                 <span className="truncate">{file?.name || id}</span>
                                                 <X className="h-3 w-3 shrink-0 text-muted-foreground" />
@@ -1114,11 +1478,11 @@ export default function M365ChatPage() {
                                             <button type="button" onClick={() => { fileInputRef.current?.click(); setComposerMenuOpen(false); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs hover:bg-accent">
                                                 <FileUp className="h-4 w-4 text-cyan-500" />新增檔案
                                             </button>
-                                            <button type="button" onClick={() => { folderInputRef.current?.click(); setComposerMenuOpen(false); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs hover:bg-accent">
-                                                <FolderUp className="h-4 w-4 text-cyan-500" />新增資料夾
+                                            <button type="button" disabled={pickingLocalFolder || sending} onClick={() => { setComposerMenuOpen(false); void pickLocalFolder(); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs hover:bg-accent disabled:opacity-60">
+                                                {pickingLocalFolder ? <Loader2 className="h-4 w-4 animate-spin text-violet-500" /> : <FolderUp className="h-4 w-4 text-violet-500" />}選擇本機資料夾
                                             </button>
                                             <button type="button" onClick={() => { setComposerPicker("files"); setComposerMenuOpen(false); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs hover:bg-accent">
-                                                <FileText className="h-4 w-4 text-primary" />選擇參考檔案
+                                                <FileText className="h-4 w-4 text-primary" />選擇知識來源
                                             </button>
                                             <button type="button" onClick={() => { setComposerPicker("mcp"); setComposerMenuOpen(false); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs hover:bg-accent">
                                                 <ListChecks className="h-4 w-4 text-primary" />選擇 MCP 工具
@@ -1126,40 +1490,63 @@ export default function M365ChatPage() {
                                             <button type="button" onClick={() => { setComposerPicker("skills"); setComposerMenuOpen(false); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs hover:bg-accent">
                                                 <ShieldCheck className="h-4 w-4 text-emerald-500" />選擇 Skills
                                             </button>
-                                            <a href="/dashboard/reference-files" className="mt-1 block border-t border-border px-3 py-2 text-[11px] text-muted-foreground hover:text-foreground">管理參考檔案…</a>
+                                            <a href="/dashboard/knowledge-sources" className="mt-1 block border-t border-border px-3 py-2 text-[11px] text-muted-foreground hover:text-foreground">管理知識來源…</a>
                                         </div>
                                     )}
                                 </div>
 
                                 <select
-                                    aria-label="回應模式"
+                                    aria-label="回覆方式"
                                     value={responseMode}
                                     onChange={(event) => changeResponseMode(event.target.value as ResponseMode)}
                                     className="h-8 rounded-lg border border-transparent bg-transparent px-2 text-[11px] font-medium text-muted-foreground outline-none hover:bg-accent focus:border-primary/40"
                                 >
-                                    <option value="auto">自動回應</option>
+                                    <option value="auto">自動</option>
                                     <option value="quick">快速回應</option>
-                                    <option value="thoughtful">自動思考</option>
+                                    <option value="thoughtful">仔細</option>
                                 </select>
 
-                                <select
-                                    aria-label="工具核准模式"
-                                    value={approvalMode}
-                                    disabled={savingApprovalMode}
-                                    onChange={(event) => void changeApprovalMode(event.target.value as ApprovalMode)}
+                                <button
+                                    type="button"
+                                    aria-label="目標模式"
+                                    aria-pressed={goalMode}
+                                    disabled={Boolean(currentRun && !isRunTerminal(currentRun))}
+                                    onClick={() => setGoalMode((enabled) => !enabled)}
+                                    title={currentRun && !isRunTerminal(currentRun)
+                                        ? "請先完成或停止目前的多步驟工作，再建立新的目標工作。"
+                                        : "持續執行到宿主證據確認目標完成；授權與專案範圍不變。"}
                                     className={cn(
-                                        "h-8 rounded-lg border border-transparent bg-transparent px-2 text-[11px] font-medium outline-none hover:bg-accent focus:border-primary/40 disabled:opacity-50",
-                                        approvalMode === "auto" ? "text-amber-600 dark:text-amber-300" : "text-muted-foreground"
+                                        "inline-flex h-8 items-center gap-1.5 rounded-lg border px-2 text-[11px] font-medium disabled:cursor-not-allowed disabled:opacity-40",
+                                        goalMode ? "border-cyan-500/40 bg-cyan-500/10 text-cyan-700 dark:text-cyan-200" : "border-transparent text-muted-foreground hover:bg-accent"
                                     )}
                                 >
-                                    <option value="manual">逐項核准</option>
-                                    <option value="auto">自動核准</option>
+                                    <Target className="h-3.5 w-3.5" />目標
+                                </button>
+
+                                <select
+                                    aria-label="自動核准等級"
+                                    value={automationMode}
+                                    disabled={savingAutomationMode}
+                                    onChange={(event) => void changeAutomationMode(event.target.value as AutomationMode)}
+                                    className={cn(
+                                        "h-8 rounded-lg border border-transparent bg-transparent px-2 text-[11px] font-medium outline-none hover:bg-accent focus:border-primary/40 disabled:opacity-50",
+                                        ["autopilot", "silent"].includes(automationMode)
+                                            ? "text-amber-600 dark:text-amber-300"
+                                            : automationMode === "balanced"
+                                                ? "text-cyan-600 dark:text-cyan-300"
+                                                : "text-muted-foreground"
+                                    )}
+                                >
+                                    <option value="guided">保守確認</option>
+                                    <option value="balanced">平衡模式（推薦）</option>
+                                    <option value="autopilot">自動駕駛</option>
+                                    <option value="silent">靜默自動</option>
                                 </select>
 
                                 <div className="ml-auto">
                                     <button
                                         type="submit"
-                                        disabled={(!input.trim() && pendingAttachments.length === 0) || sending || conversation.bindingState === "reconcile_required"}
+                                        disabled={(!input.trim() && pendingAttachments.length === 0 && selectedLocalFolders.length === 0) || sending || conversation.bindingState === "reconcile_required"}
                                         className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground/40"
                                         aria-label="傳送"
                                     >
@@ -1176,7 +1563,7 @@ export default function M365ChatPage() {
                         )}
                         {composerResourceError && <p className="mt-1.5 text-center text-[11px] text-amber-700 dark:text-amber-300">{composerResourceError}</p>}
                         <p className="mt-2 text-center text-[11px] text-muted-foreground">
-                            可見 M365 網頁傳輸 · 附件會上傳到目前的 M365 對話 · {approvalMode === "auto" ? "工具經安全閘後自動執行" : "本機工具需可見核准"} · 不使用 Copilot Chat API
+                            可見 M365 網頁傳輸 · 檔案附件會上傳；本機資料夾只提供路徑並按需讀取 · {goalMode ? "目標模式會持續到證據確認完成；需要授權或補充時仍會停下。" : AUTOMATION_MODE_NOTICE[automationMode]} · 不使用 Copilot Chat API
                         </p>
                     </div>
                 </form>
@@ -1184,7 +1571,7 @@ export default function M365ChatPage() {
                 <Dialog open={composerPicker !== null} onOpenChange={(open) => !open && setComposerPicker(null)}>
                     <DialogContent className="sm:max-w-xl">
                         <DialogHeader>
-                            <DialogTitle>{composerPicker === "files" ? "選擇參考檔案" : composerPicker === "mcp" ? "選擇 MCP 工具" : "選擇 Skills"}</DialogTitle>
+                            <DialogTitle>{composerPicker === "files" ? "選擇知識來源" : composerPicker === "mcp" ? "選擇 MCP 工具" : "選擇 Skills"}</DialogTitle>
                             <DialogDescription>
                                 {composerPicker === "files"
                                     ? "只會把勾選檔案的已索引文字送進這一輪 M365 提示，不會上傳原始檔。請勿選擇密碼、Token 或其他機密資料。"
@@ -1199,13 +1586,19 @@ export default function M365ChatPage() {
                             ) : composerPicker === "files" ? (
                                 referenceFiles.length > 0 ? referenceFiles.map((file) => (
                                     <label key={file.id} className="flex cursor-pointer items-start gap-3 rounded-xl border border-border p-3 hover:bg-accent/60">
-                                        <input type="checkbox" checked={selectedReferenceFileIds.includes(file.id)} onChange={() => toggleReferenceFile(file.id)} className="mt-1 accent-cyan-500" />
+                                        <input type="checkbox" disabled={!referenceBindings.includes(file.id)} checked={selectedReferenceFileIds.includes(file.id)} onChange={() => toggleReferenceFile(file.id)} className="mt-1 accent-cyan-500" />
                                         <span className="min-w-0">
                                             <span className="block truncate text-sm font-medium">{file.name}</span>
                                             <span className="mt-1 block truncate text-xs text-muted-foreground">{file.path}</span>
+                                            {!referenceBindings.includes(file.id) && <button type="button" className="mt-2 text-xs underline" onClick={async event => {
+                                                event.preventDefault();
+                                                if (!window.confirm(`將「${file.name}」加入目前專案「${project.name}」？加入後仍需勾選才會送出。`)) return;
+                                                try { await apiPost(apiUrl(`/api/projects/${encodeURIComponent(project.id)}/reference-bindings`), { referenceId: file.id }); if (alive.current) setReferenceBindings(current => [...current, file.id]); }
+                                                catch { if (alive.current) setComposerResourceError("加入專案失敗，來源仍未授權。"); }
+                                            }}>未指派給此專案 · 明確加入專案</button>}
                                         </span>
                                     </label>
-                                )) : <p className="rounded-xl border border-dashed border-border p-6 text-center text-sm text-muted-foreground">尚無可用且已索引的參考檔案。</p>
+                                )) : <p className="rounded-xl border border-dashed border-border p-6 text-center text-sm text-muted-foreground">尚無可用且已索引的知識來源。</p>
                             ) : composerPicker === "mcp" ? (
                                 mcpServers.length > 0 ? mcpServers.map((server) => (
                                     <label key={server.name} className="flex cursor-pointer items-start gap-3 rounded-xl border border-border p-3 hover:bg-accent/60">
@@ -1225,10 +1618,12 @@ export default function M365ChatPage() {
                                         <input type="checkbox" checked={selectedSkillIds.includes(skill.id)} onChange={() => toggleSkill(skill.id)} className="mt-1 accent-emerald-500" />
                                         <span className="min-w-0 flex-1">
                                             <span className="block truncate text-sm font-medium">{skill.name}</span>
-                                            <span className="mt-1 block text-xs leading-5 text-muted-foreground">{skill.description || `Action: ${skill.action}`}</span>
+                                            <span className="mt-1 block text-xs leading-5 text-muted-foreground">
+                                                {skill.description || (skill.kind === "prompt_only" ? "提示規則；本輪載入，不會直接執行工具。" : `Action: ${skill.action}`)}
+                                            </span>
                                         </span>
                                     </label>
-                                )) : <p className="rounded-xl border border-dashed border-border p-6 text-center text-sm text-muted-foreground">尚無已啟用且可執行的 Skills。</p>
+                                )) : <p className="rounded-xl border border-dashed border-border p-6 text-center text-sm text-muted-foreground">尚無已啟用的 Skills。</p>
                             )}
                         </div>
                         {composerResourceError && <p className="text-xs text-amber-700 dark:text-amber-300">{composerResourceError}</p>}
@@ -1241,21 +1636,16 @@ export default function M365ChatPage() {
                 </div>
             </section>
 
-            {showRuns && (
-                <aside className="custom-scrollbar absolute inset-y-0 right-0 z-30 w-[min(92vw,380px)] shrink-0 overflow-y-auto border-l border-border bg-background p-4 shadow-2xl xl:static xl:w-[360px] xl:bg-card/40 xl:shadow-none">
-                    <div className="flex items-start justify-between gap-3">
-                        <div>
-                            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-primary">Workspace</p>
-                            <h3 className="mt-1 font-semibold">來源與執行</h3>
-                            <p className="mt-1 text-xs leading-5 text-muted-foreground">把專案脈絡、工具核准與多步驟工作放在同一工作區。</p>
-                        </div>
-                        <div className="flex gap-1.5">
-                            <button type="button" onClick={() => setShowRuns(false)} className="flex h-9 w-9 items-center justify-center rounded-xl border border-border text-muted-foreground hover:bg-accent" aria-label="關閉來源與執行面板">
-                                <X className="h-4 w-4" />
-                            </button>
-                        </div>
-                    </div>
-
+            <Dialog open={Boolean(remoteDraft)} onOpenChange={open => { if (!open) setRemoteDraft(null); }}>
+                <DialogContent><DialogHeader><DialogTitle>比較草稿版本</DialogTitle><DialogDescription>本視窗內容會保留，直到你明確選擇。保存版本 revision {remoteDraft?.revision}</DialogDescription></DialogHeader>
+                    <p>本視窗</p><pre className="max-h-40 overflow-auto whitespace-pre-wrap">{draft.text}</pre>
+                    <p>已保存版本</p><pre className="max-h-40 overflow-auto whitespace-pre-wrap">{remoteDraft?.text || "（空白，可能已傳送）"}</pre>
+                    <button onClick={() => controller.resolveConflict(true, remoteDraft || undefined).then(() => setRemoteDraft(null)).catch(() => setError("保存仍衝突或服務無法連線，請重新比較。"))}>使用本視窗版本保存</button>
+                    <button onClick={() => controller.resolveConflict(false, remoteDraft || undefined).then(() => setRemoteDraft(null)).catch(() => setError("無法取得保存版本。"))}>使用已保存版本</button>
+                </DialogContent>
+            </Dialog>
+            <WorkspaceInspector open={showRuns} triggerRef={inspectorTriggerRef} onOpenChange={open => { setShowRuns(open); window.localStorage.setItem("m365-ux-inspector", open ? "open" : "closed"); }}>
+                <aside className="min-w-0">
                     <div className="mt-4 space-y-3">
                         <section className={cn(
                             "rounded-2xl border bg-card p-4",
@@ -1349,7 +1739,7 @@ export default function M365ChatPage() {
                                         <ExternalLink className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
                                         <span>
                                             <span className="block font-medium">M365 Copilot 對話</span>
-                                            <span className="block text-[10px] text-muted-foreground">{getBindingLabel(conversation.bindingState)}</span>
+                                            <span className="block text-[10px] text-muted-foreground">{getBindingLabel(conversation.bindingState)} · 登入有效性尚未檢查</span>
                                         </span>
                                     </a>
                                 ) : (
@@ -1358,8 +1748,8 @@ export default function M365ChatPage() {
                                         <span>首次人工傳送後建立 M365 對話連結</span>
                                     </div>
                                 )}
-                                <a href="/dashboard/reference-files" className="flex items-center gap-2 rounded-lg p-2 hover:bg-accent">
-                                    <FolderKanban className="h-3.5 w-3.5 text-primary" />參考檔案管理
+                                <a href="/dashboard/knowledge-sources" className="flex items-center gap-2 rounded-lg p-2 hover:bg-accent">
+                                    <FolderKanban className="h-3.5 w-3.5 text-primary" />知識來源管理
                                 </a>
                                 {projectWorkspace && (
                                     <button
@@ -1382,7 +1772,7 @@ export default function M365ChatPage() {
                             <div className="mt-3 grid grid-cols-2 gap-2 text-xs">
                                 <a href="/dashboard/mcp" className="rounded-lg border border-border px-3 py-2 text-center hover:bg-accent">MCP 工具</a>
                                 <a href="/dashboard/skills" className="rounded-lg border border-border px-3 py-2 text-center hover:bg-accent">Skills</a>
-                                <a href="/dashboard/action-gate" className="rounded-lg border border-border px-3 py-2 text-center hover:bg-accent">Action Gate</a>
+                                <a href="/dashboard/action-gate" className="rounded-lg border border-border px-3 py-2 text-center hover:bg-accent">Action Gate 紀錄</a>
                                 <a href="/dashboard/persona" className="rounded-lg border border-border px-3 py-2 text-center hover:bg-accent">人格設定</a>
                             </div>
                         </section>
@@ -1401,7 +1791,7 @@ export default function M365ChatPage() {
                             <div className="rounded-2xl border border-dashed border-border p-6 text-center">
                                 <ListChecks className="mx-auto h-7 w-7 text-muted-foreground" />
                                 <p className="mt-2 text-sm font-medium">尚無多步驟工作</p>
-                                <p className="mt-1 text-xs leading-5 text-muted-foreground">一般問答不建立計畫；需要跨輪處理的複雜任務會由 Copilot 自行判斷並規劃，包含原生 M365 能力、本機工具與 MCP。</p>
+                                <p className="mt-1 text-xs leading-5 text-muted-foreground">每輪都會先判斷；只要步驟相依、需要等待，或完成後還要驗證，就會自行建立計畫。原生 M365 工作也適用，不必先有本機操作。</p>
                             </div>
                         ) : runs.map((run) => (
                             <article key={run.id} className={cn("rounded-2xl border bg-card p-4", run.id === currentRun?.id ? "border-primary/35" : "border-border")}>
@@ -1410,18 +1800,21 @@ export default function M365ChatPage() {
                                     {run.status === "COMPLETED" ? <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" /> : <ListChecks className="h-4 w-4 shrink-0 text-primary" />}
                                 </div>
                                 <div className="mt-3 flex items-center justify-between text-xs">
-                                    <span className="rounded-full bg-secondary px-2 py-1 font-medium">{getRunStatusLabel(run.status)}</span>
+                                    <span className="flex flex-wrap gap-1.5">
+                                        <span className="rounded-full bg-secondary px-2 py-1 font-medium">{getRunStatusLabel(run.status)}</span>
+                                        {run.goalMode && <span className="rounded-full bg-cyan-500/10 px-2 py-1 font-medium text-cyan-700 dark:text-cyan-200">目標模式</span>}
+                                    </span>
                                     <span className="text-right text-muted-foreground">
                                         {run.id === currentRun?.id && runDetail?.plan
-                                            ? `計畫 ${run.status === "COMPLETED" ? runDetail.plan.steps.length : runDetail.plan.steps.filter((step) => ["completed", "skipped"].includes(step.status)).length}/${runDetail.plan.steps.length} · 宿主執行 ${run.currentStep}/${run.maxSteps}`
-                                            : `宿主執行 ${run.currentStep}/${run.maxSteps}`}
+                                            ? `計畫 ${runDetail.plan.steps.filter((step) => step.status === "completed").length}/${runDetail.plan.steps.length} · 宿主執行 ${run.currentStep}${run.goalMode ? " · 無固定上限" : `/${run.maxSteps}`}`
+                                            : `宿主執行 ${run.currentStep}${run.goalMode ? " · 無固定上限" : `/${run.maxSteps}`}`}
                                     </span>
                                 </div>
                                 {run.id === currentRun?.id && runDetail?.plan ? (
                                     <details open className="mt-3 rounded-xl border border-border bg-secondary/35 p-3">
                                         <summary className="cursor-pointer select-none text-xs font-semibold text-primary">
                                             <span className="ml-1 inline-flex max-w-[calc(100%-1rem)] flex-col align-middle">
-                                                <span>Copilot 自主計畫 · v{runDetail.plan.revision} · {run.status === "COMPLETED" ? runDetail.plan.steps.length : runDetail.plan.steps.filter((step) => ["completed", "skipped"].includes(step.status)).length}/{runDetail.plan.steps.length}</span>
+                                                <span>Copilot 自主計畫 · v{runDetail.plan.revision} · {runDetail.plan.steps.filter((step) => step.status === "completed").length}/{runDetail.plan.steps.length}</span>
                                                 <span className="mt-0.5 truncate text-[11px] font-normal text-foreground">
                                                     目前：{run.status === "COMPLETED" ? (runDetail.plan.status === "complete" ? "計畫已完成" : "已完成（使用者核對）") : runDetail.plan.status === "complete" ? "計畫已完成" : runDetail.plan.steps.find((step) => step.id === runDetail.plan?.currentStepId)?.title || (runDetail.plan.status === "wait_user" ? "等待你的補充" : runDetail.plan.status === "wait_approval" ? "等待核准" : runDetail.plan.status === "blocked" ? "計畫受阻" : "正在更新計畫")}
                                                     {run.status === "COMPLETED" ? "" : pendingLocalActions.length > 0 ? " · 等待工具核准" : actionExecutionQueue.length > 0 ? " · 工具執行中" : run.status === "PAUSED" ? " · 已暫停" : runDetail.plan.status === "running" ? " · 等待 Observation" : ""}
@@ -1431,13 +1824,13 @@ export default function M365ChatPage() {
                                         <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-background">
                                             <div
                                                 className="h-full rounded-full bg-primary transition-all"
-                                                style={{ width: `${run.status === "COMPLETED" ? 100 : Math.round((runDetail.plan.steps.filter((step) => ["completed", "skipped"].includes(step.status)).length / runDetail.plan.steps.length) * 100)}%` }}
+                                                style={{ width: `${Math.round((runDetail.plan.steps.filter((step) => step.status === "completed").length / runDetail.plan.steps.length) * 100)}%` }}
                                             />
                                         </div>
                                         <p className="mt-2 text-xs leading-5 text-muted-foreground">完成條件：{runDetail.plan.completionCriteria}</p>
                                         <ol className="mt-3 space-y-2">
                                             {runDetail.plan.steps.map((step, index) => {
-                                                const displayedStatus = run.status === "COMPLETED" ? "completed" : step.status;
+                                                const displayedStatus = step.status;
                                                 return (
                                                     <li key={step.id} className="flex gap-2 text-xs leading-5">
                                                         <span className={cn(
@@ -1449,7 +1842,7 @@ export default function M365ChatPage() {
                                                         )}>{displayedStatus === "completed" ? "✓" : index + 1}</span>
                                                         <span>
                                                             <span className={cn("font-medium", displayedStatus === "completed" && "text-muted-foreground line-through")}>{step.title}</span>
-                                                            {displayedStatus === "in_progress" && <span className="ml-2 text-[10px] font-semibold text-primary">進行中</span>}
+                                                            <span className="ml-2 text-[10px] font-semibold">{{ completed: "已完成", in_progress: "進行中", pending: "待執行", blocked: "受阻", skipped: "已略過" }[displayedStatus]}</span>
                                                             <span className="block text-[11px] text-muted-foreground">{step.doneWhen}</span>
                                                         </span>
                                                     </li>
@@ -1482,43 +1875,15 @@ export default function M365ChatPage() {
                                                 </div>
                                             </div>
                                         )}
-                                        {["WAITING_USER", "BLOCKED"].includes(run.status) && (
-                                            <div className="space-y-2">
-                                                <textarea
-                                                    value={runInput}
-                                                    onChange={(event) => setRunInput(event.target.value)}
-                                                    rows={3}
-                                                    maxLength={20000}
-                                                    className="w-full resize-y rounded-xl border border-input bg-background px-3 py-2 text-xs outline-none focus:ring-2 focus:ring-ring"
-                                                    placeholder="補充缺少的資訊或人工判斷後再繼續"
-                                                />
-                                                <button
-                                                    disabled={runSaving || !runInput.trim()}
-                                                    onClick={() => {
-                                                        runAction(run, "resume", { input: runInput }).then(() => setRunInput(""));
-                                                    }}
-                                                    className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground disabled:opacity-40"
-                                                >
-                                                    <RotateCcw className="h-3 w-3" />加入補充並繼續
-                                                </button>
-                                            </div>
-                                        )}
-                                        {run.status === "RECONCILE_REQUIRED" && (
-                                            <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs leading-5">
-                                                <p className="font-medium">請先查看可見 Edge 中的實際結果，再選一項：</p>
-                                                <div className="mt-2 flex flex-col gap-1.5">
-                                                    <button disabled={runSaving} onClick={() => runAction(run, "reconcile", { resolution: "not_sent", note: "使用者已在 Edge 確認前一步未送出。" })} className="rounded-lg border border-border bg-background px-3 py-1.5 text-left">確認未送出，可安全重試</button>
-                                                    <button disabled={runSaving} onClick={() => runAction(run, "reconcile", { resolution: "completed" })} className="rounded-lg border border-border bg-background px-3 py-1.5 text-left">已在 Edge 確認工作完成</button>
-                                                    <button disabled={runSaving} onClick={() => runAction(run, "reconcile", { resolution: "abandon" })} className="rounded-lg border border-destructive/30 bg-background px-3 py-1.5 text-left text-destructive">停止這次工作</button>
-                                                </div>
-                                            </div>
+                                        {["WAITING_USER", "BLOCKED", "RECONCILE_REQUIRED"].includes(run.status) && (
+                                            <p className="rounded-xl border border-amber-500/30 p-3 text-sm">此工作需要你處理，請使用主對話輸入區上方的提示。</p>
                                         )}
                                         <div className="flex flex-wrap gap-2">
                                         {run.status === "WAITING_START_APPROVAL" && (
                                             <button disabled={runSaving} onClick={() => runAction(run, "start")} className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground"><Play className="h-3 w-3" />確認開始</button>
                                         )}
                                         {run.status === "RUNNING" && (
-                                            <button disabled={runSaving} onClick={() => runAction(run, "pause")} className="inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-xs"><CirclePause className="h-3 w-3" />暫停</button>
+                                            <button disabled={runSaving} title="目前步驟結束後暫停，已送往 Edge 的回合可能仍完成" onClick={() => runAction(run, "pause")} className="inline-flex items-center gap-1.5 rounded-lg border border-border px-3 py-1.5 text-xs"><CirclePause className="h-3 w-3" />目前步驟後暫停</button>
                                         )}
                                         {run.status === "PAUSED" && (
                                             <button disabled={runSaving} onClick={() => runAction(run, "resume")} className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground"><RotateCcw className="h-3 w-3" />繼續</button>
@@ -1541,7 +1906,8 @@ export default function M365ChatPage() {
                                                 <CheckCircle2 className="h-3 w-3" />確認已完成
                                             </button>
                                         )}
-                                        <button disabled={runSaving} onClick={() => runAction(run, "cancel")} className="inline-flex items-center gap-1.5 rounded-lg border border-destructive/30 px-3 py-1.5 text-xs text-destructive"><Square className="h-3 w-3" />取消</button>
+                                        <button disabled={runSaving} title="停止後續步驟，已送往 Edge 的回合可能仍完成並保存" onClick={() => runAction(run, "cancel")} className="inline-flex items-center gap-1.5 rounded-lg border border-destructive/30 px-3 py-1.5 text-xs text-destructive"><Square className="h-3 w-3" />停止後續步驟</button>
+                                        <p className="w-full text-xs text-muted-foreground">暫停或停止後續步驟不會中止已送往 Edge 的回合；遠端仍可能完成並保存結果。</p>
                                         </div>
                                     </div>
                                 )}
@@ -1555,14 +1921,14 @@ export default function M365ChatPage() {
                         每一步都保存狀態；需要判斷、核准或傳送結果不明時會停下，不會偷偷重送。
                     </div>
                 </aside>
-            )}
+            </WorkspaceInspector>
 
             <Dialog open={showAgentsEditor} onOpenChange={setShowAgentsEditor}>
                 <DialogContent className="sm:max-w-2xl">
                     <DialogHeader>
                         <DialogTitle>專案 AGENTS.md</DialogTitle>
                         <DialogDescription>
-                            這份檔案由目前專案中的 Golem 自主累積，供同專案的所有對話共用；其他專案不會載入。每輪只會用本機向量索引挑出相關內容送給 M365，使用者不能在此直接改寫。
+                            這份檔案由目前專案中的 Golem 自主管理，保存工作紀錄、規則、決策、目前狀態、專案偏好，以及過去有效做法、失敗原因與避免再次踩坑的經驗。同專案對話會自動取得近期及相關紀錄；需要更多歷史時，Golem 可在專案範圍內查詢。其他專案不會載入，使用者不能在此直接改寫。
                         </DialogDescription>
                     </DialogHeader>
                     <div className="space-y-2">

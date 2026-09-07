@@ -8,16 +8,30 @@ const DEFAULT_PACKAGE_DIRS = [
 ];
 
 const M365_RETIRED_SKILL_IDS = new Set(['stock-dashboard', 'crypto-dashboard']);
+const M365_BUILTIN_SKILL_IDS = new Set([
+    'actor',
+    'collab-calendar',
+    'duckduckgo-search',
+    'duckduckgo-devtools-bridge',
+    'log-archive',
+    'log-reader',
+    'reference-files',
+    'sys-admin',
+]);
 
-function isM365RetiredSkill(value) {
-    const normalized = safeSkillId(value, '');
-    if (!M365_RETIRED_SKILL_IDS.has(normalized)) return false;
+function isM365OnlyMode() {
     try {
         const ConfigManager = require('../config');
         return ConfigManager.CONFIG.GOLEM_BACKEND === 'm365-web';
     } catch (_) {
         return String(process.env.GOLEM_BACKEND || '').trim().toLowerCase() === 'm365-web';
     }
+}
+
+function isM365RetiredSkill(value) {
+    const normalized = safeSkillId(value, '');
+    if (!M365_RETIRED_SKILL_IDS.has(normalized)) return false;
+    return isM365OnlyMode();
 }
 
 function safeSkillId(value, fallback = 'generated-skill') {
@@ -108,10 +122,10 @@ function derivePromptMetadata(content, fallbackId) {
 
 function normalizePackage(dir, manifest) {
     const id = safeSkillId(manifest.id || path.basename(dir));
-    const entry = String(manifest.entry || 'index.js').trim();
+    const entry = manifest.entry === null ? '' : String(manifest.entry || 'index.js').trim();
     const prompt = String(manifest.prompt || 'skill.md').trim();
     const action = safeSkillId(manifest.action || id, id);
-    const indexPath = path.join(dir, entry);
+    const indexPath = entry ? path.join(dir, entry) : '';
     const promptPath = path.join(dir, prompt);
     const promptMetadata = derivePromptMetadata(readPromptFile(promptPath), id);
 
@@ -170,6 +184,7 @@ function listSkillPackages(options = {}) {
                 const pkg = loadPackage(dir);
                 if (!pkg) continue;
                 if (isM365RetiredSkill(pkg.id) || isM365RetiredSkill(pkg.action)) continue;
+                if (isM365OnlyMode() && rootPriority !== 0 && !M365_BUILTIN_SKILL_IDS.has(pkg.id)) continue;
                 const candidate = {
                     ...pkg,
                     _sourceRoot: root,
@@ -221,11 +236,16 @@ function buildPromptContent(pkg) {
     const lines = [
         `# ${pkg.name || pkg.id}`,
         pkg.description || '',
-        '',
-        '## Runtime Action',
-        `- action: \`${pkg.action || pkg.id}\``,
-        `- package: \`${pkg.id}\``,
     ];
+
+    if (pkg.entry) {
+        lines.push('', '## Runtime Action');
+        lines.push(`- action: \`${pkg.action || pkg.id}\``);
+        lines.push(`- package: \`${pkg.id}\``);
+    } else {
+        lines.push('', '## Prompt-only Skill');
+        lines.push('- This package supplies working guidance to the current turn and does not expose an executable action.');
+    }
 
     if (promptContent) {
         lines.push('', '## Skill Protocol', promptContent);
@@ -245,4 +265,5 @@ module.exports = {
     buildPromptContent,
     derivePromptMetadata,
     isM365RetiredSkill,
+    M365_BUILTIN_SKILL_IDS,
 };

@@ -26,10 +26,10 @@ describe('M365-only static dashboard surface', () => {
             '/dashboard/chat',
             '/dashboard/skills',
             '/dashboard/mcp',
-            '/dashboard/memory',
+            '/dashboard/m365-bridge',
             '/dashboard/action-gate',
             '/dashboard/persona',
-            '/dashboard/reference-files',
+            '/dashboard/knowledge-sources',
         ].forEach((route) => server.app.get(route, (req, res) => res.status(200).send('dashboard page')));
         server.app.get('/dashboard/chat.txt', (req, res) => res.status(200).send('chat payload'));
         server.app.get('/dashboard/skills.txt', (req, res) => res.status(200).send('skills payload'));
@@ -52,20 +52,40 @@ describe('M365-only static dashboard surface', () => {
         '/dashboard/rpg',
         '/dashboard/crypto',
         '/dashboard/diary',
-    ])('redirects removed page %s to projects', async (route) => {
+    ])('redirects removed page %s directly to chat', async (route) => {
         const response = await fetch(`${baseUrl}${route}`, { redirect: 'manual' });
         expect(response.status).toBe(302);
-        expect(response.headers.get('location')).toBe('/dashboard/projects');
+        expect(response.headers.get('location')).toBe('/dashboard/chat');
+    });
+
+    test('does not retain the replaced project-list page', async () => {
+        const response = await fetch(`${baseUrl}/dashboard/projects`, { redirect: 'manual' });
+        expect(response.status).toBe(404);
+    });
+
+    test.each([
+        '/dashboard/agents',
+        '/dashboard/agents/create',
+        '/dashboard/memory',
+        '/dashboard/memory-firewall',
+        '/dashboard/office',
+        '/dashboard/prompt-trends',
+        '/dashboard/reference-files',
+        '/dashboard/system-setup',
+        '/dashboard/setup',
+    ])('does not expose removed M365 tool page %s', async (route) => {
+        const response = await fetch(`${baseUrl}${route}`, { redirect: 'manual' });
+        expect(response.status).toBe(404);
     });
 
     test.each([
         '/dashboard/chat',
         '/dashboard/skills',
         '/dashboard/mcp',
-        '/dashboard/memory',
+        '/dashboard/m365-bridge',
         '/dashboard/action-gate',
         '/dashboard/persona',
-        '/dashboard/reference-files',
+        '/dashboard/knowledge-sources',
         '/dashboard/chat.txt',
         '/dashboard/skills.txt',
         '/dashboard/__next._tree.txt',

@@ -10,7 +10,7 @@ import { useI18n } from "@/components/I18nProvider";
 import {
     Plug, Plus, Trash2, RefreshCw, Zap,
     CheckCircle, XCircle, AlertCircle, ToggleLeft,
-    ToggleRight, Edit2, X, Terminal, List, Play, Cpu
+    ToggleRight, Edit2, X, Terminal, List, Play
 } from "lucide-react";
 
 // ─── Types ────────────────────────────────────────────────────────────────────
@@ -492,8 +492,6 @@ export default function MCPPage() {
     const [loading,     setLoading]     = useState(true);
     const [dialog,      setDialog]      = useState<{ mode: 'add' | 'edit'; initial: Partial<MCPServer> | null } | null>(null);
     const [testResult,  setTestResult]  = useState<{ server: string; ok: boolean; msg: string } | null>(null);
-    const [injecting,   setInjecting]   = useState(false);
-    const [showReminder, setShowReminder] = useState(false);
 
     const showToast = (msg: string, ok = true) => {
         if (ok) {
@@ -568,30 +566,7 @@ export default function MCPPage() {
         showToast(enabled
             ? (isEnglish ? `${name} enabled` : `${name} 已啟用`)
             : (isEnglish ? `${name} disabled` : `${name} 已停用`));
-        if (enabled) setShowReminder(true);
         await fetchServers();
-    };
-
-    const handleInject = async () => {
-        setInjecting(true);
-        setShowReminder(false);
-        try {
-            const d = await apiPost<{ success?: boolean; error?: string }>(apiUrl("/api/skills/inject"));
-            if (d.success) {
-                showToast(isEnglish ? "Inject triggered. Golem is reloading skills..." : '已觸發注入！Golem 正在重新載入技能...', true);
-            } else {
-                throw new Error(d.error || (isEnglish ? "Invocation failed" : '調用失敗'));
-            }
-        } catch (e: unknown) {
-            showToast(
-                isEnglish
-                    ? `Inject failed: ${getErrorMessage(e, "Invocation failed")}`
-                    : `注入失敗: ${getErrorMessage(e, "調用失敗")}`,
-                false
-            );
-        } finally {
-            setInjecting(false);
-        }
     };
 
     const handleDelete = async (name: string) => {
@@ -655,7 +630,7 @@ export default function MCPPage() {
                         <div>
                             <h1 className="text-lg font-bold">{isEnglish ? "MCP Tool Manager" : "MCP 工具管理"}</h1>
                             <p className="text-xs text-muted-foreground">
-                                {isEnglish ? "Model Context Protocol — Local Tool Hub" : "Model Context Protocol — 本地工具整合中心"}
+                                {isEnglish ? "Enabled servers are available from the next M365 turn" : "啟用後從下一個 M365 對話回合生效；不需要另行注入"}
                             </p>
                         </div>
                     </div>
@@ -666,19 +641,6 @@ export default function MCPPage() {
                         title={isEnglish ? "Refresh" : "重新整理"}
                     >
                         <RefreshCw className={`w-4 h-4 ${loading ? 'animate-spin' : ''}`} />
-                    </button>
-                    <button
-                        onClick={handleInject}
-                        disabled={injecting}
-                        className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold transition-all shadow-lg ${
-                            injecting 
-                                ? 'bg-zinc-700 text-zinc-400 cursor-not-allowed' 
-                                : 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-emerald-500/20'
-                        }`}
-                        title={isEnglish ? "Inject MCP tools into Golem core" : "將 MCP 工具注入 Golem 核心"}
-                    >
-                        {injecting ? <RefreshCw className="w-4 h-4 animate-spin" /> : <Cpu className="w-4 h-4" />}
-                        {injecting ? (isEnglish ? "Injecting..." : '注入中...') : (isEnglish ? "Inject MCP" : '注入 MCP')}
                     </button>
                     <button
                         onClick={() => setDialog({ mode: 'add', initial: null })}
@@ -764,34 +726,6 @@ export default function MCPPage() {
                     </div>
                 </div>
             </div>
-
-            {/* Reminder overlay */}
-            {showReminder && (
-                <div className="fixed top-20 right-6 z-40 animate-in fade-in slide-in-from-top-4 duration-300">
-                    <div className="bg-amber-600 text-white px-4 py-3 rounded-xl shadow-2xl flex items-center gap-4 border border-amber-400/30">
-                        <div className="flex-1">
-                            <p className="font-bold text-sm">{isEnglish ? "Changes saved!" : "變更已儲存！"}</p>
-                            <p className="text-[11px] opacity-90">
-                                {isEnglish ? "Click \"Inject MCP\" in the top-right to sync with Golem." : "請點擊右上角「注入 MCP」按鈕以同步至 Golem。"}
-                            </p>
-                        </div>
-                        <div className="flex gap-2">
-                            <button 
-                                onClick={() => setShowReminder(false)}
-                                className="px-2 py-1 rounded bg-white/10 hover:bg-white/20 text-[10px] font-semibold transition-colors"
-                            >
-                                {isEnglish ? "Got it" : "我知道了"}
-                            </button>
-                            <button 
-                                onClick={handleInject}
-                                className="px-2 py-1 rounded bg-white text-amber-700 text-[10px] font-bold hover:bg-zinc-100 transition-all active:scale-95"
-                            >
-                                {isEnglish ? "Inject now" : "立即注入"}
-                            </button>
-                        </div>
-                    </div>
-                </div>
-            )}
 
             {/* Add/Edit dialog */}
             {dialog && (

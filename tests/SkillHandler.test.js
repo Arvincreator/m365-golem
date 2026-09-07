@@ -96,6 +96,34 @@ describe('SkillHandler', () => {
         expect(mockCtx.reply).not.toHaveBeenCalled();
     });
 
+    test('turns M365 connection diagnostics into a plain private summary', () => {
+        const summary = SkillHandler._buildM365StatusFeedback(JSON.stringify({
+            status: 'success',
+            extensionOnline: false,
+            m365SessionAvailable: false,
+            replyErrorCode: 'FORBIDDEN_BY_POLICY',
+            replyErrorMessage: 'Invalid IPC secret',
+        }));
+
+        expect(summary).toContain('Connection check: not ready.');
+        expect(summary).toContain('reconnect Microsoft 365 from 「更多工具」');
+        expect(summary).not.toContain('extensionOnline');
+        expect(summary).not.toContain('FORBIDDEN_BY_POLICY');
+        expect(summary).not.toContain('Invalid IPC secret');
+    });
+
+    test('keeps a ready M365 connection check scoped to a specific item', () => {
+        const summary = SkillHandler._buildM365StatusFeedback(JSON.stringify({
+            status: 'success',
+            extensionOnline: true,
+            m365SessionAvailable: true,
+        }));
+
+        expect(summary).toContain('Connection check: ready.');
+        expect(summary).toContain('Do not claim that every file is visible.');
+        expect(summary).not.toContain('m365SessionAvailable');
+    });
+
     test('execute should validate mcp_call before calling tool', async () => {
         const MCPManager = require('../src/mcp/MCPManager');
         const callTool = jest.fn();
@@ -135,5 +163,44 @@ describe('SkillHandler', () => {
         expect(result).toBe(true);
         expect(callTool).not.toHaveBeenCalled();
         expect(mockCtx.reply).toHaveBeenCalledWith(expect.stringContaining('呼叫格式錯誤'));
+    });
+
+    test('does not expose connector validation details in an M365 workspace reply', async () => {
+        const MCPManager = require('../src/mcp/MCPManager');
+        const callTool = jest.fn();
+        MCPManager.getInstance.mockReturnValue({
+            load: jest.fn().mockResolvedValue(undefined),
+            getServers: jest.fn().mockReturnValue([
+                {
+                    name: 'github',
+                    enabled: true,
+                    connected: true,
+                    cachedTools: [{
+                        name: 'create_issue',
+                        inputSchema: {
+                            type: 'object',
+                            required: ['repository_full_name', 'title'],
+                            properties: {
+                                repository_full_name: { type: 'string' },
+                                title: { type: 'string' },
+                            },
+                            additionalProperties: false,
+                        },
+                    }],
+                },
+            ]),
+            callTool,
+        });
+        mockBrain.webBackend = { id: 'm365-web' };
+
+        await SkillHandler.execute(mockCtx, {
+            action: 'mcp_call',
+            server: 'github',
+            tool: 'create_issue',
+            parameters: { title: 'Bug' },
+        }, mockBrain);
+
+        expect(callTool).not.toHaveBeenCalled();
+        expect(mockCtx.reply).not.toHaveBeenCalled();
     });
 });

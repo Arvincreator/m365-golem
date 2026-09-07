@@ -154,8 +154,15 @@ describe('GolemBrain m365-web bootstrap', () => {
         const { page, context } = makeContext('https://login.microsoftonline.com/common/login');
         BrowserLauncher.launch.mockResolvedValue(context);
         const brain = new GolemBrain({ golemId: 'm365-login-test' });
+        const previousGrace = process.env.M365_LOGIN_REDIRECT_GRACE_MS;
+        process.env.M365_LOGIN_REDIRECT_GRACE_MS = '200';
 
-        await expect(brain.init()).rejects.toMatchObject({ code: 'M365_HUMAN_LOGIN_REQUIRED' });
+        try {
+            await expect(brain.init()).rejects.toMatchObject({ code: 'M365_HUMAN_LOGIN_REQUIRED' });
+        } finally {
+            if (previousGrace === undefined) delete process.env.M365_LOGIN_REDIRECT_GRACE_MS;
+            else process.env.M365_LOGIN_REDIRECT_GRACE_MS = previousGrace;
+        }
 
         expect(page.goto).toHaveBeenCalledTimes(1);
         expect(page.evaluate).not.toHaveBeenCalled();
@@ -238,9 +245,13 @@ describe('GolemBrain m365-web bootstrap', () => {
         brain.context = context;
         brain.isInitialized = true;
         brain._refreshWebBackendDefinition();
-        brain._withToolRoutingHint = jest.fn().mockResolvedValue('<tool-routing>command</tool-routing>\n\n查看根目錄');
+        const toolRoute = { commandLane: { recommended: true, reason: 'local_os_or_repo_operation' } };
+        brain._withToolRoutingHint = jest.fn().mockImplementation(async (_text, _isSystem, options) => {
+            options.m365ToolRoute = toolRoute;
+            return '<tool-routing>command</tool-routing>\n\n查看根目錄';
+        });
 
-        await brain.sendMessage('查看根目錄', false, { m365Bootstrap: true });
+        const response = await brain.sendMessage('查看根目錄', false, { m365Bootstrap: true });
 
         expect(ProtocolFormatter.buildEnvelope).toHaveBeenCalledWith(
             expect.stringContaining('<tool-routing>'),
@@ -253,6 +264,7 @@ describe('GolemBrain m365-web bootstrap', () => {
                 userDataDir: brain.userDataDir,
             })
         );
+        expect(response.m365ToolRoute).toBe(toolRoute);
     });
 
     test('injects the active Skill catalog for a natural-language inventory question', async () => {
@@ -264,10 +276,11 @@ describe('GolemBrain m365-web bootstrap', () => {
         });
         brain._refreshWebBackendDefinition();
 
+        const routeOptions = { toolRoutingQuery: '你有什麼 Skill 可用？' };
         const routed = await brain._withToolRoutingHint(
             '[GOLEM_WORKSPACE_REQUEST:req]\n[USER INPUT]\n你有什麼 Skill 可用？',
             false,
-            { toolRoutingQuery: '你有什麼 Skill 可用？' }
+            routeOptions
         );
 
         expect(routed).toContain('Current available Skill catalog (2; authoritative for this turn)');
@@ -275,6 +288,35 @@ describe('GolemBrain m365-web bootstrap', () => {
         expect(routed).toContain('reference-files');
         expect(routed).toContain('Do not claim that no Skill list was provided');
         expect(routed).toContain('[GOLEM_WORKSPACE_REQUEST:req]');
+        expect(routeOptions.m365ToolRoute).toEqual(expect.objectContaining({
+            commandLane: expect.any(Object),
+        }));
+    });
+
+    test('re-routes the original user goal after an autonomous native-plan checkpoint', async () => {
+        ConfigManager.CONFIG.M365_ACTIONS_ENABLED = true;
+        const brain = new GolemBrain({
+            golemId: 'm365-plan-reroute-test',
+            toolsetScene: 'assistant',
+            toolsetTools: [],
+        });
+        brain._refreshWebBackendDefinition();
+
+        const routed = await brain._withToolRoutingHint(
+            '[GOLEM_OBSERVATION]\n{"lane":"plan_checkpoint","status":"succeeded"}\n[/GOLEM_OBSERVATION]',
+            false,
+            {
+                isSystemFeedback: true,
+                planMode: true,
+                allowActions: true,
+                toolRoutingQuery: '在本機專案建立檔案後執行測試',
+            }
+        );
+
+        expect(routed).toContain('<tool-routing>');
+        expect(routed).toContain('Relevant command lane');
+        expect(routed).toContain('local OS/repo operation detected');
+        expect(routed).toContain('[GOLEM_OBSERVATION]');
     });
 
     test('keeps tool-vector routing enabled with an isolated local embedder while long-term memory stays off', async () => {

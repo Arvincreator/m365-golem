@@ -3,7 +3,7 @@ import { z } from "zod";
 /**
  * ── Transport map ──────────────────────────────────────────────────────────
  * M365 Golem  <--stdio MCP-->  MCP Server
- * MCP Server      <--Named Pipe--> Native Host      (\\.\pipe\m365-session-bridge, 127.0.0.1 never used)
+ * MCP Server      <--Named Pipe--> Native Host      (per-state channel, 127.0.0.1 never used)
  * Native Host     <--stdio Native Messaging-->  Extension service worker
  * Extension service worker <--chrome.tabs.sendMessage--> Content script (on the SharePoint tab)
  *
@@ -14,13 +14,33 @@ import { z } from "zod";
 
 export const IPC_PIPE_NAME = "\\\\.\\pipe\\m365-session-bridge";
 
+function stableChannelSuffix(value: string): string {
+  // FNV-1a is used only to create a deterministic, filesystem-safe channel
+  // suffix. The IPC secret remains the authentication boundary.
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= value.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0");
+}
+
 /**
- * Resolves the actual pipe name to use: an env override (set by test
- * harnesses so a spawned test server never collides with a real, already-
- * running MCP Server holding the default pipe name) or the fixed default.
+ * Resolves the actual pipe name to use. Tests may provide an explicit pipe.
+ * Installed copies provide an explicit shared secret path; deriving the pipe
+ * suffix from that path keeps all processes for one installation together,
+ * while preventing an older or standalone Bridge installation with a
+ * different state directory from taking over the same channel.
  */
 export function resolveIpcPipeName(): string {
-  return process.env.M365_BRIDGE_PIPE_NAME ?? IPC_PIPE_NAME;
+  const explicit = process.env.M365_BRIDGE_PIPE_NAME?.trim();
+  if (explicit) return explicit;
+
+  const secretPath = process.env.M365_BRIDGE_SECRET_PATH?.trim();
+  if (!secretPath) return IPC_PIPE_NAME;
+
+  const normalizedPath = secretPath.replace(/\//g, "\\").toLocaleLowerCase("en-US");
+  return `${IPC_PIPE_NAME}-${stableChannelSuffix(normalizedPath)}`;
 }
 /** Chrome/Edge native-messaging cap on a single host -> extension message. Must chunk above this. */
 export const NATIVE_MSG_HOST_TO_EXT_MAX_BYTES = 1024 * 1024 - 4096; // headroom under 1MB for JSON/base64 overhead

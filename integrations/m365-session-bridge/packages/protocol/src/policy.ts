@@ -37,7 +37,7 @@ export const PolicySchema = z.object({
   allowedLibraries: z.array(z.string()).default([]),
   allowedLocalPaths: z.array(z.string()).default([]),
   allowOverwrite: z.boolean().default(false),
-  allowRecycle: z.boolean().default(true),
+  allowRecycle: z.boolean().default(false),
   allowPermanentDelete: z.literal(false).default(false),
   allowExternalSharing: z.literal(false).default(false),
   allowPermissionChange: z.literal(false).default(false),

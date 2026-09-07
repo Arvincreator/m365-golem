@@ -27,7 +27,43 @@ describe('Executor', () => {
 
         const result = await promise;
         expect(result).toContain('file1');
-        expect(spawn).toHaveBeenCalledWith('ls', [], expect.anything());
+        const expectedCommand = process.platform === 'win32'
+            ? (process.env.ComSpec || 'cmd.exe')
+            : 'ls';
+        const expectedArgs = process.platform === 'win32'
+            ? ['/d', '/u', '/s', '/c', 'chcp 65001>nul & ls']
+            : [];
+        expect(spawn).toHaveBeenCalledWith(expectedCommand, expectedArgs, expect.anything());
+        if (process.platform === 'win32') {
+            expect(spawn.mock.calls[0][2].env).toEqual(expect.objectContaining({
+                PYTHONIOENCODING: 'utf-8',
+                PYTHONUTF8: '1',
+            }));
+            expect(spawn.mock.calls[0][2].shell).toBe(false);
+        }
+    });
+
+    test('should preserve UTF-8 characters split across output chunks', async () => {
+        const promise = executor.run('dir /b');
+        const output = Buffer.from('Golem_自主執行_UAT.docx\r\n', 'utf8');
+        const splitAt = output.indexOf(Buffer.from('自', 'utf8')) + 1;
+
+        mockProcess.stdout.emit('data', output.subarray(0, splitAt));
+        mockProcess.stdout.emit('data', output.subarray(splitAt));
+        mockProcess.emit('close', 0);
+
+        await expect(promise).resolves.toBe('Golem_自主執行_UAT.docx\r\n');
+    });
+
+    test('should decode UTF-16LE output from Windows shell built-ins', async () => {
+        const promise = executor.run('dir /b');
+        const output = Buffer.from('Golem_自主執行_UAT.docx\r\n', 'utf16le');
+
+        mockProcess.stdout.emit('data', output.subarray(0, 8));
+        mockProcess.stdout.emit('data', output.subarray(8));
+        mockProcess.emit('close', 0);
+
+        await expect(promise).resolves.toBe('Golem_自主執行_UAT.docx\r\n');
     });
 
     test('should reject on non-zero exit code', async () => {

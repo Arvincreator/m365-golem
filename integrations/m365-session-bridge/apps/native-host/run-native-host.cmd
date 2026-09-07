@@ -4,6 +4,7 @@ REM %~dp0 is this .cmd file's own directory, so this works regardless of install
 set "M365_BRIDGE_STATE_DIR=%LOCALAPPDATA%\M365-Golem\m365-session-bridge"
 set "M365_BRIDGE_POLICY_PATH=%M365_BRIDGE_STATE_DIR%\policy.json"
 set "M365_BRIDGE_SECRET_PATH=%M365_BRIDGE_STATE_DIR%\runtime\ipc-secret.json"
+if exist "%~dp0secret-path.local.txt" set /p "M365_BRIDGE_SECRET_PATH="<"%~dp0secret-path.local.txt"
 set "M365_BRIDGE_NATIVE_LOG_PATH=%M365_BRIDGE_STATE_DIR%\logs\native-host.log"
 for %%I in ("%~dp0..\..\..\..") do set "M365_GOLEM_ROOT=%%~fI"
 set "M365_BRIDGE_NODE=node"

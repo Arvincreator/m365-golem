@@ -137,6 +137,7 @@ export default function SecurityTab({ env, onChangeEnv }: SecurityTabProps) {
             onChangeEnv("GOLEM_STRICT_SAFEGUARD", "true");
             onChangeEnv("GOLEM_MAX_AUTO_TURNS", "1");
             onChangeEnv("GOLEM_INTERVENTION_LEVEL", "CONSERVATIVE");
+            onChangeEnv("AUTONOMY_LEVEL", "0");
             return;
         }
 
@@ -147,6 +148,7 @@ export default function SecurityTab({ env, onChangeEnv }: SecurityTabProps) {
             onChangeEnv("GOLEM_STRICT_SAFEGUARD", "true");
             onChangeEnv("GOLEM_MAX_AUTO_TURNS", "2");
             onChangeEnv("GOLEM_INTERVENTION_LEVEL", "NORMAL");
+            onChangeEnv("AUTONOMY_LEVEL", "1");
             return;
         }
 
@@ -157,6 +159,7 @@ export default function SecurityTab({ env, onChangeEnv }: SecurityTabProps) {
             onChangeEnv("GOLEM_STRICT_SAFEGUARD", "true");
             onChangeEnv("GOLEM_MAX_AUTO_TURNS", "4");
             onChangeEnv("GOLEM_INTERVENTION_LEVEL", "NORMAL");
+            onChangeEnv("AUTONOMY_LEVEL", "2");
             return;
         }
 
@@ -166,6 +169,7 @@ export default function SecurityTab({ env, onChangeEnv }: SecurityTabProps) {
         onChangeEnv("GOLEM_STRICT_SAFEGUARD", "true");
         onChangeEnv("GOLEM_MAX_AUTO_TURNS", "4");
         onChangeEnv("GOLEM_INTERVENTION_LEVEL", "PROACTIVE");
+        onChangeEnv("AUTONOMY_LEVEL", "3");
     };
 
     const moveToWhitelist = (item: string) => {

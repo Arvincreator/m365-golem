@@ -45,8 +45,12 @@ test("persistApprovedTarget appends host/site, makes a backup, and deduplicates 
 
     addPolicyEntry("deniedHosts", "blocked.sharepoint.com");
     removePolicyEntry("deniedHosts", "blocked.sharepoint.com");
+    const localProject = path.join(os.tmpdir(), "m365-golem-project");
+    addPolicyEntry("allowedLocalPaths", localProject);
+    removePolicyEntry("allowedLocalPaths", localProject);
     const third = JSON.parse(fs.readFileSync(policyPath, "utf8")) as ReturnType<typeof validPolicy>;
     assert.deepEqual(third.deniedHosts, []);
+    assert.deepEqual(third.allowedLocalPaths, ["%TEMP%\\m365"]);
   } finally {
     if (previous === undefined) delete process.env.M365_BRIDGE_POLICY_PATH;
     else process.env.M365_BRIDGE_POLICY_PATH = previous;

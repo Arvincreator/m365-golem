@@ -4,9 +4,13 @@ const HelpManager = require('../managers/HelpManager');
 const skills = require('../skills');
 const skillManager = require('../managers/SkillManager');
 const SkillArchitect = require('../managers/SkillArchitect');
-const wikiSkill = require('../skills/modules/wiki/index.js');
 const { toolsetManager, SCENE_TOOLSETS } = require('../managers/ToolsetManager');
 const { hookSystem } = require('./HookSystem'); // ⚡ [OpenHarness-inspired]
+const {
+    getAutomationModePreset,
+    inferAutomationMode,
+    normalizeAutomationMode,
+} = require('../config/AutomationModes');
 const fs = require('fs');
 
 // ✨ [v9.1 Addon] 初始化技能架構師 (Web Gemini Mode)
@@ -121,71 +125,11 @@ class NodeRouter {
                 console.warn(`[NodeRouter] learn outcome sync failed: ${err.message}`);
             }
         };
-        const inferAutomationModeFromEnv = (env = {}) => {
-            const asBool = (v) => String(v || '').trim().toLowerCase() === 'true';
-            const autoApprove = asBool(env.GOLEM_AUTO_APPROVE_ALL);
-            const silent = asBool(env.GOLEM_SILENT_AUTO_APPROVE);
-            const trustLibrary = asBool(env.GOLEM_TRUST_SYSTEM_COMMANDS);
-            const maxTurns = Number(env.GOLEM_MAX_AUTO_TURNS || 5);
-            const level = Number(env.AUTONOMY_LEVEL || 2);
-            if (level <= 0) return 'lockdown';
-            if (autoApprove && silent) return 'silent';
-            if (autoApprove) return 'autopilot';
-            if (!autoApprove && trustLibrary && maxTurns >= 2) return 'balanced';
-            return 'guided';
-        };
         const applyAutomationMode = async (mode) => {
             const EnvManager = require('../utils/EnvManager');
             const SecurityManager = require('../../packages/security/SecurityManager');
             const ConfigManager = require('../config');
-            const presets = {
-                lockdown: {
-                    GOLEM_AUTO_APPROVE_ALL: 'false',
-                    GOLEM_SILENT_AUTO_APPROVE: 'false',
-                    GOLEM_TRUST_SYSTEM_COMMANDS: 'false',
-                    GOLEM_STRICT_SAFEGUARD: 'true',
-                    GOLEM_MAX_AUTO_TURNS: '1',
-                    GOLEM_INTERVENTION_LEVEL: 'CONSERVATIVE',
-                    AUTONOMY_LEVEL: '0',
-                },
-                guided: {
-                    GOLEM_AUTO_APPROVE_ALL: 'false',
-                    GOLEM_SILENT_AUTO_APPROVE: 'false',
-                    GOLEM_TRUST_SYSTEM_COMMANDS: 'false',
-                    GOLEM_STRICT_SAFEGUARD: 'true',
-                    GOLEM_MAX_AUTO_TURNS: '1',
-                    GOLEM_INTERVENTION_LEVEL: 'CONSERVATIVE',
-                    AUTONOMY_LEVEL: '0',
-                },
-                balanced: {
-                    GOLEM_AUTO_APPROVE_ALL: 'false',
-                    GOLEM_SILENT_AUTO_APPROVE: 'false',
-                    GOLEM_TRUST_SYSTEM_COMMANDS: 'true',
-                    GOLEM_STRICT_SAFEGUARD: 'true',
-                    GOLEM_MAX_AUTO_TURNS: '2',
-                    GOLEM_INTERVENTION_LEVEL: 'NORMAL',
-                    AUTONOMY_LEVEL: '1',
-                },
-                autopilot: {
-                    GOLEM_AUTO_APPROVE_ALL: 'true',
-                    GOLEM_SILENT_AUTO_APPROVE: 'false',
-                    GOLEM_TRUST_SYSTEM_COMMANDS: 'true',
-                    GOLEM_STRICT_SAFEGUARD: 'true',
-                    GOLEM_MAX_AUTO_TURNS: '4',
-                    GOLEM_INTERVENTION_LEVEL: 'NORMAL',
-                    AUTONOMY_LEVEL: '2',
-                },
-                silent: {
-                    GOLEM_AUTO_APPROVE_ALL: 'true',
-                    GOLEM_SILENT_AUTO_APPROVE: 'true',
-                    GOLEM_TRUST_SYSTEM_COMMANDS: 'true',
-                    GOLEM_STRICT_SAFEGUARD: 'true',
-                    GOLEM_MAX_AUTO_TURNS: '4',
-                    GOLEM_INTERVENTION_LEVEL: 'PROACTIVE',
-                    AUTONOMY_LEVEL: '3',
-                }
-            };
-            const payload = presets[mode];
+            const payload = getAutomationModePreset(mode);
             if (!payload) throw new Error(`unknown automation mode: ${mode}`);
             EnvManager.updateEnv(payload);
             ConfigManager.reloadConfig();
@@ -300,12 +244,12 @@ class NodeRouter {
             }
             const arg = text.replace(/^\/level\s*/i, '').trim().toLowerCase();
             const argToMode = {
-                '0': 'lockdown',
+                '0': 'guided',
                 '1': 'guided',
                 '2': 'balanced',
                 '3': 'autopilot',
                 '4': 'silent',
-                lockdown: 'lockdown',
+                lockdown: 'guided',
                 guided: 'guided',
                 balanced: 'balanced',
                 autopilot: 'autopilot',
@@ -314,10 +258,9 @@ class NodeRouter {
             if (!arg) {
                 const EnvManager = require('../utils/EnvManager');
                 const env = EnvManager.readEnv();
-                const mode = inferAutomationModeFromEnv(env);
+                const mode = inferAutomationMode(env);
                 return await reply(
                     `🛡️ /level 說明（目前模式：\`${mode}\`）\n` +
-                    `- \`/level 0\` Lockdown：最保守（只允許最低風險）\n` +
                     `- \`/level 1\` Guided：保守確認\n` +
                     `- \`/level 2\` Balanced：平衡模式（推薦）\n` +
                     `- \`/level 3\` Autopilot：高自動化\n` +
@@ -325,9 +268,9 @@ class NodeRouter {
                 );
             }
 
-            const nextMode = argToMode[arg];
+            const nextMode = normalizeAutomationMode(argToMode[arg]);
             if (!nextMode) {
-                return await reply('⚠️ 用法：`/level 0|1|2|3|4`（只輸入 `/level` 可查看說明）');
+                return await reply('⚠️ 用法：`/level 1|2|3|4`（只輸入 `/level` 可查看說明）');
             }
 
             try {
@@ -919,30 +862,6 @@ class NodeRouter {
         }
 
         if (text.startsWith('/patch') || text.includes('優化代碼')) return false;
-
-        // ── /wiki 指令 ───────────────────────────────────────────
-        if (text.startsWith('/wiki')) {
-            const parts  = text.slice(5).trim().split(/\s+/);
-            const action = parts[0] || 'help';
-            const input  = parts.slice(1).join(' ');
-            // ⚡ [OpenHarness-inspired] Skill Execution Trace + Hook
-            const hookCtx = { type: 'skill', name: 'wiki', trigger: text, _startMs: Date.now() };
-            await hookSystem.emit('pre_tool_use', hookCtx);
-            try {
-                const result = await wikiSkill.run({ args: { action, input }, brain });
-                await hookSystem.emit('post_tool_use', hookCtx, { output: result });
-                if (brain && brain.chatLogManager) {
-                    brain.chatLogManager.appendTrace({
-                        skill: 'wiki', trigger: text, durationMs: Date.now() - hookCtx._startMs,
-                        result_summary: String(result || '').slice(0, 150)
-                    });
-                }
-                return await reply(result);
-            } catch (e) {
-                await hookSystem.emit('post_tool_use', hookCtx, { error: e.message });
-                return await reply(`❌ [Wiki] 執行失敗: ${e.message}`);
-            }
-        }
 
         // ── /compress 指令 ─────────────────────────────────────────
         // Hermes-inspired: 手動觸發 TrajectoryCompressor 壓縮目前會話

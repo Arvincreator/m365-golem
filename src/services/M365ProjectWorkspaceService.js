@@ -13,7 +13,7 @@ const MAX_MEMORY_TAG_CHARS = 64;
 const PROJECT_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/;
 const WORKSPACE_MODES = new Set(['managed', 'create', 'existing']);
 const WINDOWS_RESERVED_NAMES = /^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\..*)?$/i;
-const MEMORY_KINDS = new Set(['rule', 'context', 'decision', 'preference']);
+const MEMORY_KINDS = new Set(['rule', 'context', 'decision', 'preference', 'worklog', 'lesson']);
 const MEMORY_IMPORTANCE = new Set(['core', 'normal']);
 
 function workspaceError(code, message, statusCode = 400) {
@@ -127,14 +127,18 @@ function formatMemoryLine(entry) {
     const lines = content.split('\n');
     const first = `- [${entry.id}] ${lines.shift() || ''}`;
     const continuation = lines.map((line) => `  ${line}`).join('\n');
-    const metadata = [
+    const tags = [
         entry.importance === 'core' ? 'core' : '',
         ...(Array.isArray(entry.tags) ? entry.tags : []),
+    ].filter(Boolean);
+    const metadata = [
+        entry.updatedAt || entry.createdAt ? `updated: ${entry.updatedAt || entry.createdAt}` : '',
+        tags.length > 0 ? `tags: ${tags.join(', ')}` : '',
     ].filter(Boolean);
     return [
         first,
         continuation,
-        metadata.length > 0 ? `  _tags: ${metadata.join(', ')}_` : '',
+        metadata.length > 0 ? `  _${metadata.join(' | ')}_` : '',
     ].filter(Boolean).join('\n');
 }
 
@@ -142,7 +146,9 @@ function renderAgents(projectId, entries) {
     const groups = [
         ['rule', 'Project rules'],
         ['decision', 'Decisions'],
+        ['worklog', 'Recent work'],
         ['context', 'Working context'],
+        ['lesson', 'Experience and pitfalls'],
         ['preference', 'Project preferences'],
     ];
     const lines = [
@@ -612,13 +618,56 @@ class M365ProjectWorkspaceService {
             const recency = Number.isFinite(ageDays) ? Math.max(0, 0.08 - Math.min(0.08, ageDays / 3650)) : 0;
             const core = entry.importance === 'core' ? 1 : 0;
             const rule = entry.kind === 'rule' ? 0.2 : 0;
-            return { entry, score: (vector * 0.65) + (lexical * 0.35) + core + rule + recency };
+            const matchScore = (vector * 0.65) + (lexical * 0.35);
+            return { entry, matchScore, score: matchScore + core + rule + recency };
         }).sort((a, b) => b.score - a.score);
 
-        return ranked
-            .filter((item, index) => item.entry.importance === 'core' || item.score > 0.08 || index < 3)
-            .slice(0, limit)
+        const requestedRecentLimit = Number(options.recentLimit ?? 3);
+        const recentLimit = Number.isFinite(requestedRecentLimit)
+            ? Math.max(0, Math.min(Math.max(0, limit - 1), requestedRecentLimit))
+            : Math.min(Math.max(0, limit - 1), 3);
+        const relevantReserve = limit >= 3 ? 1 : 0;
+        const updatedDescending = (a, b) => String(b.updatedAt || b.createdAt || '')
+            .localeCompare(String(a.updatedAt || a.createdAt || ''));
+        const alwaysLimit = Math.max(0, limit - recentLimit - relevantReserve);
+        const always = entries
+            .filter((entry) => entry.importance === 'core' || entry.kind === 'rule')
+            .sort(updatedDescending)
+            .slice(0, alwaysLimit);
+        const recentState = entries
+            .filter((entry) => ['worklog', 'context', 'decision', 'lesson', 'preference'].includes(entry.kind))
+            .sort(updatedDescending)
+            .slice(0, recentLimit);
+        const relevant = [...ranked]
+            .filter((item) => item.matchScore > 0.03)
+            .sort((a, b) => b.matchScore - a.matchScore || b.score - a.score)
             .map((item) => ({ ...item.entry, relevanceScore: Number(item.score.toFixed(4)) }));
+        const fallback = ranked
+            .filter((item, index) => item.entry.importance === 'core' || item.score > 0.08 || index < 3)
+            .map((item) => ({ ...item.entry, relevanceScore: Number(item.score.toFixed(4)) }));
+        const selected = [];
+        const selectedIds = new Set();
+        const append = (entry, retrievalReason) => {
+            if (!entry || selectedIds.has(entry.id) || selected.length >= limit) return;
+            selectedIds.add(entry.id);
+            selected.push({ ...entry, retrievalReason: entry.retrievalReason || retrievalReason });
+        };
+        always.forEach((entry) => append(entry, 'core'));
+        recentState.forEach((entry) => append(entry, 'recent'));
+        relevant.forEach((entry) => append(entry, 'relevant'));
+        fallback.forEach((entry) => append(entry, 'fallback'));
+        return selected;
+    }
+
+    getRecentMemories(projectId, options = {}) {
+        const workspacePath = String(options.workspacePath || '').trim();
+        const workspace = this.ensureProject(projectId, { workspacePath });
+        const limit = Math.max(1, Math.min(20, Number(options.limit || 8)));
+        return [...workspace.memoryEntries]
+            .sort((a, b) => String(b.updatedAt || b.createdAt || '')
+                .localeCompare(String(a.updatedAt || a.createdAt || '')))
+            .slice(0, limit)
+            .map((entry) => ({ ...entry, retrievalReason: 'recent' }));
     }
 }
 

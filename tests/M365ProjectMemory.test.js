@@ -53,6 +53,64 @@ describe('M365 project memory', () => {
         ]));
     });
 
+    test('keeps verified work and lessons visible while reserving recall space for recent project state', async () => {
+        service.applyMemoryOperations('project-a', [
+            {
+                operation: 'upsert',
+                kind: 'rule',
+                importance: 'core',
+                content: 'Never report a project artifact complete before host verification.',
+                tags: ['verification'],
+            },
+            {
+                operation: 'upsert',
+                kind: 'worklog',
+                content: 'Verified the generated report package and required headings.',
+                tags: ['report'],
+            },
+            {
+                operation: 'upsert',
+                kind: 'lesson',
+                content: 'A plan update without its first action caused a false blocker; always emit the current action with a running plan.',
+                tags: ['pitfall', 'plan'],
+            },
+            ...Array.from({ length: 6 }, (_, index) => ({
+                operation: 'upsert',
+                kind: 'context',
+                content: index === 0
+                    ? 'Transformer semantic routing once selected the wrong local tool; verify the matched capability before execution.'
+                    : `Older unrelated project context ${index + 1}.`,
+                tags: index === 0 ? ['transformer', 'routing'] : ['older'],
+            })),
+        ]);
+
+        const memoryPath = path.join(tempDir, 'project-a', '.golem', 'project-memory.json');
+        const stored = JSON.parse(fs.readFileSync(memoryPath, 'utf8'));
+        stored.entries.forEach((entry, index) => {
+            entry.updatedAt = `2026-09-${String(index + 1).padStart(2, '0')}T00:00:00.000Z`;
+        });
+        const worklog = stored.entries.find((entry) => entry.kind === 'worklog');
+        const lesson = stored.entries.find((entry) => entry.kind === 'lesson');
+        worklog.updatedAt = '2026-10-01T00:00:00.000Z';
+        lesson.updatedAt = '2026-10-02T00:00:00.000Z';
+        fs.writeFileSync(memoryPath, `${JSON.stringify(stored, null, 2)}\n`, 'utf8');
+
+        const recalled = await service.getRelevantMemories('project-a', 'transformer semantic routing capability', {
+            limit: 4,
+            recentLimit: 2,
+        });
+        expect(recalled.map((entry) => entry.kind)).toEqual(expect.arrayContaining(['rule', 'worklog', 'lesson']));
+        expect(recalled.find((entry) => entry.kind === 'worklog').retrievalReason).toBe('recent');
+        expect(recalled.find((entry) => entry.kind === 'lesson').retrievalReason).toBe('recent');
+        expect(recalled.find((entry) => entry.content.includes('Transformer semantic routing')).retrievalReason).toBe('relevant');
+        const recent = service.getRecentMemories('project-a', { limit: 2 });
+        expect(recent.map((entry) => entry.kind)).toEqual(['lesson', 'worklog']);
+        expect(recent.every((entry) => entry.retrievalReason === 'recent')).toBe(true);
+        expect(service.ensureProject('project-a').agentsContent).toContain('## Recent work');
+        expect(service.ensureProject('project-a').agentsContent).toContain('## Experience and pitfalls');
+        expect(service.ensureProject('project-a').agentsContent).toContain('_updated: 2026-10-02T00:00:00.000Z');
+    });
+
     test('allows Copilot-scoped updates but rejects direct editing and secret material', () => {
         const added = service.applyMemoryOperations('project-a', [{
             operation: 'upsert',

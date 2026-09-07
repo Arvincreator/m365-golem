@@ -32,11 +32,17 @@ export async function POST() {
 
   console.log(`📡 [Launcher] Spawning Golem process...`);
 
-  const child = spawn("npm", ["run", "dashboard"], {
+  const child = spawn(process.execPath, ["--expose-gc", "apps/runtime/index.js", "dashboard"], {
     cwd: rootDir,
     detached: true,
     stdio: "ignore",
-    env: { ...process.env, DASHBOARD_DEV_MODE: "true" }
+    windowsHide: true,
+    env: {
+      ...process.env,
+      DASHBOARD_DEV_MODE: "true",
+      DISABLE_TUI: "true",
+      SKIP_BROWSER: "1",
+    }
   });
 
   child.on('error', (err) => {

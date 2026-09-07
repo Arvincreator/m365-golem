@@ -47,4 +47,14 @@ describe('system routes in M365 safe mode', () => {
         expect(updaterSpy).not.toHaveBeenCalled();
         updaterSpy.mockRestore();
     });
+
+    test('identifies the local process so the desktop launcher does not start a duplicate', async () => {
+        const response = await fetch(`${baseUrl}/api/health`);
+
+        expect(response.status).toBe(200);
+        await expect(response.json()).resolves.toEqual(expect.objectContaining({
+            app: 'm365-golem',
+            status: 'ok',
+        }));
+    });
 });

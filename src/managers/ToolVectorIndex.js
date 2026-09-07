@@ -208,20 +208,27 @@ class ToolVectorIndex {
      */
     async search(query, options = {}) {
         await this.init();
-        if (!this._table) return [];
+        if (!this._table) {
+            if (options.throwOnError) throw Object.assign(new Error('Tool vector index is empty'), { code: 'VECTOR_INDEX_EMPTY' });
+            return [];
+        }
 
         const limit = Number(options.limit || 8);
         const kind = options.kind || null;
 
         try {
             const queryVec = await this.embedder.embedQuery(query);
-            let builder = this._table.vectorSearch(queryVec).limit(limit * 2); // 多取一些再過濾
+            let builder = this._table.vectorSearch(queryVec).distanceType('cosine').limit(limit * 2);
 
             const results = await builder.toArray();
+            // Reserve capability recall so a large tool/example catalog cannot crowd out execution lanes.
+            const capabilities = options.includeCapabilities
+                ? await this._table.vectorSearch(queryVec).distanceType('cosine').where("kind = 'capability'").limit(3).toArray()
+                : [];
+            const selected = results.filter(r => !kind || r.kind === kind).slice(0, limit);
+            const combined = [...selected, ...capabilities.filter(row => !selected.some(item => item.id === row.id))];
 
-            return results
-                .filter(r => !kind || r.kind === kind)
-                .slice(0, limit)
+            return combined
                 .map(r => ({
                     id: r.id,
                     kind: r.kind,
@@ -231,6 +238,7 @@ class ToolVectorIndex {
                     score: r._distance !== undefined ? (1 - r._distance) : 0.5, // 轉換距離為相似度
                 }));
         } catch (e) {
+            if (options.throwOnError) throw e;
             console.warn(`⚠️ [ToolVectorIndex] 搜尋失敗: ${e.message}`);
             return [];
         }

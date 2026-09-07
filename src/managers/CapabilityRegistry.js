@@ -46,7 +46,7 @@ function writeRegistryFile(userDataDir, payload) {
 
 function collectSkills(userDataDir) {
   return SkillPackageRegistry.listSkillPackages({ userDataDir })
-    .filter(pkg => pkg.enabled !== false)
+    .filter(pkg => pkg.enabled !== false && pkg.entry && fs.existsSync(pkg.indexPath))
     .map(pkg => ({
       id: pkg.id,
       lane: 'skill',

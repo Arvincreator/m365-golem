@@ -98,6 +98,32 @@ describe('M365WorkspaceStore', () => {
         await expect(store.listProjects()).rejects.toMatchObject({ code: 'M365_DATA_DECRYPT_FAILED' });
     });
 
+    test('lets an AI title replace only a placeholder and never a user title', async () => {
+        const project = await store.createProject({ name: 'Title project' });
+        const conversation = await store.createConversation(project.id);
+
+        const generated = await store.updateConversationTitleIfPlaceholder(
+            conversation.id,
+            '整理 OneDrive 專案檔案'
+        );
+        expect(generated).toEqual(expect.objectContaining({
+            changed: true,
+            reason: 'updated',
+            conversation: expect.objectContaining({ title: '整理 OneDrive 專案檔案' }),
+        }));
+
+        await store.updateConversationTitle(conversation.id, '使用者手動名稱');
+        const ignored = await store.updateConversationTitleIfPlaceholder(
+            conversation.id,
+            'Copilot 第二次命名'
+        );
+        expect(ignored).toEqual(expect.objectContaining({
+            changed: false,
+            reason: 'title_already_set',
+            conversation: expect.objectContaining({ title: '使用者手動名稱' }),
+        }));
+    });
+
     test('encrypts and restores the per-project workspace location', async () => {
         const workspacePath = path.join(tempDir, 'client-workspace');
         const project = await store.createProject({
@@ -211,6 +237,33 @@ describe('M365WorkspaceStore', () => {
             status: 'COMPLETED',
             currentStep: 1,
         });
+    });
+
+    test('persists Goal mode without the normal twelve-step ceiling', async () => {
+        const project = await store.createProject({ name: 'Goal Work' });
+        const conversation = await store.createConversation(project.id, { title: 'Persistent objective' });
+        const run = await store.createRun(conversation.id, {
+            objective: 'Continue until the verified project objective is reached.',
+            verification: 'Host evidence satisfies the completion check.',
+            maxSteps: 2,
+            goalMode: true,
+            startImmediately: true,
+            origin: 'copilot',
+        });
+
+        expect(run).toEqual(expect.objectContaining({
+            status: 'RUNNING',
+            goalMode: true,
+            maxSteps: M365WorkspaceStore.GOAL_MODE_MAX_STEPS,
+        }));
+        const [created] = await store.listRunEvents(run.id);
+        expect(created).toEqual(expect.objectContaining({
+            eventType: 'run_created',
+            payload: expect.objectContaining({ goalMode: true }),
+        }));
+        expect((await store.getLatestCheckpoint(run.id)).state).toEqual(expect.objectContaining({
+            goalMode: true,
+        }));
     });
 
     test('persists approval requests and accepts exactly one decision', async () => {

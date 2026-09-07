@@ -12,6 +12,213 @@ describe('PageInteractor M365 safety behavior', () => {
         M365_ACTIONS_ENABLED: false,
     });
 
+    function locatorGroup(items) {
+        return {
+            count: jest.fn().mockResolvedValue(items.length),
+            nth: jest.fn((index) => items[index]),
+        };
+    }
+
+    test('switches the visible M365 response mode and verifies the trigger label', async () => {
+        const state = { triggerText: '自動', expanded: false };
+        const trigger = {
+            isVisible: jest.fn().mockResolvedValue(true),
+            innerText: jest.fn(() => Promise.resolve(state.triggerText)),
+            getAttribute: jest.fn((name) => Promise.resolve(
+                name === 'aria-expanded' ? String(state.expanded) : (name === 'aria-label' ? '模型選取器' : null)
+            )),
+            click: jest.fn().mockImplementation(async () => {
+                state.expanded = !state.expanded;
+            }),
+        };
+        const makeOption = (text, mode) => ({
+            isVisible: jest.fn(() => Promise.resolve(state.expanded)),
+            innerText: jest.fn().mockResolvedValue(text),
+            getAttribute: jest.fn().mockResolvedValue(null),
+            click: jest.fn().mockImplementation(async () => {
+                state.triggerText = mode;
+                state.expanded = false;
+            }),
+        });
+        const options = [
+            makeOption('自動\n決定思考多久', '自動'),
+            makeOption('快速回應\n立即提供解答', '快速回應'),
+            makeOption('深度思考\n思考更久以提供更好的解答', '深度思考'),
+        ];
+        const page = {
+            locator: jest.fn((selector) => selector === '[role="menuitemradio"]'
+                ? locatorGroup(options)
+                : locatorGroup([trigger])),
+        };
+        const interactor = new PageInteractor(page, {}, definition);
+
+        await expect(interactor._ensureM365ResponseMode('thoughtful')).resolves.toEqual({
+            ok: true,
+            requested: 'thoughtful',
+            observed: 'thoughtful',
+            changed: true,
+        });
+
+        expect(trigger.click).toHaveBeenCalledTimes(1);
+        expect(options[2].click).toHaveBeenCalledTimes(1);
+        expect(options[0].click).not.toHaveBeenCalled();
+        expect(options[1].click).not.toHaveBeenCalled();
+    });
+
+    test('closes an already-open native mode menu before typing when the selected mode is unchanged', async () => {
+        const state = { expanded: true };
+        const trigger = {
+            isVisible: jest.fn().mockResolvedValue(true),
+            innerText: jest.fn().mockResolvedValue('自動'),
+            getAttribute: jest.fn((name) => Promise.resolve(
+                name === 'aria-expanded' ? String(state.expanded) : (name === 'aria-label' ? '模型選取器' : null)
+            )),
+            click: jest.fn().mockImplementation(async () => {
+                state.expanded = false;
+            }),
+        };
+        const page = { locator: jest.fn(() => locatorGroup([trigger])) };
+        const interactor = new PageInteractor(page, {}, definition);
+
+        await expect(interactor._ensureM365ResponseMode('auto')).resolves.toEqual({
+            ok: true,
+            requested: 'auto',
+            observed: 'auto',
+            changed: false,
+        });
+        expect(trigger.click).toHaveBeenCalledTimes(1);
+    });
+
+    test('waits for the M365 response-mode button when the composer renders first', async () => {
+        let triggerPolls = 0;
+        const trigger = {
+            isVisible: jest.fn().mockResolvedValue(true),
+            innerText: jest.fn().mockResolvedValue('自動'),
+            getAttribute: jest.fn().mockResolvedValue(null),
+            click: jest.fn(),
+        };
+        const page = {
+            locator: jest.fn((selector) => {
+                if (selector === '[role="menuitemradio"]') return locatorGroup([]);
+                return {
+                    count: jest.fn().mockImplementation(async () => {
+                        triggerPolls += 1;
+                        return triggerPolls === 1 ? 0 : 1;
+                    }),
+                    nth: jest.fn(() => trigger),
+                };
+            }),
+        };
+        const transientDefinition = {
+            ...definition,
+            responseModeSelectors: {
+                ...definition.responseModeSelectors,
+                waitTimeoutMs: 50,
+                pollIntervalMs: 1,
+            },
+        };
+        const interactor = new PageInteractor(page, {}, transientDefinition);
+
+        await expect(interactor._ensureM365ResponseMode('auto')).resolves.toEqual({
+            ok: true,
+            requested: 'auto',
+            observed: 'auto',
+            changed: false,
+        });
+        expect(triggerPolls).toBeGreaterThanOrEqual(2);
+        expect(trigger.click).not.toHaveBeenCalled();
+    });
+
+    test('detects and closes the live M365 menu even when aria-expanded is absent', async () => {
+        const state = { menuOpen: true };
+        const trigger = {
+            isVisible: jest.fn().mockResolvedValue(true),
+            innerText: jest.fn().mockResolvedValue('自動'),
+            getAttribute: jest.fn().mockResolvedValue(null),
+            click: jest.fn().mockImplementation(async () => {
+                state.menuOpen = false;
+            }),
+        };
+        const visibleOption = {
+            isVisible: jest.fn(() => Promise.resolve(state.menuOpen)),
+            innerText: jest.fn().mockResolvedValue('自動\n決定思考多久'),
+            getAttribute: jest.fn().mockResolvedValue(null),
+        };
+        const page = {
+            locator: jest.fn((selector) => selector === '[role="menuitemradio"]'
+                ? locatorGroup([visibleOption])
+                : locatorGroup([trigger])),
+        };
+        const interactor = new PageInteractor(page, {}, definition);
+
+        await expect(interactor._ensureM365ResponseMode('auto')).resolves.toEqual({
+            ok: true,
+            requested: 'auto',
+            observed: 'auto',
+            changed: false,
+        });
+        expect(trigger.click).toHaveBeenCalledTimes(1);
+    });
+
+    test('stops before reading or typing when M365 cannot confirm the queued response mode', async () => {
+        const page = {};
+        const interactor = new PageInteractor(page, {}, definition);
+        jest.spyOn(interactor, '_waitForReady').mockResolvedValue();
+        const modeError = new Error('mode unavailable');
+        modeError.code = 'M365_RESPONSE_MODE_UNAVAILABLE';
+        jest.spyOn(interactor, '_ensureM365ResponseMode').mockRejectedValue(modeError);
+        const capture = jest.spyOn(interactor, '_captureBaseline').mockResolvedValue('old reply');
+        const type = jest.spyOn(interactor, '_typeInput').mockResolvedValue();
+        const send = jest.spyOn(interactor, '_clickSend').mockResolvedValue();
+        jest.spyOn(interactor, '_healSelector').mockResolvedValue(false);
+
+        await expect(interactor.interact(
+            'payload',
+            definition.selectors,
+            false,
+            '[[BEGIN:test]]',
+            '[[END:test]]',
+            0,
+            null,
+            { m365ResponseMode: 'quick' }
+        )).rejects.toMatchObject({ code: 'M365_RESPONSE_MODE_UNAVAILABLE' });
+
+        expect(capture).not.toHaveBeenCalled();
+        expect(type).not.toHaveBeenCalled();
+        expect(send).not.toHaveBeenCalled();
+    });
+
+    test('applies the queued response mode before baseline capture and send', async () => {
+        const page = {};
+        const interactor = new PageInteractor(page, {}, definition);
+        jest.spyOn(interactor, '_waitForReady').mockResolvedValue();
+        const ensureMode = jest.spyOn(interactor, '_ensureM365ResponseMode').mockResolvedValue({ ok: true });
+        const capture = jest.spyOn(interactor, '_captureBaseline').mockResolvedValue('old reply');
+        jest.spyOn(interactor, '_typeInput').mockResolvedValue();
+        const send = jest.spyOn(interactor, '_clickSend').mockResolvedValue();
+        jest.spyOn(interactor, '_pruneDOM').mockResolvedValue();
+        jest.spyOn(ResponseExtractor, 'waitForResponse').mockResolvedValue({
+            status: 'FALLBACK_DIFF',
+            text: 'new reply',
+            attachments: [],
+        });
+
+        await interactor.interact(
+            'payload',
+            definition.selectors,
+            false,
+            '[[BEGIN:test]]',
+            '[[END:test]]',
+            0,
+            null,
+            { m365ResponseMode: 'quick' }
+        );
+
+        expect(ensureMode).toHaveBeenCalledWith('quick');
+        expect(ensureMode.mock.invocationCallOrder[0]).toBeLessThan(capture.mock.invocationCallOrder[0]);
+        expect(capture.mock.invocationCallOrder[0]).toBeLessThan(send.mock.invocationCallOrder[0]);
+    });
+
     test('does not serialize tenant DOM for external selector healing', async () => {
         const page = { content: jest.fn().mockResolvedValue('<html>tenant content</html>') };
         const doctor = { diagnose: jest.fn(), saveSelectors: jest.fn() };

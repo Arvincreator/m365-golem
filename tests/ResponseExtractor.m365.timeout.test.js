@@ -132,4 +132,73 @@ describe('ResponseExtractor bounded M365 waits', () => {
             matchedSelector: selector,
         }));
     });
+
+    test('separates M365 citations from downloads and drops citation favicons', () => {
+        const longTeamsSource = 'https://teams.microsoft.com/l/message/19:example@thread.tacv2/1788489296895?tenantId=tenant&groupId=group&parentMessageId=1788489296895&teamName=' + 'digital-transformation-'.repeat(12) + '&channelName=weekly-report';
+        const artifacts = ResponseExtractor.normalizeVisibleArtifacts([
+            {
+                elementType: 'image',
+                url: 'https://services.bingapis.com/favicon?url=ecovistw.sharepoint.com',
+                width: 32,
+                height: 32,
+                alt: 'site icon',
+            },
+            {
+                elementType: 'image',
+                url: 'https://res.cdn.office.net/files/fabric-cdn-prod_20260623.001/assets/item-types/24/xlsx.svg',
+                width: 150,
+                height: 150,
+                alt: 'xlsx',
+            },
+            {
+                elementType: 'link',
+                url: 'https://ecovistw.sharepoint.com/sites/AI-inside',
+                name: 'AI-inside SharePoint',
+                isCitation: true,
+            },
+            {
+                elementType: 'link',
+                url: 'https://contoso.example/reports/source.pdf',
+                name: '原始研究報告',
+                isCitation: true,
+            },
+            {
+                elementType: 'link',
+                url: longTeamsSource,
+                name: '數位轉型週報 Teams 頻道',
+                isCitation: true,
+            },
+            {
+                elementType: 'link',
+                url: 'https://m365.cloud.microsoft/generated/template.xlsx',
+                name: '下載「收支明細表_空白範本.xlsx」',
+                hasDownload: true,
+            },
+        ], { includeSources: true });
+
+        expect(artifacts).toEqual([
+            expect.objectContaining({
+                kind: 'source',
+                name: 'AI-inside SharePoint',
+                url: 'https://ecovistw.sharepoint.com/sites/AI-inside',
+            }),
+            expect.objectContaining({
+                kind: 'source',
+                name: '原始研究報告',
+                url: 'https://contoso.example/reports/source.pdf',
+            }),
+            expect.objectContaining({
+                kind: 'source',
+                name: '數位轉型週報 Teams 頻道',
+                url: longTeamsSource,
+            }),
+            expect.objectContaining({
+                kind: 'download',
+                name: '下載「收支明細表_空白範本.xlsx」',
+            }),
+        ]);
+        expect(artifacts[2].url).toBe(longTeamsSource);
+        expect(artifacts.some((item) => item.url.includes('bingapis.com/favicon'))).toBe(false);
+        expect(artifacts.some((item) => item.url.includes('/assets/item-types/'))).toBe(false);
+    });
 });

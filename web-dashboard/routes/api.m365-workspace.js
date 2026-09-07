@@ -58,6 +58,42 @@ function sendError(res, error) {
 module.exports = function registerM365WorkspaceRoutes(server) {
     const router = express.Router();
 
+    const { isLocalUxRequest } = require('../../src/services/M365UxDraft');
+    const uxOnly = (req, res, next) => isLocalUxRequest(req) ? next()
+        : res.status(403).json({ success: false, error: 'M365_UX_LOCAL_ONLY' });
+
+    router.get('/api/projects/:projectId/conversations/:conversationId/draft', uxOnly, async (req, res) => {
+        res.set('Cache-Control', 'no-store');
+        try {
+            const store = await getM365WorkspaceStore(server);
+            res.json({ success: true, draft: await store.getDraft(req.params.projectId, req.params.conversationId) });
+        } catch (error) { return sendError(res, error); }
+    });
+    router.post('/api/projects/:projectId/conversations/:conversationId/draft', uxOnly, async (req, res) => {
+        res.set('Cache-Control', 'no-store');
+        try {
+            const store = await getM365WorkspaceStore(server);
+            res.json({ success: true, draft: await store.saveDraft(req.params.projectId, req.params.conversationId, req.body?.expectedRevision, req.body?.draft) });
+        } catch (error) { return sendError(res, error); }
+    });
+    router.get('/api/projects/:projectId/reference-bindings', uxOnly, async (req, res) => {
+        res.set('Cache-Control', 'no-store');
+        try {
+            const store = await getM365WorkspaceStore(server);
+            res.json({ success: true, referenceFileIds: await store.listProjectReferences(req.params.projectId) });
+        } catch (error) { return sendError(res, error); }
+    });
+    router.post('/api/projects/:projectId/reference-bindings', uxOnly, async (req, res) => {
+        try {
+            const id = String(req.body.referenceId || '');
+            const file = require('../../src/services/ReferenceFileService').list().find(item => item.id === id && item.enabled !== false && item.status === 'ready');
+            if (!file || /(^|[\\/])\.env(?:\.|$)/i.test(file.path)) return res.status(400).json({ error: 'M365_REFERENCE_FILE_INVALID' });
+            const store = await getM365WorkspaceStore(server);
+            await store.bindProjectReference(req.params.projectId, id);
+            res.json({ success: true });
+        } catch (error) { return sendError(res, error); }
+    });
+
     router.get('/api/m365/workspace/status', async (req, res) => {
         const enabled = isM365WorkspaceEnabled();
         if (!enabled) {
@@ -512,7 +548,9 @@ module.exports = function registerM365WorkspaceRoutes(server) {
     router.post('/api/runs/:runId/resume', async (req, res) => {
         try {
             const coordinator = await getM365RunCoordinator(server);
-            const run = await coordinator.resumeRun(req.params.runId, req.body.input || '');
+            const run = await coordinator.resumeRun(req.params.runId, req.body.input || '', {
+                grantAutoTurns: req.body.grantAutoTurns,
+            });
             return res.json({ success: true, run });
         } catch (error) {
             return sendError(res, error);

@@ -20,8 +20,6 @@ const registerSkillsRoutes = require('./routes/api.skills');
 const registerSystemRoutes = require('./routes/api.system');
 const registerPersonaRoutes = require('./routes/api.persona');
 const registerGolemRoutes = require('./routes/api.golems');
-const registerMemoryRoutes = require('./routes/api.memory');
-const registerMemoryFirewallRoutes = require('./routes/api.memory-firewall');
 const registerMcpRoutes = require('./routes/api.mcp');
 const registerPromptPoolRoutes = require('./routes/api.prompt-pool');
 const registerReferenceFileRoutes = require('./routes/api.reference-files');
@@ -214,8 +212,6 @@ class WebServer {
             registerSystemRoutes,
             registerPersonaRoutes,
             registerGolemRoutes,
-            registerMemoryRoutes,
-            registerMemoryFirewallRoutes,
             registerMcpRoutes,
             registerPromptPoolRoutes,
             registerReferenceFileRoutes,

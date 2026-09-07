@@ -12,6 +12,9 @@ class ConversationManager {
         this.brain = brain;
         this.NeuroShunter = neuroShunterClass;
         this.controller = controller;
+        if (this.controller && typeof this.controller === 'object') {
+            this.controller.convoManager = this;
+        }
         this.queue = [];
         this.isProcessing = false;
         this.userBuffers = new Map();
@@ -20,7 +23,8 @@ class ConversationManager {
         this.observerMode = false;
         this.interventionLevel = options.interventionLevel || 'CONSERVATIVE';
         this.DEBOUNCE_MS = 1500;
-        this.autoTurnCount = 0; // 🎯 [v9.1.15] Track autonomous turns
+        this.autoTurnStateByRun = new Map();
+        this.legacyAutoTurnState = { used: 0, limit: 0 };
 
         // 初始化信心追蹤器
         this.confidenceTracker = new ConfidenceTracker(this.brain.chatLogManager);
@@ -50,12 +54,68 @@ class ConversationManager {
         return this.memoryFirewall;
     }
 
+    _workspaceRunId(ctx, options = {}) {
+        return String(options.workspaceRunId || ctx?.workspaceRunId || '').trim();
+    }
+
+    _resetAutoTurnStateForUser(ctx, options = {}) {
+        const runId = this._workspaceRunId(ctx, options);
+        if (runId) this.autoTurnStateByRun.delete(runId);
+        else this.legacyAutoTurnState = { used: 0, limit: 0 };
+    }
+
+    _autoTurnBudget(task) {
+        const options = task?.options || {};
+        const ctx = task?.ctx || {};
+        const runId = this._workspaceRunId(ctx, options);
+        const goalMode = options.goalMode === true || ctx.workspaceGoalMode === true;
+        if (goalMode) return { runId, goalMode, allowed: true, used: 0, limit: Infinity };
+
+        const explicit = options.autoTurnBudget && typeof options.autoTurnBudget === 'object'
+            ? options.autoTurnBudget
+            : (ctx.workspaceAutoTurnBudget && typeof ctx.workspaceAutoTurnBudget === 'object'
+                ? ctx.workspaceAutoTurnBudget
+                : null);
+        const configuredLimit = Math.max(1, Math.floor(Number(ConfigManager.CONFIG.MAX_AUTO_TURNS || 5)));
+        const requestedLimit = runId
+            ? configuredLimit
+            : Math.max(1, Math.floor(Number(options.maxAutoTurns || configuredLimit)));
+        const explicitUsed = Math.max(0, Math.floor(Number(explicit?.used) || 0));
+        const explicitLimit = Math.max(0, Math.floor(Number(explicit?.limit) || 0));
+        let state;
+        if (runId) {
+            state = options.resetAutoTurnBudget === true
+                ? null
+                : this.autoTurnStateByRun.get(runId);
+            if (!state) {
+                state = { used: explicitUsed, limit: explicitLimit || requestedLimit };
+                this.autoTurnStateByRun.set(runId, state);
+            } else if (explicit) {
+                state.used = Math.max(state.used, explicitUsed);
+                state.limit = Math.max(state.limit, explicitLimit || requestedLimit);
+            }
+        } else {
+            state = this.legacyAutoTurnState;
+            if (!state.limit) state.limit = explicitLimit || requestedLimit;
+            if (explicit) {
+                state.used = Math.max(state.used, explicitUsed);
+                state.limit = Math.max(state.limit, explicitLimit || requestedLimit);
+            }
+        }
+        if (state.used >= state.limit) {
+            return { runId, goalMode, allowed: false, used: state.used, limit: state.limit };
+        }
+        state.used += 1;
+        return { runId, goalMode, allowed: true, used: state.used, limit: state.limit };
+    }
+
     destroy() {
         for (const state of this.userBuffers.values()) {
             if (state && state.timer) clearTimeout(state.timer);
         }
         this.userBuffers.clear();
         this.lastUserTurnByChat.clear();
+        this.autoTurnStateByRun.clear();
         for (const task of this.queue) {
             this._settleQueueCompletion(task && task.completion);
         }
@@ -63,6 +123,9 @@ class ConversationManager {
         if (this._healthCheckInterval) {
             clearInterval(this._healthCheckInterval);
             this._healthCheckInterval = null;
+        }
+        if (this.controller?.convoManager === this) {
+            delete this.controller.convoManager;
         }
     }
 
@@ -94,13 +157,13 @@ class ConversationManager {
         // store before entering this queue, so the UI can remain writable while
         // Edge handles the preceding turn.
         const m365WorkspaceQueueEnabled = !localContextEnabled
-            && options.allowM365Queue === true
-            && Boolean(ctx && ctx.workspaceConversationId);
+            && Boolean(ctx && ctx.workspaceConversationId)
+            && (options.allowM365Queue === true || options.isSystemFeedback === true);
         if (!localContextEnabled
             && !m365WorkspaceQueueEnabled
             && (this.isProcessing || this.queue.length > 0 || this.userBuffers.size > 0)) {
             if (ctx && typeof ctx.reply === 'function') {
-                await ctx.reply('⚠️ M365 Web POC 正在處理上一則訊息；安全模式不保存額外待處理內容，請稍後重新送出。');
+                await ctx.reply('⚠️ 上一則訊息仍在處理中，這一則尚未加入；請稍候再試。');
             }
             return;
         }
@@ -111,13 +174,7 @@ class ConversationManager {
                 ? `⚡ [Dialogue Queue] 高優先級請求繞過防抖機制 (${chatId}): "${text.substring(0, 15)}..."`
                 : `🛡️ [Dialogue Queue] M365 POC 高優先級純文字 (${chatId}, ${String(text || '').length} chars)`);
 
-            // 🎯 [v9.1.15] Reset or increment auto turn count
-            if (options.isSystemFeedback) {
-                this.autoTurnCount++;
-                console.log(`🔄 [Dialogue Queue] 自動模式回合數: ${this.autoTurnCount}/${Number(options.maxAutoTurns || ConfigManager.CONFIG.MAX_AUTO_TURNS || 5)}`);
-            } else {
-                this.autoTurnCount = 0;
-            }
+            if (!options.isSystemFeedback) this._resetAutoTurnStateForUser(ctx, options);
 
             if (options.waitForCompletion === true) {
                 const queueOptions = { ...options };
@@ -152,8 +209,7 @@ class ConversationManager {
             : `🛡️ [Dialogue Queue] M365 POC 收到純文字 (${chatId}, ${String(text || '').length} chars)`);
         if (userState.timer) clearTimeout(userState.timer);
         userState.timer = setTimeout(() => {
-            // 🎯 [v9.1.15] User messages coming through debounce also reset the counter
-            this.autoTurnCount = 0;
+            this._resetAutoTurnStateForUser(userState.ctx, userState.options);
             this._commitToQueue(chatId);
         }, this.DEBOUNCE_MS);
         this.userBuffers.set(chatId, userState);
@@ -257,27 +313,54 @@ class ConversationManager {
     async _processQueue() {
         if (this.isProcessing || this.queue.length === 0) return;
 
-        // 🎯 [v9.1.15] Enforce Max Auto Turns limit
         const nextTask = this.queue[0];
-        const maxTurns = Math.max(1, Number(nextTask?.options?.maxAutoTurns || ConfigManager.CONFIG.MAX_AUTO_TURNS || 5));
-        if (this.autoTurnCount >= maxTurns) {
-            const lastTask = this.queue[0];
-            if (lastTask && lastTask.options && lastTask.options.isSystemFeedback) {
-                console.warn(`🛑 [Dialogue Queue] 已達到自動模式回合上限 (${maxTurns})，停止自動循環。`);
-                this.queue.shift(); // Remove the system feedback task
+        if (nextTask?.options?.isSystemFeedback === true) {
+            const budget = this._autoTurnBudget(nextTask);
+            if (!budget.allowed) {
+                const deferredTask = this.queue.shift();
+                console.warn(`⏸️ [Dialogue Queue] 自動回合額度已用完 (${budget.used}/${budget.limit})，保存下一回合並等待使用者。`);
+                let saved = false;
                 try {
-                    await lastTask.ctx.reply(`⚠️ **自動執行已中止**\n已達到連續自動執行上限 (\`${maxTurns}\` 回合)。為了安全起見，請手動介入確認或重新下達指令。`, { parse_mode: 'Markdown' });
+                    if (budget.runId && typeof deferredTask.ctx?.onAutoTurnLimit === 'function') {
+                        await deferredTask.ctx.onAutoTurnLimit({
+                            runId: budget.runId,
+                            pendingPrompt: deferredTask.text,
+                            used: budget.used,
+                            limit: budget.limit,
+                            nextLimit: budget.limit + 1,
+                        });
+                        saved = true;
+                    }
+                    await deferredTask.ctx.reply(
+                        saved
+                            ? `⏸️ **自動執行已暫停**\n目前工作與下一回合已保存。按「再執行 1 回合」後，上限會由 ${budget.limit} 增加為 ${budget.limit + 1}。`
+                            : `⏸️ **自動執行已暫停**\n已使用 ${budget.limit} 個自動回合；請由使用者確認後再繼續。`,
+                        { parse_mode: 'Markdown' }
+                    );
+                } catch (error) {
+                    console.error('[Dialogue Queue] Failed to persist the auto-turn pause:', error);
+                    await deferredTask.ctx.reply('⚠️ 自動工作已安全暫停，但續接狀態保存失敗；請先核對工作狀態。').catch(() => undefined);
                 } finally {
-                    this._settleQueueCompletion(lastTask.completion);
+                    this._settleQueueCompletion(deferredTask.completion);
                 }
-                this.autoTurnCount = 0; // Reset for next user interaction
                 this._processQueue();
                 return;
             }
+            console.log(`🔄 [Dialogue Queue] 自動模式回合數: ${budget.used}/${budget.limit}`);
         }
 
         this.isProcessing = true;
         const task = this.queue.shift();
+        const isSystemFeedback = task.options && task.options.isSystemFeedback === true;
+        const transportMeta = {
+            isSystemFeedback,
+            protocolRequestId: task.options?.protocolRequestId || task.ctx?.workspaceProtocolRequestId || null,
+            workspaceRunId: task.options?.workspaceRunId || task.ctx?.workspaceRunId || null,
+            workspaceStepId: task.options?.workspaceStepId || task.ctx?.workspaceStepId || null,
+            workspacePlanId: task.options?.workspacePlanId || task.ctx?.workspacePlanId || null,
+            workspacePlanStepId: task.options?.workspacePlanStepId || task.ctx?.workspacePlanStepId || null,
+            workspaceActionId: task.options?.workspaceActionId || task.ctx?.workspaceActionId || null,
+        };
         this._logQueueState('dequeue_start');
 
         // 🧹 [Extra Arch 3] Memory Guard 記憶體上限監控
@@ -293,9 +376,8 @@ class ConversationManager {
         try {
             console.log(`🚀 [Dialogue Queue:${this.golemId}] 從隊列取出，開始處理對話...`);
             if (task.ctx && typeof task.ctx.onTransportStart === 'function') {
-                await task.ctx.onTransportStart();
+                await task.ctx.onTransportStart(transportMeta);
             }
-            const isSystemFeedback = task.options && task.options.isSystemFeedback === true;
             const localContextEnabled = typeof this.brain.isLocalContextEnabled === 'function'
                 ? this.brain.isLocalContextEnabled()
                 : true;
@@ -394,7 +476,7 @@ class ConversationManager {
                 preferredSkillActions: task.ctx && Array.isArray(task.ctx.preferredSkillActions) ? task.ctx.preferredSkillActions : [],
                 preferredMcpServers: task.ctx && Array.isArray(task.ctx.preferredMcpServers) ? task.ctx.preferredMcpServers : [],
                 onSendAccepted: task.ctx && typeof task.ctx.onTransportAccepted === 'function'
-                    ? task.ctx.onTransportAccepted
+                    ? (acceptance) => task.ctx.onTransportAccepted(transportMeta, acceptance)
                     : undefined,
                 toolRoutingQuery: task.ctx && typeof task.ctx.toolRoutingQuery === 'string'
                     ? task.ctx.toolRoutingQuery
@@ -404,11 +486,11 @@ class ConversationManager {
 
             if (task.ctx && typeof task.ctx.onTransportComplete === 'function') {
                 try {
-                    await task.ctx.onTransportComplete(brainResponse);
+                    await task.ctx.onTransportComplete(brainResponse, transportMeta);
                 } catch (hookError) {
                     console.error(`❌ [Dialogue Queue:${this.golemId}] M365 transport persistence hook failed:`, hookError);
                     if (typeof task.ctx.onPersistenceError === 'function') {
-                        await task.ctx.onPersistenceError(hookError).catch(() => undefined);
+                        await task.ctx.onPersistenceError(hookError, transportMeta).catch(() => undefined);
                     }
                 }
             }
@@ -461,12 +543,17 @@ class ConversationManager {
                 workspacePlanId: task.options.workspacePlanId || task.ctx?.workspacePlanId || null,
                 workspacePlanRevision: Number(task.options.workspacePlanRevision || task.ctx?.workspacePlanRevision || 0),
                 workspacePlanStepId: task.options.workspacePlanStepId || task.ctx?.workspacePlanStepId || null,
-                workspaceActionId: task.options.workspaceActionId || task.ctx?.workspaceActionId || null
+                workspaceActionId: task.options.workspaceActionId || task.ctx?.workspaceActionId || null,
+                m365ProjectMemoryRequired: task.options.m365ProjectMemoryRequired === true
+                    || task.ctx?.workspaceProjectMemoryRequired === true,
+                projectMemoryRepairAttempt: Number(task.options.projectMemoryRepairAttempt || 0),
+                m365ToolRoute: brainResponse?.m365ToolRoute || null,
+                goalMode: task.options.goalMode === true || task.ctx?.workspaceGoalMode === true,
             });
         } catch (e) {
             console.error(`❌ [Dialogue Queue:${this.golemId}] 處理失敗:`, e);
             if (task.ctx && typeof task.ctx.onTransportError === 'function') {
-                await task.ctx.onTransportError(e).catch((hookError) => {
+                await task.ctx.onTransportError(e, transportMeta).catch((hookError) => {
                     console.error(`❌ [Dialogue Queue:${this.golemId}] M365 transport error hook failed:`, hookError);
                 });
             }

@@ -11,6 +11,7 @@ const mockFs = {
         writeFile: jest.fn(),
     },
 };
+const path = require('path');
 
 jest.mock('fs', () => mockFs);
 jest.mock('../src/skills/modules/log-archive/index.js', () => ({
@@ -193,7 +194,7 @@ describe('AutonomyManager', () => {
         expect(mockBrain.sendMessage).toHaveBeenCalled();
         expect(NeuroShunter.dispatch).toHaveBeenCalled();
         expect(fs.writeFileSync).toHaveBeenCalledWith(
-            '/tmp/logs/reflection_state.json',
+            path.join('/tmp/logs', 'reflection_state.json'),
             expect.stringContaining('lastSummaryHash')
         );
     });

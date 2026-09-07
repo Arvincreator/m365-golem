@@ -45,7 +45,6 @@ describe('M365-only API surface', () => {
         ['GET', '/api/skills'],
         ['GET', '/api/mcp/servers'],
         ['GET', '/api/persona'],
-        ['GET', '/api/memory/search'],
         ['GET', '/api/reference-files'],
         ['GET', '/api/config'],
         ['POST', '/api/upload'],
@@ -63,6 +62,8 @@ describe('M365-only API surface', () => {
         ['GET', '/api/stocks/2330'],
         ['POST', '/api/crypto/refresh'],
         ['GET', '/api/diary/entries'],
+        ['GET', '/api/memory/search'],
+        ['GET', '/api/memory-firewall/status'],
     ])('blocks retired module %s %s', async (method, route) => {
         expect(isAllowedM365ApiRequest(method, route)).toBe(false);
         const response = await fetch(`${baseUrl}${route}`, { method });

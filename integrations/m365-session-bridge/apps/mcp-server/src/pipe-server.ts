@@ -37,7 +37,7 @@ const offlineResponse = (message: string): PipeResponse => ({
 /**
  * MCP Server is normally the Named Pipe SERVER; the Edge native host connects
  * as a client. A desktop harness can start more than one MCP process for the
- * same configured server, though, so a later process becomes a local proxy
+ * same configured state channel, though, so a later process becomes a local proxy
  * client of the process that owns the pipe. This keeps every MCP instance on
  * the same Edge/native-host connection instead of silently reporting offline.
  */
@@ -61,7 +61,7 @@ export class NativeHostServer {
   listen(): void {
     this.server.on("error", (err) => {
       if (this.mode === "starting") {
-        // Another MCP process already owns the fixed pipe. Become a client of
+        // Another MCP process already owns this installation's pipe. Become a client of
         // that owner instead of leaving this process with a permanently-null
         // nativeSocket. The owner is responsible for the one Edge connection.
         this.mode = "proxy";

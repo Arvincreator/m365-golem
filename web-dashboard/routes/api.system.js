@@ -9,6 +9,7 @@ const OllamaClient = require('../../src/services/OllamaClient');
 const LMStudioClient = require('../../src/services/LMStudioClient');
 const { buildOperationGuard, auditSecurityEvent } = require('../server/security');
 const { buildBackupPayload, previewRestoreBackupPayload, restoreBackupPayload } = require('../../src/services/SystemBackupService');
+const SystemLogger = require('../../src/utils/SystemLogger');
 
 function normalizeMemoryMode(modeRaw) {
     const mode = String(modeRaw || '').trim().toLowerCase();
@@ -117,6 +118,7 @@ module.exports = function registerSystemRoutes(server) {
             };
 
             return res.json({
+                app: 'm365-golem',
                 hasGolems: liveCount > 0 || configuredCount > 0,
                 liveCount,
                 configuredCount,
@@ -444,19 +446,28 @@ module.exports = function registerSystemRoutes(server) {
     router.get('/api/system/log-info', (req, res) => {
         try {
             const logPath = path.resolve(process.cwd(), 'logs', 'system.log');
-            if (!fs.existsSync(logPath)) {
-                return res.json({ success: true, size: '0 B', bytes: 0 });
-            }
-
-            const stats = fs.statSync(logPath);
-            const bytes = stats.size;
+            const logDir = path.dirname(logPath);
+            const bytes = fs.existsSync(logPath) ? fs.statSync(logPath).size : 0;
+            const archives = fs.existsSync(logDir)
+                ? fs.readdirSync(logDir).filter((name) => name.startsWith('system-') && name.endsWith('.log.gz'))
+                : [];
+            const archiveBytes = archives.reduce((sum, name) => {
+                try { return sum + fs.statSync(path.join(logDir, name)).size; } catch (_) { return sum; }
+            }, 0);
             let displaySize = `${bytes} B`;
             if (bytes > 1024 * 1024) {
                 displaySize = `${(bytes / (1024 * 1024)).toFixed(2)} MB`;
             } else if (bytes > 1024) {
                 displaySize = `${(bytes / 1024).toFixed(2)} KB`;
             }
-            return res.json({ success: true, size: displaySize, bytes });
+            return res.json({
+                success: true,
+                size: displaySize,
+                bytes,
+                archiveCount: archives.length,
+                archiveBytes,
+                retention: SystemLogger.getRetentionPolicy(),
+            });
         } catch (e) {
             console.error('[WebServer] Failed to get log info:', e);
             return res.status(500).json({ error: e.message });
@@ -685,6 +696,7 @@ module.exports = function registerSystemRoutes(server) {
         } catch { }
 
         res.json({
+            app: 'm365-golem',
             status: 'ok',
             uptime: process.uptime(),
             memory: process.memoryUsage(),

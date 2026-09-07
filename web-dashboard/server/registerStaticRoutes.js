@@ -31,9 +31,21 @@ module.exports = function registerStaticRoutes(server) {
             '/dashboard/crypto',
             '/dashboard/diary',
         ]);
+        const removedPages = new Set([
+            '/dashboard/agents',
+            '/dashboard/agents/create',
+            '/dashboard/memory',
+            '/dashboard/memory-firewall',
+            '/dashboard/office',
+            '/dashboard/prompt-trends',
+            '/dashboard/reference-files',
+            '/dashboard/system-setup',
+            '/dashboard/setup',
+        ]);
         server.app.get(/^\/dashboard(?:\/.*)?$/, (req, res, next) => {
             const normalized = req.path.replace(/\.(?:html|txt)$/, '').replace(/\/$/, '') || '/dashboard';
-            if (retiredPages.has(normalized)) return res.redirect('/dashboard/projects');
+            if (retiredPages.has(normalized)) return res.redirect('/dashboard/chat');
+            if (removedPages.has(normalized)) return res.status(404).send('This feature is not available in M365 Golem.');
             return next();
         });
         server.app.use('/api/files', (req, res) => res.status(404).json({
@@ -115,24 +127,17 @@ module.exports = function registerStaticRoutes(server) {
 
     const dashboardRoutes = m365Only ? [
         '/dashboard',
-        '/dashboard/projects',
         '/dashboard/chat',
         '/dashboard/terminal',
-        '/dashboard/agents',
-        '/dashboard/memory',
-        '/dashboard/memory-firewall',
-        '/dashboard/office',
         '/dashboard/mcp',
+        '/dashboard/m365-bridge',
         '/dashboard/persona',
         '/dashboard/prompt-pool',
-        '/dashboard/prompt-trends',
         '/dashboard/settings',
-        '/dashboard/setup',
         '/dashboard/skills',
         '/dashboard/calendar',
         '/dashboard/action-gate',
-        '/dashboard/reference-files',
-        '/dashboard/system-setup',
+        '/dashboard/knowledge-sources',
         '/dashboard/login',
     ] : [
         '/dashboard',

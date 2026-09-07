@@ -1,13 +1,13 @@
 {
   "id": "actor",
   "name": "Actor",
-  "description": "",
+  "description": "更新或還原 Golem 在目前工作空間使用的人格設定。",
   "type": "core",
   "enabled": true,
   "action": "actor",
-  "entry": null,
+  "entry": "index.js",
   "prompt": "skill.md",
   "toolsets": [],
-  "triggers": [],
+  "triggers": ["人格", "稱呼", "角色", "語氣", "persona"],
   "version": "1.0.0"
 }

@@ -86,6 +86,12 @@ class PageInteractor {
             // 0. 確保頁面處於空閒狀態 (避免前一則訊息還在發送中)
             await this._waitForReady(selectors.send, options);
 
+            // 0.5 將這一則佇列訊息快照的模式同步到 M365 原生控制項。
+            // 切換未經可見頁面確認時必須停在輸入前，避免用錯模式送出。
+            if (this.backendDefinition.id === 'm365-web' && options.m365ResponseMode) {
+                await this._ensureM365ResponseMode(options.m365ResponseMode);
+            }
+
             // 1. 捕獲基準文字
             const baseline = await this._captureBaseline(selectors.response);
 
@@ -154,6 +160,7 @@ class PageInteractor {
                 // answer. They remain remote links; the harness does not fetch
                 // them with hidden APIs or browser cookies.
                 responseOptions.extractAttachments = true;
+                responseOptions.extractSourceLinks = true;
                 responseOptions.diagnosticSelectors = Array.isArray(this.backendDefinition.responseDiagnosticSelectors)
                     ? this.backendDefinition.responseDiagnosticSelectors
                     : [];
@@ -225,6 +232,202 @@ class PageInteractor {
     }
 
     // ─── Private Methods ─────────────────────────────────────
+
+    async _ensureM365ResponseMode(requestedMode) {
+        const mode = String(requestedMode || '').trim().toLowerCase();
+        const modeSpecs = {
+            auto: {
+                label: '自動',
+                patterns: [/^自動(?:\s|$)/i, /^auto(?:\s|$)/i],
+            },
+            quick: {
+                label: '快速回應',
+                patterns: [/^快速回應(?:\s|$)/i, /^quick response(?:\s|$)/i],
+            },
+            thoughtful: {
+                label: '深度思考',
+                patterns: [/^深度思考(?:\s|$)/i, /^think deeper(?:\s|$)/i, /^deep thinking(?:\s|$)/i],
+            },
+        };
+        const requestedSpec = modeSpecs[mode];
+        if (!requestedSpec) {
+            const error = new Error('不支援的 Microsoft 365 Copilot 回覆模式；訊息尚未送出。');
+            error.code = 'M365_RESPONSE_MODE_INVALID';
+            throw error;
+        }
+        if (!this.page || typeof this.page.locator !== 'function') {
+            const error = new Error(`無法讀取 Microsoft 365 Copilot 的回覆模式控制項，因此不能確認「${requestedSpec.label}」；訊息尚未送出。`);
+            error.code = 'M365_RESPONSE_MODE_UNAVAILABLE';
+            throw error;
+        }
+
+        const normalizeText = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+        const identifyMode = (value) => {
+            const text = normalizeText(value);
+            return Object.entries(modeSpecs).find(([, spec]) => (
+                spec.patterns.some((pattern) => pattern.test(text))
+            ))?.[0] || null;
+        };
+        const selectorContract = this.backendDefinition.responseModeSelectors || {};
+        const triggerSelectors = (Array.isArray(selectorContract.trigger)
+            ? selectorContract.trigger
+            : ['#gptModeSwitcher'])
+            .filter(Boolean);
+        const triggerSelector = triggerSelectors.join(', ');
+        const optionSelector = String(selectorContract.option || '[role="menuitemradio"]');
+        const configuredWaitMs = Number(selectorContract.waitTimeoutMs);
+        const triggerWaitMs = Number.isFinite(configuredWaitMs) && configuredWaitMs > 0
+            ? Math.min(15000, configuredWaitMs)
+            : 6000;
+        const configuredPollMs = Number(selectorContract.pollIntervalMs);
+        const pollIntervalMs = Number.isFinite(configuredPollMs) && configuredPollMs > 0
+            ? Math.min(1000, configuredPollMs)
+            : 100;
+        const sleep = (ms = pollIntervalMs) => new Promise((resolve) => setTimeout(resolve, ms));
+
+        // The composer can become ready slightly before the page header finishes
+        // re-rendering its model-depth control. Treat that as transient loading,
+        // not as a permanent UI change, while still failing before any text is typed.
+        const triggerStartedAt = Date.now();
+        let trigger = null;
+        let triggerCount = 0;
+        do {
+            const triggers = this.page.locator(triggerSelector);
+            triggerCount = await triggers.count().catch(() => 0);
+            for (let index = triggerCount - 1; index >= 0; index -= 1) {
+                const candidate = triggers.nth(index);
+                if (await candidate.isVisible().catch(() => false)) {
+                    trigger = candidate;
+                    break;
+                }
+            }
+            if (trigger || Date.now() - triggerStartedAt >= triggerWaitMs) break;
+            await sleep();
+        } while (true);
+        if (!trigger) {
+            const error = new Error(`Microsoft 365 Copilot 的回覆模式按鈕目前不可用，無法確認「${requestedSpec.label}」；訊息尚未送出。`);
+            error.code = 'M365_RESPONSE_MODE_UNAVAILABLE';
+            error.diagnostics = {
+                requested: mode,
+                selectorCount: triggerCount,
+                waitedMs: Date.now() - triggerStartedAt,
+            };
+            throw error;
+        }
+
+        const readTrigger = async () => normalizeText([
+            await trigger.innerText().catch(() => ''),
+            await trigger.getAttribute('aria-label').catch(() => ''),
+        ].filter(Boolean).join(' '));
+        let triggerText = await readTrigger();
+        let observedMode = identifyMode(triggerText);
+        const readVisibleOptions = async () => {
+            const options = this.page.locator(optionSelector);
+            const optionCount = await options.count().catch(() => 0);
+            const visible = [];
+            const labels = [];
+            for (let index = 0; index < optionCount; index += 1) {
+                const option = options.nth(index);
+                if (!await option.isVisible().catch(() => false)) continue;
+                const label = normalizeText([
+                    await option.innerText().catch(() => ''),
+                    await option.getAttribute('aria-label').catch(() => ''),
+                ].filter(Boolean).join(' '));
+                visible.push(option);
+                if (label) labels.push(label.slice(0, 100));
+            }
+            return { visible, labels };
+        };
+        const isMenuOpen = async () => {
+            const ariaExpanded = await trigger.getAttribute('aria-expanded').catch(() => null);
+            if (ariaExpanded === 'true') return true;
+            if (ariaExpanded === 'false') return false;
+            return (await readVisibleOptions()).visible.length > 0;
+        };
+        const clickTrigger = async () => {
+            try {
+                await trigger.click({ timeout: 5000 });
+            } catch (cause) {
+                const error = new Error(`無法操作 Microsoft 365 Copilot 的回覆模式按鈕，因此不能確認「${requestedSpec.label}」；訊息尚未送出。`);
+                error.code = 'M365_RESPONSE_MODE_SWITCH_FAILED';
+                error.cause = cause;
+                throw error;
+            }
+        };
+
+        if (observedMode === mode) {
+            // A previous interrupted attempt may have left the menu open. Close
+            // it before the composer receives text so the overlay cannot steal input.
+            if (await isMenuOpen()) {
+                await clickTrigger();
+                const closeDeadline = Date.now() + 2000;
+                let menuOpen = true;
+                do {
+                    menuOpen = await isMenuOpen();
+                    if (!menuOpen) break;
+                    await sleep(50);
+                } while (Date.now() < closeDeadline);
+                if (menuOpen) {
+                    const error = new Error(`Microsoft 365 Copilot 的回覆模式選單無法收合，因此不能安全輸入訊息；訊息尚未送出。`);
+                    error.code = 'M365_RESPONSE_MODE_SWITCH_FAILED';
+                    throw error;
+                }
+            }
+            return { ok: true, requested: mode, observed: observedMode, changed: false };
+        }
+
+        if (!await isMenuOpen()) {
+            await clickTrigger();
+        }
+
+        const deadline = Date.now() + 5000;
+        let targetOption = null;
+        let candidateLabels = [];
+        do {
+            const menuState = await readVisibleOptions();
+            candidateLabels = menuState.labels;
+            for (let index = 0; index < menuState.visible.length; index += 1) {
+                const option = menuState.visible[index];
+                const label = normalizeText([
+                    await option.innerText().catch(() => ''),
+                    await option.getAttribute('aria-label').catch(() => ''),
+                ].filter(Boolean).join(' '));
+                if (!targetOption && identifyMode(label) === mode) targetOption = option;
+            }
+            if (targetOption) break;
+            await sleep();
+        } while (Date.now() < deadline);
+
+        if (!targetOption) {
+            if (await isMenuOpen()) await trigger.click({ timeout: 2000 }).catch(() => undefined);
+            const error = new Error(`Microsoft 365 Copilot 的回覆模式選單已變更，找不到「${requestedSpec.label}」；訊息尚未送出。`);
+            error.code = 'M365_RESPONSE_MODE_UNAVAILABLE';
+            error.diagnostics = { requested: mode, candidates: candidateLabels.slice(0, 6) };
+            throw error;
+        }
+
+        await targetOption.click({ timeout: 5000 }).catch((cause) => {
+            const error = new Error(`無法在 Microsoft 365 Copilot 切換到「${requestedSpec.label}」；訊息尚未送出。`);
+            error.code = 'M365_RESPONSE_MODE_SWITCH_FAILED';
+            error.cause = cause;
+            throw error;
+        });
+
+        const verifyDeadline = Date.now() + 5000;
+        do {
+            triggerText = await readTrigger();
+            observedMode = identifyMode(triggerText);
+            if (observedMode === mode) {
+                return { ok: true, requested: mode, observed: observedMode, changed: true };
+            }
+            await new Promise((resolve) => setTimeout(resolve, 100));
+        } while (Date.now() < verifyDeadline);
+
+        const error = new Error(`Microsoft 365 Copilot 沒有確認已切換到「${requestedSpec.label}」；訊息尚未送出。`);
+        error.code = 'M365_RESPONSE_MODE_SWITCH_FAILED';
+        error.diagnostics = { requested: mode, observed: observedMode, triggerText: triggerText.slice(0, 100) };
+        throw error;
+    }
 
     async _captureBaseline(responseSelector) {
         if (!responseSelector || responseSelector.trim() === "") {

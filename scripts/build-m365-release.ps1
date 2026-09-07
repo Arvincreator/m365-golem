@@ -52,6 +52,7 @@ $RootFiles = [System.Collections.Generic.HashSet[string]]::new([StringComparer]:
   'package-lock.json',
   'package.json',
   'README.md',
+  'Start-M365-Golem.vbs',
   'Start-Golem.bat'
 ) | ForEach-Object { [void]$RootFiles.Add($_) }
 
@@ -63,6 +64,7 @@ $AllowedScriptFiles = [System.Collections.Generic.HashSet[string]]::new([StringC
   'scripts/install-m365-golem.ps1',
   'scripts/install-m365-session-bridge.ps1',
   'scripts/select-workspace-folder.ps1',
+  'scripts/start-m365-golem.ps1',
   'scripts/runtime-check.js'
 ) | ForEach-Object { [void]$AllowedScriptFiles.Add($_) }
 
@@ -108,10 +110,12 @@ try {
 
   $Required = @(
     'Install-M365-Golem.bat',
+    'Start-M365-Golem.vbs',
     'Start-Golem.bat',
     'package.json',
     'package-lock.json',
     'scripts/select-workspace-folder.ps1',
+    'scripts/start-m365-golem.ps1',
     'src/services/M365AttachmentService.js',
     'web-dashboard/package.json',
     'web-dashboard/package-lock.json',

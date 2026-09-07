@@ -101,6 +101,7 @@ class MCPClient extends EventEmitter {
                         );
                         this._process = spawn(fallback.command, fallback.args, {
                             stdio: ['pipe', 'pipe', 'pipe'],
+                            windowsHide: true,
                             env
                         });
                         bindProcessHandlers();
@@ -138,6 +139,7 @@ class MCPClient extends EventEmitter {
 
             this._process = spawn(this.command, this.args, {
                 stdio: ['pipe', 'pipe', 'pipe'],
+                windowsHide: true,
                 env
             });
             bindProcessHandlers();

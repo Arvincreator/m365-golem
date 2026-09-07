@@ -1,4 +1,5 @@
 const ConversationManager = require('../src/core/ConversationManager');
+const ConfigManager = require('../src/config');
 
 describe('ConversationManager', () => {
     let cm;
@@ -66,6 +67,15 @@ describe('ConversationManager', () => {
         expect(cm.queue[0].text).toBe('priority');
     });
 
+    test('exposes its internal queue to protocol repair through the task controller', () => {
+        cm = new ConversationManager(mockBrain, mockShunter, mockController);
+        expect(mockController.convoManager).toBe(cm);
+
+        cm.destroy();
+        expect(mockController.convoManager).toBeUndefined();
+        cm = null;
+    });
+
     test('can wait until an attachment task has finished before releasing its staging lifecycle', async () => {
         let releaseTransport;
         mockBrain.sendMessage.mockImplementation(() => new Promise((resolve) => {
@@ -127,6 +137,24 @@ describe('ConversationManager', () => {
         expect(mockShunter.dispatch).toHaveBeenCalled();
     });
 
+    test('keeps the selected M365 response mode on the queued message snapshot', async () => {
+        cm = new ConversationManager(mockBrain, mockShunter, mockController);
+        cm.queue.push({
+            ctx: mockCtx,
+            text: 'queued prompt',
+            attachment: null,
+            options: { m365ResponseMode: 'thoughtful' },
+        });
+
+        await cm._processQueue();
+
+        expect(mockBrain.sendMessage).toHaveBeenCalledWith(
+            'queued prompt',
+            false,
+            expect.objectContaining({ m365ResponseMode: 'thoughtful' })
+        );
+    });
+
     test('should keep system feedback internal and skip user-visible input log', async () => {
         cm = new ConversationManager(mockBrain, mockShunter, mockController);
         const observation = '[System Observation]\n' + 'tool result '.repeat(500);
@@ -166,5 +194,250 @@ describe('ConversationManager', () => {
                 allowActions: false
             })
         );
+    });
+
+    test('keeps response routing metadata bound to the same protocol callback', async () => {
+        const toolRoute = { commandLane: { recommended: true, reason: 'local_project_artifact_authoring' } };
+        mockBrain.sendMessage.mockResolvedValue({
+            text: '[GOLEM_REPLY] AI Response',
+            attachments: [],
+            status: 'ENVELOPE_COMPLETE',
+            m365ToolRoute: toolRoute,
+        });
+        cm = new ConversationManager(mockBrain, mockShunter, mockController);
+        cm.queue.push({ ctx: mockCtx, text: '建立 Word', attachment: null, options: {} });
+
+        await cm._processQueue();
+
+        expect(mockShunter.dispatch).toHaveBeenCalledWith(
+            mockCtx,
+            expect.any(Object),
+            mockBrain,
+            mockController,
+            expect.objectContaining({ m365ToolRoute: toolRoute })
+        );
+    });
+
+    test('labels transport hooks for an internal Observation turn', async () => {
+        const onTransportStart = jest.fn().mockResolvedValue();
+        const onTransportAccepted = jest.fn().mockResolvedValue();
+        const onTransportComplete = jest.fn().mockResolvedValue();
+        mockCtx = {
+            ...mockCtx,
+            onTransportStart,
+            onTransportAccepted,
+            onTransportComplete,
+        };
+        mockBrain.sendMessage.mockImplementation(async (_text, _isSystem, options) => {
+            await options.onSendAccepted({ acceptedAt: 123 });
+            return {
+                text: '[GOLEM_REPLY] Continued',
+                attachments: [],
+                status: 'ENVELOPE_COMPLETE',
+            };
+        });
+        cm = new ConversationManager(mockBrain, mockShunter, mockController);
+        cm.queue.push({
+            ctx: mockCtx,
+            text: '[System Observation]\nAction completed.',
+            attachment: null,
+            options: {
+                isSystemFeedback: true,
+                workspaceRunId: 'run-1',
+                workspaceStepId: 'step-1',
+                protocolRequestId: 'protocol-1',
+            },
+        });
+
+        await cm._processQueue();
+
+        const expectedMeta = expect.objectContaining({
+            isSystemFeedback: true,
+            workspaceRunId: 'run-1',
+            workspaceStepId: 'step-1',
+            protocolRequestId: 'protocol-1',
+        });
+        expect(onTransportStart).toHaveBeenCalledWith(expectedMeta);
+        expect(onTransportAccepted).toHaveBeenCalledWith(expectedMeta, { acceptedAt: 123 });
+        expect(onTransportComplete).toHaveBeenCalledWith(expect.objectContaining({
+            text: '[GOLEM_REPLY] Continued',
+        }), expectedMeta);
+    });
+
+    test('labels a normal user turn separately from internal Observation turns', async () => {
+        const onTransportStart = jest.fn().mockResolvedValue();
+        const onTransportComplete = jest.fn().mockResolvedValue();
+        mockCtx = {
+            ...mockCtx,
+            onTransportStart,
+            onTransportComplete,
+        };
+        cm = new ConversationManager(mockBrain, mockShunter, mockController);
+        cm.queue.push({ ctx: mockCtx, text: 'normal turn', attachment: null, options: {} });
+
+        await cm._processQueue();
+
+        expect(onTransportStart).toHaveBeenCalledWith(expect.objectContaining({
+            isSystemFeedback: false,
+        }));
+        expect(onTransportComplete).toHaveBeenCalledWith(expect.any(Object), expect.objectContaining({
+            isSystemFeedback: false,
+        }));
+    });
+
+    test('preserves the internal Observation identity when transport start fails', async () => {
+        const error = new Error('Conversation requires reconciliation.');
+        error.code = 'M365_RECONCILIATION_REQUIRED';
+        const onTransportStart = jest.fn().mockRejectedValue(error);
+        const onTransportError = jest.fn().mockResolvedValue();
+        mockCtx = {
+            ...mockCtx,
+            onTransportStart,
+            onTransportError,
+        };
+        cm = new ConversationManager(mockBrain, mockShunter, mockController);
+        cm.queue.push({
+            ctx: mockCtx,
+            text: '[System Observation]\nContinue the plan.',
+            attachment: null,
+            options: {
+                isSystemFeedback: true,
+                workspaceRunId: 'run-1',
+                workspaceStepId: 'step-1',
+            },
+        });
+
+        await cm._processQueue();
+
+        expect(onTransportError).toHaveBeenCalledWith(error, expect.objectContaining({
+            isSystemFeedback: true,
+            workspaceRunId: 'run-1',
+            workspaceStepId: 'step-1',
+        }));
+        expect(mockBrain.sendMessage).not.toHaveBeenCalled();
+    });
+
+    test('saves the exact next internal turn at the cap and grants exactly one more turn', async () => {
+        const originalLimit = ConfigManager.CONFIG.MAX_AUTO_TURNS;
+        ConfigManager.CONFIG.MAX_AUTO_TURNS = 2;
+        const onAutoTurnLimit = jest.fn().mockResolvedValue();
+        mockCtx = {
+            ...mockCtx,
+            workspaceRunId: 'run-soft-cap',
+            onAutoTurnLimit,
+        };
+        cm = new ConversationManager(mockBrain, mockShunter, mockController);
+
+        try {
+            for (const text of ['Observation one', 'Observation two']) {
+                cm.queue.push({
+                    ctx: mockCtx,
+                    text,
+                    attachment: null,
+                    options: { isSystemFeedback: true, workspaceRunId: 'run-soft-cap' },
+                });
+                await cm._processQueue();
+            }
+
+            cm.queue.push({
+                ctx: mockCtx,
+                text: 'Exact deferred observation',
+                attachment: null,
+                options: { isSystemFeedback: true, workspaceRunId: 'run-soft-cap' },
+            });
+            await cm._processQueue();
+
+            expect(mockBrain.sendMessage).toHaveBeenCalledTimes(2);
+            expect(onAutoTurnLimit).toHaveBeenCalledWith({
+                runId: 'run-soft-cap',
+                pendingPrompt: 'Exact deferred observation',
+                used: 2,
+                limit: 2,
+                nextLimit: 3,
+            });
+            expect(mockCtx.reply).toHaveBeenCalledWith(
+                expect.stringContaining('上限會由 2 增加為 3'),
+                expect.any(Object)
+            );
+
+            cm.queue.push({
+                ctx: mockCtx,
+                text: 'Exact deferred observation',
+                attachment: null,
+                options: {
+                    isSystemFeedback: true,
+                    workspaceRunId: 'run-soft-cap',
+                    autoTurnBudget: { used: 2, limit: 3 },
+                },
+            });
+            await cm._processQueue();
+
+            expect(mockBrain.sendMessage).toHaveBeenCalledTimes(3);
+            expect(mockBrain.sendMessage).toHaveBeenLastCalledWith(
+                'Exact deferred observation',
+                false,
+                expect.objectContaining({ isSystemFeedback: true })
+            );
+            expect(onAutoTurnLimit).toHaveBeenCalledTimes(1);
+        } finally {
+            ConfigManager.CONFIG.MAX_AUTO_TURNS = originalLimit;
+        }
+    });
+
+    test('does not apply the fixed automatic-turn cap to Goal mode', async () => {
+        const originalLimit = ConfigManager.CONFIG.MAX_AUTO_TURNS;
+        ConfigManager.CONFIG.MAX_AUTO_TURNS = 1;
+        const onAutoTurnLimit = jest.fn().mockResolvedValue();
+        mockCtx = {
+            ...mockCtx,
+            workspaceRunId: 'run-goal',
+            workspaceGoalMode: true,
+            onAutoTurnLimit,
+        };
+        cm = new ConversationManager(mockBrain, mockShunter, mockController);
+
+        try {
+            for (const text of ['Goal observation one', 'Goal observation two', 'Goal observation three']) {
+                cm.queue.push({
+                    ctx: mockCtx,
+                    text,
+                    attachment: null,
+                    options: { isSystemFeedback: true, workspaceRunId: 'run-goal', goalMode: true },
+                });
+                await cm._processQueue();
+            }
+
+            expect(mockBrain.sendMessage).toHaveBeenCalledTimes(3);
+            expect(onAutoTurnLimit).not.toHaveBeenCalled();
+        } finally {
+            ConfigManager.CONFIG.MAX_AUTO_TURNS = originalLimit;
+        }
+    });
+
+    test('resets a run budget when a real user turn asks Copilot to replan it', async () => {
+        const originalLimit = ConfigManager.CONFIG.MAX_AUTO_TURNS;
+        ConfigManager.CONFIG.MAX_AUTO_TURNS = 2;
+        mockCtx = { ...mockCtx, workspaceRunId: 'run-user-replan' };
+        cm = new ConversationManager(mockBrain, mockShunter, mockController);
+        cm.autoTurnStateByRun.set('run-user-replan', { used: 5, limit: 5 });
+
+        try {
+            cm.queue.push({
+                ctx: mockCtx,
+                text: 'Replan from the newest user message',
+                attachment: null,
+                options: {
+                    isSystemFeedback: true,
+                    workspaceRunId: 'run-user-replan',
+                    resetAutoTurnBudget: true,
+                },
+            });
+            await cm._processQueue();
+
+            expect(mockBrain.sendMessage).toHaveBeenCalledTimes(1);
+            expect(cm.autoTurnStateByRun.get('run-user-replan')).toEqual({ used: 1, limit: 2 });
+        } finally {
+            ConfigManager.CONFIG.MAX_AUTO_TURNS = originalLimit;
+        }
     });
 });

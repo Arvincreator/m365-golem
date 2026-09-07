@@ -1,5 +1,7 @@
 # 🖥️ Project Golem Web Dashboard 使用說明
 
+> **歷史文件**：本頁描述原始 Project Golem Dashboard，包含 M365 版已退役的 Telegram、Discord、多代理與全域記憶畫面。M365 Golem 的目前入口、功能與安全邊界請以根目錄 `README.md` 及 `docs/M365-COPILOT-WEB-POC.zh-TW.md` 為準；請勿把本頁當成目前可用功能清單。
+
 > 最後更新：2026-03-24  
 > Dashboard 技術棧：Next.js (Static Export) + Tailwind CSS + Socket.IO
 
