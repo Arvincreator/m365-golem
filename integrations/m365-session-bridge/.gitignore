@@ -11,4 +11,5 @@ logs/
 apps/edge-extension/manifest.json
 apps/native-host/native-host-manifest.json
 apps/native-host/node-path.local.txt
+apps/native-host/secret-path.local.txt
 .env

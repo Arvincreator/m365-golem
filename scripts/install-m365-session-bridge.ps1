@@ -60,6 +60,7 @@ $ExtensionDistPath = Join-Path $BridgeRoot 'apps\edge-extension\dist'
 $NativeHostDir = Join-Path $BridgeRoot 'apps\native-host'
 $NativeHostRunner = Join-Path $NativeHostDir 'run-native-host.cmd'
 $NativeHostNodePath = Join-Path $NativeHostDir 'node-path.local.txt'
+$NativeHostSecretPath = Join-Path $NativeHostDir 'secret-path.local.txt'
 $NativeManifestTemplate = Join-Path $NativeHostDir 'native-host-manifest.template.json'
 $NativeManifestPath = Join-Path $NativeHostDir 'native-host-manifest.json'
 $FixedExtensionId = 'kfhagpcophihiigloppibgodojmgcajd'
@@ -78,7 +79,9 @@ if (-not $StateRoot) {
 $StateRoot = [System.IO.Path]::GetFullPath($StateRoot)
 $PolicyPath = Join-Path $StateRoot 'policy.json'
 $ActionLogPath = Join-Path $StateRoot 'logs\actions.jsonl'
-$SecretPath = Join-Path $StateRoot 'runtime\ipc-secret.json'
+# AppData can be virtualized by packaged MCP hosts even with an absolute path.
+# Pin an explicit user-profile path for both processes; keep policy/log locations unchanged.
+$SecretPath = Join-Path ([Environment]::GetFolderPath('UserProfile')) '.m365-golem\bridge-runtime\ipc-secret.json'
 
 Write-Step 'Checking the built-in bridge source and Node.js runtime'
 $requiredFiles = @(
@@ -172,6 +175,7 @@ if (-not (Test-Path -LiteralPath $ExtensionDistPath -PathType Container)) {
 
 Write-Step 'Generating the current-machine Native Messaging manifest'
 Write-Utf8NoBom -Path $NativeHostNodePath -Content $node.Source
+Write-Utf8NoBom -Path $NativeHostSecretPath -Content $SecretPath
 $nativeManifest = Get-Content -LiteralPath $NativeManifestTemplate -Raw -Encoding UTF8 | ConvertFrom-Json
 $nativeManifest.path = $NativeHostRunner
 $nativeManifestJson = $nativeManifest | ConvertTo-Json -Depth 20

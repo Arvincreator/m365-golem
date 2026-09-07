@@ -1,5 +1,6 @@
 const fs = require('fs');
 const path = require('path');
+const { execFileSync } = require('child_process');
 
 const ROOT = path.resolve(__dirname, '..');
 const BRIDGE_ROOT = path.join(ROOT, 'integrations', 'm365-session-bridge');
@@ -8,16 +9,9 @@ function read(relativePath) {
     return fs.readFileSync(path.join(ROOT, relativePath), 'utf8');
 }
 
-function walkSourceFiles(directory) {
-    const output = [];
-    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-        if (entry.name === 'node_modules' || entry.name === 'dist') continue;
-        if (entry.name === 'manifest.json' || entry.name === 'native-host-manifest.json') continue;
-        const fullPath = path.join(directory, entry.name);
-        if (entry.isDirectory()) output.push(...walkSourceFiles(fullPath));
-        else output.push(fullPath);
-    }
-    return output;
+function sourceFiles() {
+    return execFileSync('git', ['ls-files', '--cached', '--others', '--exclude-standard', '-z', '--', 'integrations/m365-session-bridge'], { cwd: ROOT, encoding: 'utf8' })
+        .split('\0').filter(Boolean).map(file => path.join(ROOT, file));
 }
 
 describe('built-in M365 Session Bridge distribution', () => {
@@ -66,6 +60,9 @@ describe('built-in M365 Session Bridge distribution', () => {
         expect(installer).toContain("HKCU:\\Software\\Microsoft\\Edge\\NativeMessagingHosts\\m365_session_bridge");
         expect(installer).toContain("managedBy = 'm365-golem'");
         expect(installer).toContain('M365_BRIDGE_POLICY_PATH');
+        expect(installer).toContain("[Environment]::GetFolderPath('UserProfile')");
+        expect(installer).toContain('Write-Utf8NoBom -Path $NativeHostSecretPath -Content $SecretPath');
+        expect(read('integrations/m365-session-bridge/apps/native-host/run-native-host.cmd')).toContain('secret-path.local.txt');
         expect(installer).toContain("M365_BRIDGE_CONTROL_PORT = '43241'");
         expect(read('integrations/m365-session-bridge/packages/protocol/src/ipc.ts')).toContain('M365_BRIDGE_SECRET_PATH');
         expect(read('web-dashboard/server/m365BridgeControlProxy.js')).toContain('const DEFAULT_CONTROL_PORT = 43241');
@@ -107,14 +104,12 @@ describe('built-in M365 Session Bridge distribution', () => {
     });
 
     test('source bundle contains no developer tenant, personal path, or legacy host branding', () => {
-        const combined = walkSourceFiles(BRIDGE_ROOT)
-            .filter((file) => path.basename(file) !== 'package-lock.json')
-            .map((file) => fs.readFileSync(file, 'utf8'))
-            .join('\n');
-
-        expect(combined).not.toMatch(/arvin[._ -]?chen/i);
-        expect(combined).not.toMatch(/C:\\Users\\arvin/i);
-        expect(combined).not.toMatch(/Claude Desktop/i);
+        const violations = sourceFiles()
+            .filter(file => path.basename(file) !== 'package-lock.json')
+            .filter(file => /arvin[._ -]?chen|C:\\Users\\arvin|Claude Desktop/i.test(fs.readFileSync(file, 'utf8')))
+            .map(file => path.relative(ROOT, file));
+        // Report filenames only: a failed privacy check must not print file contents.
+        expect(violations).toEqual([]);
     });
 
     test('generated machine state and build output are ignored', () => {
@@ -125,6 +120,7 @@ describe('built-in M365 Session Bridge distribution', () => {
         expect(bridgeIgnore).toContain('config/policy.json');
         expect(bridgeIgnore).toContain('apps/native-host/native-host-manifest.json');
         expect(bridgeIgnore).toContain('apps/native-host/node-path.local.txt');
+        expect(bridgeIgnore).toContain('apps/native-host/secret-path.local.txt');
         expect(bridgeIgnore).toContain('apps/edge-extension/manifest.json');
     });
 });
