@@ -50,8 +50,44 @@ describe('M365 durable run coordinator', () => {
     });
 
     afterEach(async () => {
+        for (const timer of coordinator?.dispatchTimers?.values() || []) clearTimeout(timer);
         if (store) await store.close().catch(() => undefined);
         fs.rmSync(tempDir, { recursive: true, force: true });
+    });
+
+    test.each(['running', 'blocked'])('repairs a %s plan without action or blocker at most twice', async status => {
+        const plan = {
+            schemaVersion: 'golem_plan/1', planId: null, revision: 1,
+            goal: 'List workspace files', status, currentStepId: 'step_1',
+            completionCriteria: 'Verified file listing returned.',
+            steps: [{ id: 'step_1', title: 'List files', status: 'in_progress', doneWhen: 'Files listed' }],
+            question: '', approvalRequest: '', completionSummary: '',
+        };
+        const first = await coordinator.handleAutonomousPlan({ conversationId: conversation.id, plan, actions: [], actionCount: 0 });
+        expect(first.accepted).toBe(true);
+        expect((await store.getRun(first.runId)).status).toBe('QUEUED');
+        expect(await store.listRunSteps(first.runId)).toHaveLength(0);
+        coordinator._clearDispatchTimer(first.runId);
+        await coordinator._beginAutonomousContinuation(first.runId, { ...plan, revision: 1 }, '', 'MISSING_ACTION_REPAIR');
+        expect(server.dispatchM365WorkspaceMessage.mock.calls[0][0].message).toContain('No new tool was executed');
+        for (const revision of [2, 3]) {
+            await coordinator.handleAutonomousPlan({ conversationId: conversation.id, existingRunId: first.runId,
+                plan: { ...plan, planId: first.runId, revision }, actions: [], actionCount: 0 });
+            coordinator._clearDispatchTimer(first.runId);
+        }
+        expect((await store.getRun(first.runId)).status).toBe('BLOCKED');
+        expect(await store.listRunSteps(first.runId)).toHaveLength(0);
+    });
+
+    test('does not automatically repair an explicit blocker', async () => {
+        const result = await coordinator.handleAutonomousPlan({ conversationId: conversation.id,
+            plan: { schemaVersion: 'golem_plan/1', planId: null, revision: 1,
+                goal: 'List files', completionCriteria: 'Verified listing', status: 'blocked', currentStepId: 'step_1',
+                steps: [{ id: 'step_1', title: 'List files', status: 'blocked', doneWhen: 'Listed' }],
+                question: 'Access denied; owner permission required.', approvalRequest: '', completionSummary: '' },
+            actions: [], actionCount: 0 });
+        expect((await store.getRun(result.runId)).status).toBe('BLOCKED');
+        expect(coordinator.dispatchTimers.size).toBe(0);
     });
 
     async function createRun(maxSteps = 4) {

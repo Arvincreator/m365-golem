@@ -423,6 +423,10 @@ class M365RunCoordinator {
                 `Resume reason: ${reason}.`,
                 'Re-evaluate the saved plan. If status=running, emit exactly one GOLEM_ACTION for the current step. Otherwise return a valid non-running plan status.',
             ];
+            if (reason === 'MISSING_ACTION_REPAIR') lines.push(
+                'The previous response updated the plan but supplied no action and no concrete blocker. No new tool was executed. Lack of an observation for an unattempted step is not a blocker.',
+                'Using the existing goal and verified results, emit the next necessary GOLEM_ACTION with status=running. Do not repeat completed work. If genuinely blocked, specify the actual failure or missing input in question. Preserve approval and access boundaries.'
+            );
             if (userInput) lines.push('[USER_CONTINUATION_INPUT]', userInput, '[/USER_CONTINUATION_INPUT]');
             lines.push('[/GOLEM_PLAN_CONTROL]');
             dispatchInput = {
@@ -695,6 +699,28 @@ class M365RunCoordinator {
                 });
             }
 
+            const missingAction = actionCount === 0 && (plan.status === 'running'
+                || (plan.status === 'blocked' && !String(plan.question || '').trim()));
+            if (missingAction && ['RUNNING', 'QUEUED'].includes(run.status)) {
+                const previousSteps = await this.store.listRunSteps(run.id);
+                const lastStep = previousSteps[previousSteps.length - 1];
+                // Only repair a missing proposal, never retry an in-flight or failed operation.
+                if (!lastStep || lastStep.status === 'completed') {
+                    const events = await this.store.listRunEvents(run.id);
+                    const repairs = events.filter(event => event.eventType === 'autonomous_plan_action_repair').length;
+                    if (repairs < 2 && run.currentStep < run.maxSteps) {
+                        const storedPlan = planForStorage(plan, run.id);
+                        await this.store.appendRunEvent(run.id, 'autonomous_plan_received', { requestId, plan: storedPlan });
+                        await this.store.appendRunEvent(run.id, 'autonomous_plan_action_repair', { revision: plan.revision, attempt: repairs + 1 });
+                        if (run.status === 'RUNNING') await this.store.transitionRun(run.id, 'QUEUED', { reason: 'MISSING_ACTION_REPAIR' });
+                        this._scheduleAutonomousContinuation(run.id, storedPlan, '', 'MISSING_ACTION_REPAIR');
+                        return { accepted: true, allowActions: false, planMode: true, runId: run.id, planId: run.id, planRevision: plan.revision, maxActionDepth: run.maxSteps };
+                    }
+                    if (run.status === 'QUEUED') await this.store.transitionRun(run.id, 'RUNNING', { reason: 'MISSING_ACTION_REPAIR_LIMIT' });
+                    await this.store.transitionRun(run.id, 'BLOCKED', { reason: '模型連續未提出下一步動作，自動補正已達上限；請重試或調整任務。' });
+                    return this._planRejection('M365_PLAN_ACTION_REPAIR_LIMIT', '模型連續未提出下一步動作，自動補正已達上限。', { runId: run.id, planId: run.id, planRevision: latestRevision });
+                }
+            }
             const nonRunning = plan.status !== 'running';
             if ((nonRunning && actionCount !== 0) || (!nonRunning && actionCount !== 1)) {
                 return this._planRejection(

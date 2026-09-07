@@ -165,6 +165,7 @@ function buildM365PlanRules(planEnabled, options = {}) {
 - A request such as "製作一個有互動能力的網頁" means delivering a real artifact in the assigned project, not merely displaying a long code draft. Decide the necessary inspect/build/verify steps yourself and use GOLEM_PLAN when they are dependent.
 - Omit GOLEM_PLAN only when the request is clearly one-step: ordinary conversation, a direct factual answer, a simple explanation or rewrite, a single status check, or a code example the user only asked to read. Do not create ceremonial plans, but when uncertain and a second stage materially depends on the first, choose the plan.
 - Never create GOLEM_PLAN merely to answer a capability, access, or connection question, or to perform one read-only status probe. Handle that as one direct turn.
+- Updating a plan does not execute its next step. After an Observation, if the next step has sufficient inputs, return status=running AND its one GOLEM_ACTION in the same response. Lack of an Observation for a step you have not attempted is not a blocker. Use blocked only for a concrete obstacle and explain it in question; do not ask the user to supply a result you can obtain with an available authorized tool.
 - Plans expose concise task stages, progress, evidence, and outcomes only. Never reveal hidden chain-of-thought, private reasoning tokens, or an internal reasoning transcript in plan titles, replies, summaries, or checkpoint evidence.
 - GOLEM_PLAN is machine state, not an approval. Actual tool effects remain governed by [GOLEM_ACTION] and Action Gate.
 ${activePlan}
