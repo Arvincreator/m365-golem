@@ -213,6 +213,63 @@ describe('ToolRouter', () => {
         expect(router.route('請解釋互動式網頁是什麼').commandLane.recommended).toBe(false);
     });
 
+    test('uses semantic local authoring without requiring command keywords', async () => {
+        const router = new ToolRouter({ activeTools: [], toolVectorIndex: { search: jest.fn().mockResolvedValue([
+            { id: 'capability/local-authoring', score: 0.8 },
+        ]) } });
+        const query = '把剛剛那些整理成一份可以帶走的成品';
+        expect(router.route(query).commandLane.recommended).toBe(false);
+        const result = await router.routeAsync(query);
+        expect(result.commandLane.reason).toBe('local_project_artifact_authoring');
+        expect(result.diagnostics.commandSource).toBe('semantic');
+        expect(result.diagnostics.mode).toBe('hybrid');
+        expect(JSON.stringify(result.diagnostics)).not.toContain(query);
+    });
+
+    test.each(['請解釋文件製作的原理', '請在 SharePoint 建立報告', '使用本機資料在 SharePoint 建立 Word 報告'])(
+        'semantic similarity cannot turn an explanation or remote destination into local execution: %s', async query => {
+            const router = new ToolRouter({ activeTools: [], toolVectorIndex: { search: jest.fn().mockResolvedValue([
+                { id: 'capability/local-authoring', score: 0.95 },
+            ]) } });
+            expect((await router.routeAsync(query)).commandLane.recommended).toBe(false);
+        }
+    );
+
+    test('reports failed vector search while retaining keyword fallback', async () => {
+        const router = new ToolRouter({ activeTools: [], toolVectorIndex: { search: jest.fn().mockRejectedValue(new Error('private diagnostics')) } });
+        const result = await router.routeAsync('幫我在桌面建立 Word 報告');
+        expect(result.commandLane.recommended).toBe(true);
+        expect(result.diagnostics).toEqual(expect.objectContaining({mode: 'keyword_fallback', reason: 'vector_search_failed'}));
+        expect(JSON.stringify(result.diagnostics)).not.toContain('private diagnostics');
+    });
+
+    test('weak or non-finite semantic matches do not enable a local command', async () => {
+        const router = new ToolRouter({ activeTools: [], toolVectorIndex: { search: jest.fn().mockResolvedValue([
+            { id: 'capability/local-authoring', score: 0.4 }, { id: 'capability/local-inspection', score: NaN },
+        ]) } });
+        expect((await router.routeAsync('整理成一份可以帶走的成品')).commandLane.recommended).toBe(false);
+    });
+
+    test('reports a timeout without blocking the request indefinitely', async () => {
+        jest.useFakeTimers();
+        try {
+            const router = new ToolRouter({ activeTools: [], toolVectorIndex: { search: () => new Promise(() => {}) } });
+            const task = router.routeAsync('幫我在桌面建立 Word 報告');
+            await jest.advanceTimersByTimeAsync(2500);
+            expect((await task).diagnostics.reason).toBe('vector_timeout');
+        } finally { jest.useRealTimers(); }
+    });
+
+    test('does not select local authoring when native grounding is equally plausible', async () => {
+        const router = new ToolRouter({ activeTools: [], toolVectorIndex: { search: async () => [
+            {id:'capability/local-authoring',score:0.6}, {id:'capability/native-m365',score:0.61},
+        ] } });
+        const result = await router.routeAsync('找公司裡相關文件');
+        expect(result.commandLane.recommended).toBe(false);
+        expect(result.nativeGroundingSuggested).toBe(true);
+        expect(result.diagnostics.commandRejected).toBe('ambiguous_capability');
+    });
+
     test('uses vector matches and includes the selected skill usage guide', async () => {
         const toolVectorIndex = {
             search: jest.fn().mockResolvedValue([{ id: 'reference-files', score: 0.9 }])

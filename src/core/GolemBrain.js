@@ -1842,7 +1842,8 @@ class GolemBrain {
                     serverName: '',
                 }));
 
-            const allItems = [...skillItems, ...mcpItems, ...exampleItems];
+            const capabilityItems = require('../managers/ToolCapabilities');
+            const allItems = [...capabilityItems, ...skillItems, ...mcpItems, ...exampleItems];
             const currentIds = allItems.map(i => i.id);
 
             await this.toolVectorIndex.upsertMany(allItems);

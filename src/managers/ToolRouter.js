@@ -212,19 +212,29 @@ class ToolRouter {
     }
 
     async routeAsync(query, options = {}) {
-        // 若有向量索引，先做語意搜尋取得 boost 清單
-        let vectorBoostIds = new Set();
+        const vectorBoostIds = new Set();
+        const semanticMatches = [];
+        const diagnostics = { mode: 'keyword_fallback', reason: 'index_unavailable', matches: semanticMatches };
         if (this.toolVectorIndex) {
+            let timer;
             try {
-                const vectorResults = await this.toolVectorIndex.search(query, { limit: 10 });
-                for (const r of vectorResults) {
-                    if (r.score > 0.35) vectorBoostIds.add(r.id); // 相似度門檻
+                const results = await Promise.race([
+                    this.toolVectorIndex.search(query, { limit: 16, throwOnError: true, includeCapabilities: true }),
+                    new Promise((_, reject) => { timer = setTimeout(() => reject(Object.assign(new Error('Vector lookup timed out'), { code: 'VECTOR_TIMEOUT' })), 2500); }),
+                ]);
+                diagnostics.mode = 'hybrid';
+                diagnostics.reason = results.length ? 'vector_search_succeeded' : 'no_vector_matches';
+                for (const match of results) {
+                    if (Number.isFinite(match.score) && match.score > 0.35) {
+                        vectorBoostIds.add(match.id);
+                        semanticMatches.push({ id: match.id, score: match.score });
+                    }
                 }
-            } catch (e) {
-                console.warn(`[ToolRouter] 向量搜尋失敗，退回關鍵字模式: ${e.message}`);
-            }
+            } catch (error) {
+                diagnostics.reason = error.code === 'VECTOR_TIMEOUT' ? 'vector_timeout' : error.code === 'VECTOR_INDEX_EMPTY' ? 'index_empty' : 'vector_search_failed';
+            } finally { clearTimeout(timer); }
         }
-        return this.route(query, { ...options, vectorBoostIds });
+        return this.route(query, { ...options, vectorBoostIds, semanticMatches, diagnostics });
     }
 
     route(query, options = {}) {
@@ -362,9 +372,22 @@ class ToolRouter {
             ? []
             : intentMatchedMcpTools.slice(0, maxMcpTools);
 
-        const commandRecommended = requestClass.shouldRoute && isLikelyCommandTask(query);
+        const semanticLocal = (options.semanticMatches || [])
+            .filter(match => ['capability/local-authoring', 'capability/local-inspection'].includes(match.id) && match.score >= 0.55)
+            .sort((a, b) => b.score - a.score)[0];
+        const nativeScore = (options.semanticMatches || []).find(match => match.id === 'capability/native-m365')?.score || 0;
+        const remoteOnly = EXPLICIT_REMOTE_ARTIFACT_TARGET_RE.test(String(query || ''))
+            && !/(?:在|到|於|on|to).{0,8}(?:桌面|本機|本地|desktop|local)/i.test(String(query || ''));
+        const explanationOnly = requestClass.passive || (
+            /(?:解釋|說明|介紹|比較|explain).*(?:原理|概念|是什麼|concept|principle)/i.test(String(query || ''))
+            && !/(?:幫我|替我|直接|然後|並)/.test(String(query || ''))
+        );
+        const semanticCommand = !!semanticLocal && semanticLocal.score >= nativeScore + 0.03
+            && !explanationOnly && !requestClass.skillCatalog && !remoteOnly;
+        const keywordCommand = requestClass.shouldRoute && isLikelyCommandTask(query);
+        const commandRecommended = keywordCommand || semanticCommand;
         const localArtifactBuild = commandRecommended
-            && isLocalArtifactBuild(String(query || ''));
+            && (isLocalArtifactBuild(String(query || '')) || (semanticCommand && semanticLocal.id === 'capability/local-authoring'));
         const commandLane = {
             recommended: commandRecommended,
             reason: localArtifactBuild
@@ -382,6 +405,13 @@ class ToolRouter {
             connectorBoundary,
             mcpTools: routedMcpTools,
             commandLane,
+            diagnostics: {
+                ...(options.diagnostics || { mode: 'keyword_fallback', reason: 'synchronous_route', matches: [] }),
+                commandSource: semanticCommand ? 'semantic' : keywordCommand ? 'keyword' : 'none',
+                commandRejected: semanticLocal && !semanticCommand ? (explanationOnly ? 'explanation_only' : remoteOnly ? 'remote_destination' : requestClass.skillCatalog ? 'catalog_only' : 'ambiguous_capability') : null,
+                selectedTools: [...skills.map(item => item.id), ...routedMcpTools.map(item => item.id)],
+            },
+            nativeGroundingSuggested: nativeScore >= 0.55 && (nativeScore >= (semanticLocal?.score || 0) || M365_DATA_RE.test(String(query || ''))),
             slashCommands: loadCoreSlashCommands(),
             activeScene: this.activeScene,
         };
@@ -398,12 +428,16 @@ class ToolRouter {
     }
 
     _formatRoutingHint(result) {
+        this.lastDiagnostics = result.diagnostics;
+        // Tool IDs and scores only: never persist the user's query or source content here.
+        console.info('[ToolRouter:diagnostics]', JSON.stringify(result.diagnostics));
         if (
             result.skills.length === 0
             && result.mcpTools.length === 0
             && !result.commandLane.recommended
             && !result.catalogRequest?.skills
             && !result.connectorBoundary
+            && !result.nativeGroundingSuggested
         ) return '';
 
         const lines = [
@@ -411,6 +445,9 @@ class ToolRouter {
             `[System note: 以下是本輪依使用者訊息自動產生的工具建議。若任務符合，優先使用；若不符合，可以忽略。當工具能取得事實、操作外部系統或執行專門能力時，不要只用文字猜測。Active scene: ${result.activeScene}]`,
         ];
 
+        lines.push('- Retrieved capabilities are candidates, not proof of availability or authorization. Choose the next step from the actual user goal and available inputs. Inspect capabilities before promising outputs; retain all Action Gate checks.');
+        lines.push('- Separate native source retrieval, local authoring, and remote writes. Failure in one lane blocks only steps requiring its missing result. Use already available source content only within its visible evidence; never invent missing content.');
+        if (result.nativeGroundingSuggested) lines.push('- Native Microsoft 365 grounding may help this task if available in this session. This is not a callable Golem action; native research does not prove local file creation or remote writes.');
         if (result.catalogRequest?.skills) {
             lines.push(`Current available Skill catalog (${result.skillCatalog.length}; authoritative for this turn):`);
             if (result.skillCatalog.length === 0) {
@@ -440,12 +477,13 @@ class ToolRouter {
         }
 
         if (result.commandLane.recommended) {
+            if (result.diagnostics.commandSource === 'semantic') lines.push('- The local lane was retrieved semantically. Confirm that an actual local operation is requested; a similarity match alone must not trigger execution.');
             lines.push('Relevant command lane:');
             if (result.commandLane.reason === 'local_project_artifact_authoring') {
                 lines.push('- command: local project artifact creation or modification detected. Use the assigned project workspace to inspect, create/edit, and verify the real files; do not substitute a long inline draft unless the user explicitly asked only for a snippet.');
                 lines.push('- Local capability boundary: local document creation does not depend on a working SharePoint or OneDrive connection. If the source content is already visibly available, use it within its evidence limits. If required source content is missing, request only that missing input; do not claim all local authoring is unavailable.');
                 lines.push('- Inspect the actual local runtime and document libraries before choosing how to create a file. Honor an explicitly requested local destination, resolve its real path rather than guessing, avoid overwriting existing files, and verify the resulting file format and readable contents before reporting success. Never rename plain text to .docx or invent an installed document tool.');
-                lines.push('- Exact action shape: {"action":"command","parameter":"<one bounded native command>"}. Emit the smallest appropriate command action now. When the outcome needs dependent inspect/build/verify work, maintain GOLEM_PLAN and issue only its current bounded action.');
+                lines.push('- Exact action shape: {"action":"command","parameter":"<one bounded native command>"}. When the user requests execution, emit the smallest appropriate command action; an informational question does not authorize creating files. When the outcome needs dependent inspect/build/verify work, maintain GOLEM_PLAN and issue only its current bounded action.');
             } else {
                 lines.push('- command: local OS/repo operation detected. For the current Windows harness, inspect its working directory with this exact shell action: {"action":"command","parameter":"echo %CD%"}. Replace the command only when another native operation is required.');
                 lines.push('- The user already requested this read/list/inspect/check operation. Emit the smallest read-only command action now; do not merely say that you could propose it. The local approval gate will ask for confirmation.');
