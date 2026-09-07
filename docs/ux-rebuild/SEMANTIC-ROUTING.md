@@ -15,3 +15,13 @@
 - `node scripts/check-semantic-routing.cjs`：使用本機快取的 Transformers.js 中文模型，關閉模型網路下載；七個合成案例通過，包括未命中關鍵字的本機成果、Word、本機檢查、原生查找、遠端目的地、概念解釋與混合來源。
 - 另以真實 LanceDB 暫存索引驗證 cosine 查詢及能力保留查詢。沒有使用客戶內容，也沒有執行 Copilot 任務或租戶檔案操作。
 - 七個案例不代表完整工具庫準確率；仍需擴充失敗案例，驗證真實任務產出。後端重新啟動後，背景索引同步才會納入新能力；未就緒時診斷會顯示 fallback。
+# Resource discovery and recovery
+
+M365 action rules now require checking relevant resources before concluding inability:
+
+- `golem-check python` (also `golem_check`) locates an executable through PATH without a shell; no argument probes python, py, node and git. A lookup failure means unverified, not uninstalled. Version, imports and permissions still require task-specific checks.
+- `golem-check tools <task description>` asks the active brain's existing router for enabled Skill/MCP candidates and usage guides. It performs discovery only, preserves router filtering, and does not establish authentication or execute the discovered tools.
+- Local Python/Node scripts are allowed through the existing command lane when appropriate. They retain Action Gate authorization, must use verified runtimes and actual inputs, and must validate produced artifacts.
+- Failure handling separates missing inputs, runtime/package problems, argument errors, transport failures and access denials. Recovery is bounded to two changed/evidence-based retries; independent work can continue while a dependent step needs human assistance.
+
+Validation: ToolScanner, TaskController, ProtocolFormatter M365 and ToolRouter suites pass (58 tests). This is automated host/protocol validation; live Copilot selection and tenant file access still require a real session test after restarting the backend.

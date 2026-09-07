@@ -7,6 +7,19 @@ jest.mock('../src/core/Executor', () => {
 const TaskController = require('../src/core/TaskController');
 
 describe('TaskController', () => {
+    test('tool discovery returns selected guides without invoking shell or executing discovered tools', async () => {
+        const controller = new TaskController({ golemId: 'test-golem' });
+        const toolRouter = { buildRoutingHintAsync: jest.fn().mockResolvedValue('<tool-routing>selected guide</tool-routing>') };
+        try {
+            const result = await controller.runSequence({ brain: { toolRouter } }, [
+                { action: 'command', parameter: 'golem_check tools create a local document' },
+            ]);
+            expect(toolRouter.buildRoutingHintAsync).toHaveBeenCalledWith('create a local document');
+            expect(result).toContain('selected guide');
+            expect(result).toContain('no proposed tool has been executed');
+            expect(controller.internalExecutor).toBeFalsy();
+        } finally { controller.destroy(); }
+    });
     beforeEach(() => {
         delete process.env.COMMAND_WHITELIST;
         delete process.env.GOLEM_TRUST_SYSTEM_COMMANDS;

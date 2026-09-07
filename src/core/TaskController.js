@@ -145,9 +145,24 @@ class TaskController {
             }
 
             const risk = this.security.assess(cmdToRun);
-            if (cmdToRun.startsWith('golem-check')) {
-                const toolName = cmdToRun.split(' ')[1];
-                reportBuffer.push(toolName ? `🔍 [ToolCheck] ${ToolScanner.check(toolName)}` : `⚠️ 缺少參數`);
+            if (/^golem[-_]check(?:\s|$)/.test(cmdToRun)) {
+                const toolName = cmdToRun.replace(/^golem[-_]check\s*/, '').trim();
+                if (/^tools(?:\s|$)/.test(toolName)) {
+                    const query = toolName.slice(5).trim().slice(0, 1000);
+                    const router = (brain || ctx.brain)?.toolRouter;
+                    if (!query || !router?.buildRoutingHintAsync) {
+                        reportBuffer.push('[ToolCheck] Supply golem-check tools <task description>; resource router must be available. Availability remains unverified.');
+                    } else {
+                        try {
+                            const hint = await router.buildRoutingHintAsync(query);
+                            reportBuffer.push(`[ToolCheck] Discovery only; no proposed tool has been executed. Catalog entries do not prove connection or authorization.\n${hint || 'No matching enabled route found; this does not prove the resource is absent.'}`);
+                        } catch {
+                            reportBuffer.push('[ToolCheck] Resource discovery failed; availability remains unverified.');
+                        }
+                    }
+                } else {
+                    reportBuffer.push(`🔍 [ToolCheck] ${ToolScanner.check(toolName)}`);
+                }
                 continue;
             }
             const evaluatedLevel = this.security.evaluateCommandLevel(cmdToRun);
