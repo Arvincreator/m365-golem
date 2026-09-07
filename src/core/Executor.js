@@ -1,4 +1,48 @@
 const { spawn } = require('child_process');
+const { StringDecoder } = require('string_decoder');
+
+function looksLikeUtf16Le(buffer) {
+    if (buffer.length >= 2 && buffer[0] === 0xff && buffer[1] === 0xfe) return true;
+
+    const pairCount = Math.floor(Math.min(buffer.length, 128) / 2);
+    if (pairCount < 2) return false;
+
+    let oddNulls = 0;
+    let evenNulls = 0;
+    for (let index = 0; index < pairCount * 2; index += 2) {
+        if (buffer[index] === 0) evenNulls += 1;
+        if (buffer[index + 1] === 0) oddNulls += 1;
+    }
+
+    return oddNulls >= 2 && oddNulls / pairCount >= 0.3 && oddNulls > evenNulls;
+}
+
+function createOutputDecoder() {
+    let decoder = null;
+    let pending = Buffer.alloc(0);
+
+    const initialize = () => {
+        decoder = new StringDecoder(looksLikeUtf16Le(pending) ? 'utf16le' : 'utf8');
+        const text = decoder.write(pending);
+        pending = Buffer.alloc(0);
+        return text.replace(/^\ufeff/, '');
+    };
+
+    return {
+        write(data) {
+            const chunk = Buffer.isBuffer(data) ? data : Buffer.from(data);
+            if (decoder) return decoder.write(chunk);
+
+            pending = Buffer.concat([pending, chunk]);
+            if (pending.length < 6) return '';
+            return initialize();
+        },
+        end() {
+            const prefix = decoder ? '' : initialize();
+            return prefix + decoder.end();
+        },
+    };
+}
 
 class Executor {
     constructor() {
@@ -18,20 +62,29 @@ class Executor {
         return new Promise((resolve, reject) => {
             const cwd = options.cwd || process.cwd();
             const timeout = options.timeout !== undefined ? options.timeout : this.defaultTimeout;
+            const isWindows = process.platform === 'win32';
+            const commandToRun = isWindows ? (process.env.ComSpec || 'cmd.exe') : command;
+            const commandArgs = isWindows
+                ? ['/d', '/u', '/s', '/c', `chcp 65001>nul & ${command}`]
+                : [];
 
             console.log(`⚡ [Executor] Running: "${command}" in ${cwd}`);
 
             // 使用 spawn 啟動子進程
-            const child = spawn(command, [], {
-                shell: true,     // 允許使用 pipe (|) 和重導向 (>)
+            const child = spawn(commandToRun, commandArgs, {
+                shell: !isWindows, // Windows 由 cmd /c 處理 pipe 與重導向，並以 Unicode 回傳內建指令結果
                 cwd: cwd,        // 設定工作目錄
-                env: process.env, // 繼承原本的環境變數
+                env: process.platform === 'win32'
+                    ? { ...process.env, PYTHONIOENCODING: 'utf-8', PYTHONUTF8: '1' }
+                    : process.env,
                 windowsHide: true // Windows 上不顯示命令列視窗
             });
 
             let stdout = '';
             let stderr = '';
             let isDone = false; // 避免 timeout 後又觸發 close
+            const stdoutDecoder = createOutputDecoder();
+            const stderrDecoder = createOutputDecoder();
 
             // --- 設定超時計時器 ---
             let timer = null;
@@ -49,22 +102,22 @@ class Executor {
 
             // --- 處理標準輸出 ---
             child.stdout.on('data', (data) => {
-                const text = data.toString();
+                const text = stdoutDecoder.write(data);
                 stdout += text;
 
                 // 如果有設定即時回調 (例如送給前端 Socket)，就在這裡呼叫
-                if (options.onData && typeof options.onData === 'function') {
+                if (text && options.onData && typeof options.onData === 'function') {
                     options.onData(text);
                 }
             });
 
             // --- 處理錯誤輸出 ---
             child.stderr.on('data', (data) => {
-                const text = data.toString();
+                const text = stderrDecoder.write(data);
                 stderr += text;
 
                 // 錯誤訊息通常也要即時顯示
-                if (options.onData && typeof options.onData === 'function') {
+                if (text && options.onData && typeof options.onData === 'function') {
                     options.onData(text);
                 }
             });
@@ -83,6 +136,15 @@ class Executor {
                 if (!isDone) {
                     isDone = true;
                     if (timer) clearTimeout(timer); // 清除計時器
+
+                    const stdoutTail = stdoutDecoder.end();
+                    const stderrTail = stderrDecoder.end();
+                    stdout += stdoutTail;
+                    stderr += stderrTail;
+                    if (options.onData && typeof options.onData === 'function') {
+                        if (stdoutTail) options.onData(stdoutTail);
+                        if (stderrTail) options.onData(stderrTail);
+                    }
 
                     if (code !== 0) {
                         // 回傳詳細錯誤，讓 AI 知道發生什麼事

@@ -137,12 +137,25 @@ describe('NeuroShunter M365 safety gates', () => {
         expect(CommandHandler.execute).not.toHaveBeenCalled();
     });
 
-    test('balanced mode auto-runs only a safe L0 native command', async () => {
+    test('balanced mode describes the actual action instead of the plan-step title', async () => {
         Object.assign(process.env, getAutomationModePreset('balanced'));
         const ctx = {
             reply: jest.fn().mockResolvedValue(),
             shouldMentionSender: false,
             platform: 'web',
+            workspaceConversationId: 'conversation-progress-1',
+            onGolemProtocolResponse: jest.fn().mockResolvedValue({
+                accepted: true,
+                allowActions: true,
+                planMode: true,
+                runId: 'run-progress-1',
+                stepId: 'host-step-progress-1',
+                actionId: 'action-progress-1',
+                planId: 'run-progress-1',
+                planRevision: 1,
+                planStepId: 'step_1',
+                maxActionDepth: 12,
+            }),
         };
         const brain = {
             webBackend: { id: 'm365-web', safeMode: true },
@@ -155,7 +168,10 @@ describe('NeuroShunter M365 safety gates', () => {
         ResponseParser.parse.mockReturnValue({
             memory: null,
             reply: '',
-            actions: [{ action: 'command', parameter: 'cat README.md' }],
+            plan: {
+                steps: [{ id: 'step_1', title: '準備整份專案報告', status: 'in_progress' }],
+            },
+            actions: [{ action: 'command', parameter: 'cat README.md', progress: '讀取專案說明並核對內容' }],
         });
 
         await NeuroShunter.dispatch(ctx, 'raw', brain, controller);
@@ -163,6 +179,8 @@ describe('NeuroShunter M365 safety gates', () => {
         expect(controller.pendingTasks.size).toBe(0);
         expect(CommandHandler.execute).toHaveBeenCalledTimes(1);
         expect(SkillHandler.execute).not.toHaveBeenCalled();
+        expect(ctx.reply).toHaveBeenCalledWith('讀取專案說明並核對內容，正在執行並確認中…');
+        expect(ctx.reply).not.toHaveBeenCalledWith(expect.stringContaining('準備整份專案報告'));
     });
 
     test('balanced mode still asks before MCP or Skill execution', async () => {
@@ -256,7 +274,8 @@ describe('NeuroShunter M365 safety gates', () => {
                 workspaceActionId: 'action-1',
             }),
         }));
-        expect(ctx.reply).toHaveBeenCalledWith('我正在確認，請稍候…');
+        expect(ctx.reply).toHaveBeenCalledTimes(1);
+        expect(ctx.reply.mock.calls.flat().join('\n')).not.toContain('正在執行並確認中');
         expect(ctx.reply.mock.calls.flat().join('\n')).not.toContain('等待 Harness 核准與回傳結果');
         expect(CommandHandler.execute).not.toHaveBeenCalled();
     });
@@ -600,5 +619,71 @@ describe('NeuroShunter M365 safety gates', () => {
         expect(controller.pendingTasks.size).toBe(0);
         expect(SkillHandler.execute).toHaveBeenCalledTimes(1);
         expect(ctx.reply).not.toHaveBeenCalledWith(expect.stringContaining('待你在右側'), expect.anything());
+    });
+
+    test('replaces a narrated refusal and queues a bounded execution repair', async () => {
+        const onGolemProtocolResponse = jest.fn().mockResolvedValue({
+            accepted: false,
+            allowActions: false,
+            planMode: true,
+            runId: 'run-repair-1',
+            planId: null,
+            planRevision: 0,
+            maxActionDepth: 12,
+            protocolRepair: {
+                status: 'retry',
+                prompt: '[GOLEM_EXECUTION_REPAIR]use the real tool[/GOLEM_EXECUTION_REPAIR]',
+                toolRoutingQuery: '在工作區建立 Word 報告',
+                message: '正在確認可用資源並準備執行…',
+            },
+        });
+        const enqueue = jest.fn().mockResolvedValue();
+        const ctx = {
+            reply: jest.fn().mockResolvedValue(),
+            shouldMentionSender: false,
+            platform: 'web',
+            workspaceConversationId: 'conversation-1',
+            onGolemProtocolResponse,
+        };
+        const brain = {
+            webBackend: { id: 'm365-web', safeMode: true },
+            memorize: jest.fn().mockResolvedValue(),
+            _appendChatLog: jest.fn(),
+            areActionsEnabled: jest.fn(() => true),
+            isLocalContextEnabled: jest.fn(() => false),
+        };
+        const controller = { pendingTasks: new Map(), convoManager: { enqueue } };
+        ResponseParser.parse.mockReturnValue({
+            memory: null,
+            reply: '我沒有可驗證的 Word 建檔能力；如果你希望我可以嘗試。',
+            actions: [],
+        });
+
+        const toolRoute = { commandLane: { recommended: true, reason: 'local_project_artifact_authoring' } };
+        await NeuroShunter.dispatch(ctx, {
+            text: 'raw narrated refusal',
+            attachments: [{
+                kind: 'download',
+                name: 'unverified-report.docx',
+                url: 'https://m365.cloud.microsoft/generated/unverified-report.docx',
+            }],
+        }, brain, controller, { m365ToolRoute: toolRoute });
+
+        expect(ctx.reply).toHaveBeenCalledWith('正在確認可用資源並準備執行…');
+        expect(ctx.reply.mock.calls.flat().join('\n')).not.toContain('沒有可驗證');
+        expect(ctx.reply.mock.calls.flat().join('\n')).not.toContain('unverified-report');
+        expect(onGolemProtocolResponse).toHaveBeenCalledWith(expect.objectContaining({ toolRoute }));
+        expect(enqueue).toHaveBeenCalledWith(
+            ctx,
+            expect.stringContaining('GOLEM_EXECUTION_REPAIR'),
+            expect.objectContaining({
+                isSystemFeedback: true,
+                allowActions: true,
+                planMode: true,
+                workspaceRunId: 'run-repair-1',
+                workspacePlanId: null,
+                toolRoutingQuery: '在工作區建立 Word 報告',
+            })
+        );
     });
 });

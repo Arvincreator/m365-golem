@@ -15,6 +15,10 @@ const {
     resolveM365Brain,
 } = require('../../src/services/M365WorkspaceService');
 const { getM365RunCoordinator } = require('../../src/services/M365RunCoordinator');
+const {
+    classifyExecutionExpectation,
+    inferVerification,
+} = require('../../src/services/M365ExecutionContract');
 const { stripM365RunControl } = require('../../src/services/M365RunControlParser');
 const { getM365AttachmentService } = require('../../src/services/M365AttachmentService');
 const { isPlaceholderConversationTitle } = require('../../src/services/M365ConversationTitle');
@@ -43,6 +47,7 @@ const MAX_SELECTED_REFERENCE_FILES = 3;
 const MAX_SELECTED_MCP_SERVERS = 3;
 const MAX_SELECTED_SKILLS = 3;
 const MAX_REFERENCE_CONTEXT_CHARS = 12000;
+const INTERNAL_M365_DISPATCH = Symbol('internal-m365-dispatch');
 
 function createWorkspaceInputError(code, message) {
     const error = new Error(message);
@@ -463,6 +468,7 @@ module.exports = function(server) {
                 selectedSkillIds,
                 referenceFileIds,
             } = req.body;
+            const internalControl = req.body?.[INTERNAL_M365_DISPATCH] === true;
             if (!golemId || (!message && !attachmentData && !attachmentBatchId)) {
                 return res.status(400).json({ error: 'Missing golemId, message or attachment' });
             }
@@ -528,7 +534,9 @@ module.exports = function(server) {
             const userMessage = String(message || '').trim()
                 || (attachmentBatchId ? '請閱讀並分析本輪上傳的附件。' : '');
             const shortcutExpansion = PromptShortcutManager.expandPromptShortcutInput(userMessage);
-            const routedUserMessage = shortcutExpansion.changed ? shortcutExpansion.text : userMessage;
+            const internalRoutingQuery = internalControl ? String(req.body?.toolRoutingQuery || '').trim() : '';
+            const routedUserMessage = internalRoutingQuery
+                || (shortcutExpansion.changed ? shortcutExpansion.text : userMessage);
             let effectiveMessage = userMessage;
             let workspaceProject = null;
             let workspaceContextIncluded = false;
@@ -547,7 +555,7 @@ module.exports = function(server) {
                 }
                 workspaceStore = await getM365WorkspaceStore(server);
                 workspaceConversation = await workspaceStore.getConversation(conversationId);
-                workspaceConversationTitleRequested = isPlaceholderConversationTitle(workspaceConversation.title);
+                workspaceConversationTitleRequested = !internalControl && isPlaceholderConversationTitle(workspaceConversation.title);
                 if (projectId && workspaceConversation.projectId !== projectId) {
                     return res.status(409).json({
                         success: false,
@@ -616,17 +624,19 @@ module.exports = function(server) {
                     composerContext,
                     relevantProjectMemories
                 );
-                workspaceUserMessage = await workspaceStore.addMessage(conversationId, {
-                    role: 'user',
-                    source: 'user',
-                    content: attachmentNames.length > 0
-                        ? `${userMessage}\n\n📎 ${attachmentNames.join('、')}`
-                        : userMessage,
-                    requestId,
-                    runId: runId || null,
-                    stepId: stepId || null,
-                    deliveryState: 'local',
-                });
+                if (!internalControl) {
+                    workspaceUserMessage = await workspaceStore.addMessage(conversationId, {
+                        role: 'user',
+                        source: 'user',
+                        content: attachmentNames.length > 0
+                            ? `${userMessage}\n\n📎 ${attachmentNames.join('、')}`
+                            : userMessage,
+                        requestId,
+                        runId: runId || null,
+                        stepId: stepId || null,
+                        deliveryState: 'local',
+                    });
+                }
                 if (shortcutExpansion.changed && shortcutExpansion.matched) {
                     recordM365PromptPoolUse({
                         shortcut: shortcutExpansion.matched.shortcut,
@@ -654,6 +664,7 @@ module.exports = function(server) {
                 text: userMessage,
                 textOverride: workspaceEnabled ? effectiveMessage : undefined,
                 m365PromptShortcutExpanded: shortcutExpansion.changed === true,
+                m365InternalControl: internalControl,
                 messageTime: Date.now(),
                 senderName: 'User',
                 replyToName: '',
@@ -866,10 +877,17 @@ module.exports = function(server) {
                     });
                     return result;
                 } : undefined,
-                onGolemProtocolResponse: workspaceEnabled ? async ({ rawResponse, parsed, actionCount, isSystemFeedback }) => {
+                onGolemProtocolResponse: workspaceEnabled ? async ({ rawResponse, parsed, actionCount, isSystemFeedback, toolRoute }) => {
                     const coordinator = await getM365RunCoordinator(server);
+                    const activeBrain = resolveM365Brain(golemId);
+                    const route = toolRoute || activeBrain?.toolRouter?.lastRoute || null;
+                    const expectation = classifyExecutionExpectation(
+                        routedUserMessage,
+                        route,
+                        parsed?.reply || rawResponse
+                    );
                     if (parsed && (parsed.plan || parsed.planError)) {
-                        const planResult = await coordinator.handleAutonomousPlan({
+                        let planResult = await coordinator.handleAutonomousPlan({
                             conversationId,
                             requestId,
                             existingRunId: mockContext.workspaceRunId || null,
@@ -878,7 +896,17 @@ module.exports = function(server) {
                             actionCount: Number(actionCount || 0),
                             actions: Array.isArray(parsed.actions) ? parsed.actions : [],
                             isSystemFeedback: isSystemFeedback === true,
+                            workspaceRoot: projectWorkspace?.rootPath || '',
                         });
+                        if (planResult?.accepted === false && !planResult.runId
+                            && expectation.required && isSystemFeedback !== true) {
+                            planResult = await coordinator.startExecutionContract({
+                                conversationId,
+                                requestId,
+                                objective: routedUserMessage,
+                                verification: inferVerification(routedUserMessage, route),
+                            });
+                        }
                         if (planResult && planResult.runId) mockContext.workspaceRunId = planResult.runId;
                         if (planResult && planResult.stepId) mockContext.workspaceStepId = planResult.stepId;
                         if (planResult && planResult.planId) mockContext.workspacePlanId = planResult.planId;
@@ -896,6 +924,31 @@ module.exports = function(server) {
                             transportAmbiguous,
                             transportErrorCode: transportFailureCode,
                         });
+                        return null;
+                    }
+                    if (mockContext.workspaceRunId) {
+                        const repair = await coordinator.requestProtocolRepair({
+                            runId: mockContext.workspaceRunId,
+                            kind: Number(actionCount || 0) > 0 ? 'plan_missing_for_action' : 'plan_and_action_missing',
+                        });
+                        if (repair) {
+                            if (repair.runId) mockContext.workspaceRunId = repair.runId;
+                            if (repair.planId) mockContext.workspacePlanId = repair.planId;
+                            if (repair.planRevision !== undefined) mockContext.workspacePlanRevision = repair.planRevision;
+                            return repair;
+                        }
+                    }
+                    if (Number(actionCount || 0) === 0 && isSystemFeedback !== true && expectation.required) {
+                        const repair = await coordinator.startExecutionContract({
+                            conversationId,
+                            requestId,
+                            objective: routedUserMessage,
+                            verification: inferVerification(routedUserMessage, route),
+                        });
+                        if (repair?.runId) mockContext.workspaceRunId = repair.runId;
+                        if (repair?.planId) mockContext.workspacePlanId = repair.planId;
+                        if (repair?.planRevision !== undefined) mockContext.workspacePlanRevision = repair.planRevision;
+                        return repair;
                     }
                     return null;
                 } : undefined,
@@ -971,7 +1024,7 @@ module.exports = function(server) {
                 instance: { username: golemId }
             };
 
-            server.broadcastLog({
+            if (!internalControl) server.broadcastLog({
                 time: new Date().toLocaleTimeString(),
                 msg: `[User] ${userMessage}${attachmentNames.length > 0 ? ` [附件 ${attachmentNames.length} 個]` : ''}`,
                 type: 'agent',
@@ -1216,7 +1269,12 @@ module.exports = function(server) {
                 return payload;
             },
         };
-        Promise.resolve(handleChatPost({ body: body || {} }, internalResponse)).catch(reject);
+        const internalBody = { ...(body || {}) };
+        if (internalBody.internalControl === true) {
+            delete internalBody.internalControl;
+            internalBody[INTERNAL_M365_DISPATCH] = true;
+        }
+        Promise.resolve(handleChatPost({ body: internalBody }, internalResponse)).catch(reject);
     });
 
     router.post('/api/chat/callback', async (req, res) => {

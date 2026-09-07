@@ -245,9 +245,13 @@ describe('GolemBrain m365-web bootstrap', () => {
         brain.context = context;
         brain.isInitialized = true;
         brain._refreshWebBackendDefinition();
-        brain._withToolRoutingHint = jest.fn().mockResolvedValue('<tool-routing>command</tool-routing>\n\n查看根目錄');
+        const toolRoute = { commandLane: { recommended: true, reason: 'local_os_or_repo_operation' } };
+        brain._withToolRoutingHint = jest.fn().mockImplementation(async (_text, _isSystem, options) => {
+            options.m365ToolRoute = toolRoute;
+            return '<tool-routing>command</tool-routing>\n\n查看根目錄';
+        });
 
-        await brain.sendMessage('查看根目錄', false, { m365Bootstrap: true });
+        const response = await brain.sendMessage('查看根目錄', false, { m365Bootstrap: true });
 
         expect(ProtocolFormatter.buildEnvelope).toHaveBeenCalledWith(
             expect.stringContaining('<tool-routing>'),
@@ -260,6 +264,7 @@ describe('GolemBrain m365-web bootstrap', () => {
                 userDataDir: brain.userDataDir,
             })
         );
+        expect(response.m365ToolRoute).toBe(toolRoute);
     });
 
     test('injects the active Skill catalog for a natural-language inventory question', async () => {
@@ -271,10 +276,11 @@ describe('GolemBrain m365-web bootstrap', () => {
         });
         brain._refreshWebBackendDefinition();
 
+        const routeOptions = { toolRoutingQuery: '你有什麼 Skill 可用？' };
         const routed = await brain._withToolRoutingHint(
             '[GOLEM_WORKSPACE_REQUEST:req]\n[USER INPUT]\n你有什麼 Skill 可用？',
             false,
-            { toolRoutingQuery: '你有什麼 Skill 可用？' }
+            routeOptions
         );
 
         expect(routed).toContain('Current available Skill catalog (2; authoritative for this turn)');
@@ -282,6 +288,9 @@ describe('GolemBrain m365-web bootstrap', () => {
         expect(routed).toContain('reference-files');
         expect(routed).toContain('Do not claim that no Skill list was provided');
         expect(routed).toContain('[GOLEM_WORKSPACE_REQUEST:req]');
+        expect(routeOptions.m365ToolRoute).toEqual(expect.objectContaining({
+            commandLane: expect.any(Object),
+        }));
     });
 
     test('re-routes the original user goal after an autonomous native-plan checkpoint', async () => {

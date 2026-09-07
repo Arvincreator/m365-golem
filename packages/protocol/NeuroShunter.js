@@ -13,6 +13,7 @@ const fs = require('fs');
 const path = require('path');
 const { buildM365PlanObservation } = require('../../src/services/M365PlanProtocol');
 const { mayAutoApproveM365Actions } = require('../../src/services/M365AutomationPolicy');
+const { buildExecutionProgressText } = require('../../src/services/M365ExecutionContract');
 
 const MCP_CONFIG_PATH = path.resolve(process.cwd(), 'data', 'mcp-servers.json');
 
@@ -303,6 +304,7 @@ class NeuroShunter {
         const runtimeActionsEnabled = !brain || typeof brain.areActionsEnabled !== 'function'
             ? true
             : brain.areActionsEnabled();
+        let protocolRepair = null;
 
         if (parsed.conversationTitle && typeof ctx?.onGolemConversationTitle === 'function') {
             try {
@@ -322,6 +324,7 @@ class NeuroShunter {
                     parsed,
                     actionCount: parsed.actions.length,
                     isSystemFeedback: options.isSystemFeedback === true,
+                    toolRoute: options.m365ToolRoute || null,
                 });
                 if (protocolResult && protocolResult.planMode) {
                     options = {
@@ -340,6 +343,16 @@ class NeuroShunter {
                     if (protocolResult.warning) {
                         parsed.reply = `${parsed.reply || ''}\n\n${protocolResult.warning}`.trim();
                     }
+                }
+                if (protocolResult?.protocolRepair) {
+                    protocolRepair = protocolResult.protocolRepair;
+                    parsed.actions = [];
+                    parsed.reply = String(protocolRepair.message || '').trim();
+                    // A rejected response may still carry M365-generated downloads or
+                    // citations. They are part of the unaccepted claim, so presenting
+                    // them beside the host repair message would make a fake completion
+                    // look trustworthy to the user.
+                    attachments = [];
                 }
             } catch (error) {
                 console.error('[NeuroShunter] GOLEM_PLAN host callback failed:', error);
@@ -536,8 +549,13 @@ class NeuroShunter {
         // M365 使用者只需要看到簡潔的執行狀態。Observation、harness 與
         // 核准協議仍保留在宿主內部與專用狀態卡，不讓模型以操作細節打斷對話。
         // plan_checkpoint 的回覆本身就是原生 M365 產出，不能被狀態文字蓋掉。
-        if (useM365ActionProgressReply) {
-            parsed.reply = '我正在確認，請稍候…';
+        if (useM365ActionProgressReply && !needsM365Approval) {
+            parsed.reply = buildExecutionProgressText(parsed.actions[0]);
+        } else if (needsM365Approval) {
+            // The approval card above is the complete user-facing status. Avoid
+            // following it with a second message that incorrectly says execution
+            // has already started.
+            parsed.reply = '';
         }
 
         // 1. 處理直接回覆 (讓 AI 的解說文字在行動之前出現)
@@ -577,6 +595,28 @@ class NeuroShunter {
             }
         } else if (parsed.reply && shouldSuppressReply) {
             console.log(`🤫 [NeuroShunter] 檢測到靜默模式，已攔截回覆內容。`);
+        }
+
+        if (protocolRepair?.status === 'retry' && protocolRepair.prompt) {
+            const convoManager = controller && controller.convoManager;
+            if (convoManager && typeof convoManager.enqueue === 'function') {
+                await convoManager.enqueue(ctx, protocolRepair.prompt, {
+                    isPriority: true,
+                    bypassDebounce: true,
+                    isSystemFeedback: true,
+                    allowActions: true,
+                    planMode: true,
+                    actionDepth: Number(options.actionDepth || 0),
+                    maxActionDepth: Number(options.maxActionDepth || CONFIG.MAX_AUTO_TURNS || 5),
+                    workspaceConversationId: ctx.workspaceConversationId || null,
+                    workspaceRunId: options.workspaceRunId || null,
+                    workspacePlanId: options.workspacePlanId || null,
+                    workspacePlanRevision: Number(options.workspacePlanRevision || 0),
+                    toolRoutingQuery: String(protocolRepair.toolRoutingQuery || ''),
+                });
+            } else if (!protocolRepair.message) {
+                await ctx.reply('⚠️ 工作需要修正下一步，但目前找不到可用的對話佇列；已安全暫停。');
+            }
         }
 
         const blockedObservationActions = isSystemFeedback

@@ -12,6 +12,9 @@ class ConversationManager {
         this.brain = brain;
         this.NeuroShunter = neuroShunterClass;
         this.controller = controller;
+        if (this.controller && typeof this.controller === 'object') {
+            this.controller.convoManager = this;
+        }
         this.queue = [];
         this.isProcessing = false;
         this.userBuffers = new Map();
@@ -63,6 +66,9 @@ class ConversationManager {
         if (this._healthCheckInterval) {
             clearInterval(this._healthCheckInterval);
             this._healthCheckInterval = null;
+        }
+        if (this.controller?.convoManager === this) {
+            delete this.controller.convoManager;
         }
     }
 
@@ -470,7 +476,8 @@ class ConversationManager {
                 workspacePlanId: task.options.workspacePlanId || task.ctx?.workspacePlanId || null,
                 workspacePlanRevision: Number(task.options.workspacePlanRevision || task.ctx?.workspacePlanRevision || 0),
                 workspacePlanStepId: task.options.workspacePlanStepId || task.ctx?.workspacePlanStepId || null,
-                workspaceActionId: task.options.workspaceActionId || task.ctx?.workspaceActionId || null
+                workspaceActionId: task.options.workspaceActionId || task.ctx?.workspaceActionId || null,
+                m365ToolRoute: brainResponse?.m365ToolRoute || null
             });
         } catch (e) {
             console.error(`❌ [Dialogue Queue:${this.golemId}] 處理失敗:`, e);

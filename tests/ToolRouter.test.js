@@ -98,6 +98,13 @@ function makeM365BridgeServer() {
 }
 
 describe('ToolRouter', () => {
+    test('routes a workspace Word report locally even when the report topic mentions SharePoint', () => {
+        const result = new ToolRouter().route('在工作區幫我新增一個 Word 文件，我想要研究 SharePoint Copilot 怎麼用比較好的報告');
+        expect(result.commandLane).toEqual({
+            recommended: true,
+            reason: 'local_project_artifact_authoring',
+        });
+    });
     test('recommends log skill for debugging/log requests', () => {
         const router = new ToolRouter({
             activeScene: 'assistant',

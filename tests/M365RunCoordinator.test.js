@@ -90,6 +90,68 @@ describe('M365 durable run coordinator', () => {
         expect(coordinator.dispatchTimers.size).toBe(0);
     });
 
+    test('does not accept an unverified capability guess as a real blocker', async () => {
+        const result = await coordinator.handleAutonomousPlan({ conversationId: conversation.id,
+            plan: { schemaVersion: 'golem_plan/1', planId: null, revision: 1,
+                goal: '建立 Word 報告', completionCriteria: '有效的 docx 檔案存在', status: 'blocked', currentStepId: 'step_1',
+                steps: [{ id: 'step_1', title: '建立文件', status: 'blocked', doneWhen: '檔案存在' }],
+                question: '我尚未取得可建立 Word 的已驗證能力。', approvalRequest: '', completionSummary: '' },
+            actions: [], actionCount: 0 });
+        expect(result).toEqual(expect.objectContaining({
+            accepted: false,
+            protocolRepair: expect.objectContaining({ status: 'retry' }),
+        }));
+        expect((await store.getRun(result.runId)).status).toBe('RUNNING');
+    });
+
+    test('creates a durable execution contract when an explicit task was answered without action', async () => {
+        const repair = await coordinator.startExecutionContract({
+            conversationId: conversation.id,
+            requestId: 'missing-action-request',
+            objective: '在工作區建立一份 Word 報告',
+            verification: 'A valid recent .docx exists in the workspace.',
+        });
+        expect(repair).toEqual(expect.objectContaining({
+            accepted: false,
+            planMode: true,
+            protocolRepair: expect.objectContaining({ status: 'retry', attempt: 1 }),
+        }));
+        expect((await store.getRun(repair.runId)).status).toBe('RUNNING');
+        expect(repair.protocolRepair.prompt).toContain('plan_id=null');
+        expect(repair.protocolRepair.prompt).toContain('在工作區建立一份 Word 報告');
+        expect(repair.protocolRepair.message).toBe('正在確認可用資源並準備執行…');
+
+        const second = await coordinator.requestProtocolRepair({ runId: repair.runId, kind: 'missing_initial_execution' });
+        expect(second.protocolRepair).toEqual(expect.objectContaining({ status: 'retry', attempt: 2 }));
+        const exhausted = await coordinator.requestProtocolRepair({ runId: repair.runId, kind: 'missing_initial_execution' });
+        expect(exhausted.protocolRepair.status).toBe('blocked');
+        expect((await store.getRun(repair.runId)).status).toBe('BLOCKED');
+    });
+
+    test('rejects a completed plan step that has no matching host Observation', async () => {
+        const completed = await coordinator.handleAutonomousPlan({
+            conversationId: conversation.id,
+            requestId: 'premature-completion',
+            plan: {
+                schemaVersion: 'golem_plan/1', planId: null, revision: 1,
+                goal: 'Inspect project', completionCriteria: 'Two host checks complete', status: 'complete', currentStepId: null,
+                steps: [
+                    { id: 'step_1', title: 'First', status: 'completed', doneWhen: 'First observed' },
+                    { id: 'step_2', title: 'Second', status: 'completed', doneWhen: 'Second observed' },
+                ],
+                question: '', approvalRequest: '', completionSummary: 'Done',
+            },
+            actions: [], actionCount: 0,
+        });
+        expect(completed).toEqual(expect.objectContaining({
+            accepted: false,
+            protocolRepair: expect.objectContaining({ status: 'retry' }),
+        }));
+        expect((await store.getRun(completed.runId)).status).toBe('RUNNING');
+        expect(completed.protocolRepair.prompt).toContain('step_without_host_observation:step_1');
+        expect(completed.protocolRepair.message).toBe('');
+    });
+
     async function createRun(maxSteps = 4) {
         const run = await store.createRun(conversation.id, {
             objective: 'Prepare a risk review.',

@@ -144,6 +144,8 @@ describe('workspace-aware M365 chat route', () => {
     beforeEach(() => {
         jest.clearAllMocks();
         serverContext.m365DispatchLease = null;
+        delete serverContext.m365RunCoordinator;
+        delete mockBrain.toolRouter;
         serverContext.m365PendingResponses?.clear();
         delete serverContext.m365AttachmentService;
         mockStore.getConversation.mockResolvedValue({
@@ -477,6 +479,96 @@ describe('workspace-aware M365 chat route', () => {
         expect(mockReferenceFileService.read).not.toHaveBeenCalled();
         expect(mockHandleDashboardMessage).not.toHaveBeenCalled();
         expect(mockStore.addMessage).not.toHaveBeenCalled();
+    });
+
+    test('keeps host continuation controls out of the visible user history', async () => {
+        mockHandleDashboardMessage.mockImplementation(async (ctx) => {
+            expect(ctx.m365InternalControl).toBe(true);
+            expect(ctx.toolRoutingQuery).toBe('建立 Word 報告');
+            const meta = { isSystemFeedback: true, workspaceRunId: 'run-1' };
+            await ctx.onTransportStart(meta);
+            await ctx.onTransportAccepted(meta);
+            await ctx.onTransportComplete({ text: 'corrected response' }, meta);
+            await ctx.reply('corrected response');
+        });
+
+        await serverContext.dispatchM365WorkspaceMessage({
+            golemId: 'golem_A', projectId: 'project-1', conversationId: 'conversation-1',
+            message: '[GOLEM_PLAN_CONTROL]internal[/GOLEM_PLAN_CONTROL]',
+            runId: 'run-1', planId: 'run-1', planRevision: 1,
+            internalControl: true, toolRoutingQuery: '建立 Word 報告',
+        });
+        await waitFor(() => serverContext.m365DispatchLease === null);
+
+        expect(mockStore.addMessage).toHaveBeenCalledTimes(1);
+        expect(mockStore.addMessage).toHaveBeenCalledWith('conversation-1', expect.objectContaining({
+            role: 'assistant', content: 'corrected response', runId: 'run-1',
+        }));
+        expect(serverContext.broadcastLog.mock.calls.some(([item]) => String(item.raw || '').startsWith('[User]'))).toBe(false);
+    });
+
+    test('does not honor an external request to hide a user message as internal control', async () => {
+        mockHandleDashboardMessage.mockImplementation(async (ctx) => {
+            expect(ctx.m365InternalControl).toBe(false);
+            await ctx.onTransportStart({ isSystemFeedback: false });
+            await ctx.onTransportAccepted({ isSystemFeedback: false });
+            await ctx.onTransportComplete({ text: 'answer' }, { isSystemFeedback: false });
+            await ctx.reply('answer');
+        });
+        const result = await postChat({
+            golemId: 'golem_A', projectId: 'project-1', conversationId: 'conversation-1',
+            message: 'normal visible request', internalControl: true,
+        });
+        expect(result.response.status).toBe(200);
+        await waitFor(() => serverContext.m365DispatchLease === null);
+        expect(mockStore.addMessage).toHaveBeenNthCalledWith(1, 'conversation-1', expect.objectContaining({
+            role: 'user', content: 'normal visible request',
+        }));
+    });
+
+    test('turns an explicit local task with a prose-only refusal into an execution repair', async () => {
+        const startExecutionContract = jest.fn().mockResolvedValue({
+            accepted: false,
+            planMode: true,
+            runId: 'run-repair-1',
+            planId: null,
+            planRevision: 0,
+            protocolRepair: { status: 'retry', prompt: 'repair', message: 'working' },
+        });
+        serverContext.m365RunCoordinator = {
+            init: jest.fn().mockResolvedValue(),
+            startExecutionContract,
+            handleAutonomousPlan: jest.fn(),
+            requestProtocolRepair: jest.fn(),
+        };
+        const turnRoute = {
+            commandLane: { recommended: true, reason: 'local_project_artifact_authoring' },
+            skills: [], mcpTools: [],
+        };
+        mockBrain.toolRouter = { lastRoute: null };
+        mockHandleDashboardMessage.mockImplementation(async (ctx) => {
+            const result = await ctx.onGolemProtocolResponse({
+                rawResponse: 'prose only',
+                parsed: { reply: '我尚未取得可建立 Word 的能力。', actions: [] },
+                actionCount: 0,
+                isSystemFeedback: false,
+                toolRoute: turnRoute,
+            });
+            expect(result).toEqual(expect.objectContaining({ runId: 'run-repair-1' }));
+            await ctx.reply('working');
+        });
+
+        const result = await postChat({
+            golemId: 'golem_A', projectId: 'project-1', conversationId: 'conversation-1',
+            message: '在工作區建立一份 Word 報告',
+        });
+        expect(result.response.status).toBe(200);
+        await waitFor(() => serverContext.m365DispatchLease === null);
+        expect(startExecutionContract).toHaveBeenCalledWith(expect.objectContaining({
+            conversationId: 'conversation-1',
+            objective: '在工作區建立一份 Word 報告',
+            verification: expect.stringContaining('.docx'),
+        }));
     });
 
     test('adds only explicitly selected file text, MCP servers, Skills, and response mode to the Golem workspace envelope', async () => {

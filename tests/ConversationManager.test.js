@@ -66,6 +66,15 @@ describe('ConversationManager', () => {
         expect(cm.queue[0].text).toBe('priority');
     });
 
+    test('exposes its internal queue to protocol repair through the task controller', () => {
+        cm = new ConversationManager(mockBrain, mockShunter, mockController);
+        expect(mockController.convoManager).toBe(cm);
+
+        cm.destroy();
+        expect(mockController.convoManager).toBeUndefined();
+        cm = null;
+    });
+
     test('can wait until an attachment task has finished before releasing its staging lifecycle', async () => {
         let releaseTransport;
         mockBrain.sendMessage.mockImplementation(() => new Promise((resolve) => {
@@ -183,6 +192,28 @@ describe('ConversationManager', () => {
                 isSystemFeedback: true,
                 allowActions: false
             })
+        );
+    });
+
+    test('keeps response routing metadata bound to the same protocol callback', async () => {
+        const toolRoute = { commandLane: { recommended: true, reason: 'local_project_artifact_authoring' } };
+        mockBrain.sendMessage.mockResolvedValue({
+            text: '[GOLEM_REPLY] AI Response',
+            attachments: [],
+            status: 'ENVELOPE_COMPLETE',
+            m365ToolRoute: toolRoute,
+        });
+        cm = new ConversationManager(mockBrain, mockShunter, mockController);
+        cm.queue.push({ ctx: mockCtx, text: '建立 Word', attachment: null, options: {} });
+
+        await cm._processQueue();
+
+        expect(mockShunter.dispatch).toHaveBeenCalledWith(
+            mockCtx,
+            expect.any(Object),
+            mockBrain,
+            mockController,
+            expect.objectContaining({ m365ToolRoute: toolRoute })
         );
     });
 

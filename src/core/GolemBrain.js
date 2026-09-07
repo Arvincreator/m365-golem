@@ -899,6 +899,9 @@ class GolemBrain {
             result.attachments = localAttachments;
         }
 
+        // Bind routing evidence to this exact response. A background vector
+        // refresh may replace the global router while Copilot is generating.
+        result.m365ToolRoute = options.m365ToolRoute || null;
         return result;
     }
 
@@ -1156,6 +1159,7 @@ class GolemBrain {
             } else {
                 hint = this.toolRouter.buildRoutingHint(routingQuery, routeOptions);
             }
+            options.m365ToolRoute = this.toolRouter.lastRoute || null;
             const personaContext = this._buildPersonaTurnContext();
             const prefixBlocks = [runtimeContext];
             if (personaContext) prefixBlocks.push(personaContext);

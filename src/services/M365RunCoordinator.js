@@ -7,6 +7,11 @@ const {
     serviceError,
 } = require('./M365WorkspaceService');
 const { parseM365RunControl } = require('./M365RunControlParser');
+const {
+    classifyUnverifiedStop,
+    describeAction,
+    validatePlanCompletion,
+} = require('./M365ExecutionContract');
 
 const TERMINAL_STATUSES = new Set(['FAILED', 'CANCELED', 'COMPLETED']);
 
@@ -438,6 +443,8 @@ class M365RunCoordinator {
                 planId: runId,
                 planRevision: Number(plan?.revision || 0),
                 requestId: crypto.randomUUID(),
+                internalControl: true,
+                toolRoutingQuery: run.objective,
             };
         });
         if (!dispatchInput) return;
@@ -489,6 +496,8 @@ class M365RunCoordinator {
                 runId,
                 stepId: step.id,
                 requestId: step.requestId,
+                internalControl: true,
+                toolRoutingQuery: run.objective,
             };
         });
         if (!dispatchInput) return;
@@ -548,6 +557,104 @@ class M365RunCoordinator {
         return [...events].reverse().find((event) => event.eventType === 'autonomous_plan_received') || null;
     }
 
+    async startExecutionContract({ conversationId, requestId = '', objective, verification }) {
+        await this.init();
+        const run = await this.store.createRun(conversationId, {
+            objective,
+            constraints: 'The user explicitly requested execution. Discover and use available resources, retain Action Gate controls, and do not replace execution with suggestions.',
+            verification,
+            maxSteps: 12,
+            startImmediately: true,
+            origin: 'host_execution_contract',
+        });
+        await this.store.appendRunEvent(run.id, 'execution_contract_created', { requestId });
+        return this.requestProtocolRepair({ runId: run.id, kind: 'missing_initial_execution' });
+    }
+
+    async requestProtocolRepair({ runId, kind = 'missing_plan_or_action', issues = [] }) {
+        await this.init();
+        return this._withRunLock(runId, () => this._requestProtocolRepairLocked({ runId, kind, issues }));
+    }
+
+    async _requestProtocolRepairLocked({ runId, kind = 'missing_plan_or_action', issues = [] }) {
+        let run = await this.store.getRun(runId);
+        if (TERMINAL_STATUSES.has(run.status) || ['WAITING_USER', 'WAITING_APPROVAL', 'PAUSED', 'RECONCILE_REQUIRED'].includes(run.status)) {
+            return null;
+        }
+        const events = await this.store.listRunEvents(runId);
+        const sameKindRepairs = events.filter((event) => event.eventType === 'autonomous_protocol_repair'
+            && event.payload?.kind === kind).length;
+        if (sameKindRepairs >= 2) {
+            if (run.status === 'QUEUED') run = await this.store.transitionRun(run.id, 'RUNNING', { reason: 'PROTOCOL_REPAIR_LIMIT' });
+            if (run.status === 'RUNNING') {
+                run = await this.store.transitionRun(run.id, 'BLOCKED', {
+                    reason: '模型連續未提出可執行的下一步，自動補正已達上限。',
+                    errorCode: 'M365_PROTOCOL_REPAIR_LIMIT',
+                });
+            }
+            return {
+                accepted: false,
+                allowActions: false,
+                planMode: true,
+                runId: run.id,
+                planId: run.id,
+                protocolRepair: {
+                    status: 'blocked',
+                    message: '我已嘗試修正兩次，但仍沒有產生可執行的下一步。工作已暫停；請在右側查看受阻原因後重新執行。',
+                },
+            };
+        }
+
+        const latest = [...events].reverse().find((event) => event.eventType === 'autonomous_plan_received');
+        const hasExecutionContract = events.some((event) => event.eventType === 'execution_contract_created');
+        const rejectedFirstPlan = new Set([
+            'completion_evidence_missing',
+            'unverified_capability_blocker',
+            'repeated_permission_request',
+        ]).has(kind);
+        if (!latest && !hasExecutionContract && !rejectedFirstPlan) return null;
+        const nextRevision = Number(latest?.payload?.plan?.revision || 0) + 1;
+        const hasPlan = Boolean(latest);
+        const prompt = [
+            '[GOLEM_EXECUTION_REPAIR]',
+            'The prior response did not satisfy the active execution contract. It was not a successful tool attempt.',
+            `Repair reason: ${kind}.`,
+            issues.length > 0 ? `Unmet host checks: ${issues.slice(0, 12).join(', ')}.` : '',
+            '[RUN_OBJECTIVE]', run.objective, '[/RUN_OBJECTIVE]',
+            '[COMPLETION_CHECK]', run.verification, '[/COMPLETION_CHECK]',
+            hasPlan
+                ? `Return GOLEM_PLAN revision ${nextRevision} with plan_id=${run.id}. Preserve completed steps that have host evidence.`
+                : 'Create GOLEM_PLAN revision 1 with plan_id=null. The host has reserved the run but has not accepted a plan yet.',
+            'If work remains and the inputs are sufficient, set status=running and include exactly one real GOLEM_ACTION for the current step in this same response.',
+            'Use the available tool-routing guide. If runtime availability is uncertain, the first action may be a bounded read-only capability check. Do not ask the user to repeat permission already present in the objective.',
+            'Use blocked or wait_user only for a concrete obstacle or missing input, and state that specific fact in question. Do not mark complete until every completed step has a successful host Observation and the completion check is satisfied.',
+            '[/GOLEM_EXECUTION_REPAIR]',
+        ].filter(Boolean).join('\n');
+        await this.store.appendRunEvent(run.id, 'autonomous_protocol_repair', {
+            kind,
+            attempt: sameKindRepairs + 1,
+            issues: issues.slice(0, 12),
+        });
+        return {
+            accepted: false,
+            allowActions: false,
+            planMode: true,
+            runId: run.id,
+            planId: hasPlan ? run.id : null,
+            planRevision: hasPlan ? nextRevision - 1 : 0,
+            maxActionDepth: run.maxSteps,
+            protocolRepair: {
+                status: 'retry',
+                attempt: sameKindRepairs + 1,
+                prompt,
+                toolRoutingQuery: run.objective,
+                message: sameKindRepairs === 0 && kind === 'missing_initial_execution'
+                    ? '正在確認可用資源並準備執行…'
+                    : '',
+            },
+        };
+    }
+
     async _isAutonomousRun(runId) {
         return Boolean(await this._latestAutonomousPlan(runId));
     }
@@ -572,6 +679,7 @@ class M365RunCoordinator {
         actionCount = 0,
         actions = [],
         isSystemFeedback = false,
+        workspaceRoot = '',
     }) {
         await this.init();
         if (planError) {
@@ -768,6 +876,35 @@ class M365RunCoordinator {
                 run = await this.store.transitionRun(run.id, 'RUNNING', { reason: 'COPILOT_PLAN_STATE_APPLYING' });
             }
 
+            const evidenceEvents = await this.store.listRunEvents(run.id);
+            const unverifiedStop = classifyUnverifiedStop(plan, evidenceEvents);
+            if (unverifiedStop) {
+                await this.store.appendRunEvent(run.id, 'autonomous_plan_stop_rejected', {
+                    revision: plan.revision,
+                    reason: unverifiedStop,
+                });
+                return this._requestProtocolRepairLocked({
+                    runId: run.id,
+                    kind: unverifiedStop,
+                });
+            }
+
+            if (plan.status === 'complete') {
+                const events = evidenceEvents;
+                const completion = validatePlanCompletion({ plan, run, events, workspaceRoot });
+                if (!completion.ok) {
+                    await this.store.appendRunEvent(run.id, 'autonomous_plan_completion_rejected', {
+                        revision: plan.revision,
+                        issues: completion.issues,
+                    });
+                    return this._requestProtocolRepairLocked({
+                        runId: run.id,
+                        kind: 'completion_evidence_missing',
+                        issues: completion.issues,
+                    });
+                }
+            }
+
             const storedPlan = planForStorage(plan, run.id);
             await this.store.appendRunEvent(run.id, 'autonomous_plan_received', {
                 requestId,
@@ -833,6 +970,7 @@ class M365RunCoordinator {
                 planStepId: plan.currentStepId,
                 actionCount,
                 revision: plan.revision,
+                actionDescriptor: describeAction(actions[0]),
             });
             return {
                 accepted: true,

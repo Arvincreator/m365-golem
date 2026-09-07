@@ -81,7 +81,7 @@ describe('ProtocolFormatter M365 Web safe mode', () => {
 
         expect(envelope).toContain('[GOLEM_ACTION]');
         expect(envelope).toContain('visible user approval');
-        expect(envelope).toContain('{"action":"command","parameter":"echo %CD%"}');
+        expect(envelope).toContain('{"action":"command","parameter":"echo %CD%","progress":"讀取工作區位置並確認實際路徑"}');
         expect(envelope).toContain('Do not merely say that you can propose an action');
         expect(envelope).toContain('Never emit XML-style tags such as </GOLEM_REPLY>');
         expect(envelope).toContain('Never output generic [GOLEM_MEMORY]');
@@ -112,8 +112,10 @@ describe('ProtocolFormatter M365 Web safe mode', () => {
 
         expect(envelope).toContain('Balanced mode is active');
         expect(envelope).toContain('Only trusted native commands within the configured L1 ceiling may run immediately');
-        expect(envelope).toContain('[GOLEM_REPLY] must be exactly "我正在確認，請稍候…"');
-        expect(envelope).toContain('Do not mention the command, tool, Observation');
+        expect(envelope).toContain('states what this exact action will do and what result it will check');
+        expect(envelope).toContain('followed by "，正在執行並確認中…"');
+        expect(envelope).toContain('stay within 50 characters');
+        expect(envelope).toContain('Do not include commands, paths, tool names, protocol terms');
         expect(result.systemPrompt).toContain('目前自動化模式是 balanced');
         expect(result.systemPrompt).toContain('Balanced mode is active');
     });

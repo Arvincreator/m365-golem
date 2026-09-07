@@ -10,12 +10,12 @@ const LOCAL_COMMAND_RE = /(terminal|shell|bash|zsh|cmd|命令|指令|終端機|�
 const LOCAL_ARTIFACT_BUILD_RE = /(?:(?:製作|建立|建置|開發|實作|編寫|撰寫|寫(?:一個|個|出)?|create|build|develop|implement).{0,40}(?:互動(?:式)?(?:網頁|網站)|網頁|網站|web(?:site|page|app)?|html|css|javascript|程式|應用程式|app)|(?:互動(?:式)?(?:網頁|網站)|網頁|網站|web(?:site|page|app)?|html|css|javascript|程式|應用程式|app).{0,40}(?:製作|建立|建置|開發|實作|編寫|撰寫|寫(?:一個|個|出)?|create|build|develop|implement))/i;
 const EXPLICIT_REMOTE_ARTIFACT_TARGET_RE = /(?:在|到|於|透過|使用).{0,8}(?:sharepoint|onedrive|teams|notion|github|slack|microsoft\s*365|\bm365\b|瀏覽器|browser)/i;
 const LOCAL_DOCUMENT_BUILD_RE = /(?:製作|建立|新增|產生|撰寫|儲存|create|generate|save|write).{0,40}(?:word|docx|excel|xlsx|powerpoint|pptx|pdf|文件|報告|試算表|簡報)/i;
-const LOCAL_DOCUMENT_TARGET_RE = /(?:桌面|本機|本地|desktop|local)/i;
+const LOCAL_DOCUMENT_TARGET_RE = /(?:工作區|專案資料夾|桌面|本機|本地|project\s+workspace|workspace|desktop|local)/i;
 
 function isLocalArtifactBuild(text) {
     const document = LOCAL_DOCUMENT_BUILD_RE.test(text) && LOCAL_DOCUMENT_TARGET_RE.test(text)
         && (!EXPLICIT_REMOTE_ARTIFACT_TARGET_RE.test(text)
-            || /(?:在|到|於|on|to).{0,8}(?:桌面|本機|本地|desktop|local)/i.test(text));
+            || /(?:在|到|於|on|to).{0,12}(?:工作區|專案資料夾|桌面|本機|本地|project\s+workspace|workspace|desktop|local)/i.test(text));
     return document || (LOCAL_ARTIFACT_BUILD_RE.test(text) && !EXPLICIT_REMOTE_ARTIFACT_TARGET_RE.test(text));
 }
 const EXTERNAL_SYSTEM_RE = /(@gmail|@google|calendar|gmail|drive|onedrive|sharepoint|microsoft\s*365|\bm365\b|mcp|devtools|notion|slack|teams|github[^a-z]|telegram|discord|瀏覽器自動化|外部服務|第三方)/i;
@@ -377,7 +377,7 @@ class ToolRouter {
             .sort((a, b) => b.score - a.score)[0];
         const nativeScore = (options.semanticMatches || []).find(match => match.id === 'capability/native-m365')?.score || 0;
         const remoteOnly = EXPLICIT_REMOTE_ARTIFACT_TARGET_RE.test(String(query || ''))
-            && !/(?:在|到|於|on|to).{0,8}(?:桌面|本機|本地|desktop|local)/i.test(String(query || ''));
+            && !/(?:在|到|於|on|to).{0,12}(?:工作區|專案資料夾|桌面|本機|本地|project\s+workspace|workspace|desktop|local)/i.test(String(query || ''));
         const explanationOnly = requestClass.passive || (
             /(?:解釋|說明|介紹|比較|explain).*(?:原理|概念|是什麼|concept|principle)/i.test(String(query || ''))
             && !/(?:幫我|替我|直接|然後|並)/.test(String(query || ''))
@@ -429,6 +429,9 @@ class ToolRouter {
 
     _formatRoutingHint(result) {
         this.lastDiagnostics = result.diagnostics;
+        // Ephemeral, turn-local execution metadata for the host supervisor.
+        // It contains no user query or tool result and is replaced every turn.
+        this.lastRoute = result;
         // Tool IDs and scores only: never persist the user's query or source content here.
         console.info('[ToolRouter:diagnostics]', JSON.stringify(result.diagnostics));
         if (

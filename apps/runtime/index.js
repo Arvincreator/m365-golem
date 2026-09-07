@@ -579,6 +579,10 @@ async function handleUnifiedMessage(ctx, forceTargetId = null) {
             // Snapshot the user's choice on the queued task. A later composer
             // change must not alter how an earlier queued message is sent.
             m365ResponseMode: ctx.m365ResponseMode || undefined,
+            isSystemFeedback: ctx.m365InternalControl === true,
+            allowActions: ctx.m365InternalControl === true,
+            planMode: ctx.m365InternalControl === true && Boolean(ctx.workspaceRunId),
+            toolRoutingQuery: ctx.toolRoutingQuery || undefined,
             allowM365Queue: true,
             autoAppendWhenBusy: true,
         });
