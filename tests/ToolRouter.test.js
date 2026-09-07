@@ -184,6 +184,25 @@ describe('ToolRouter', () => {
         expect(hint).not.toContain('Emit the smallest read-only command action now');
     });
 
+    test.each([
+        '可以看完那張圖片，幫我在桌面新增一個相關內容的word報告嗎？',
+        '你不能用action在桌面製作word嗎？',
+        '根據已看到的 SharePoint 圖片，在桌面建立 Word 報告',
+    ])('routes local document creation independently of remote connectivity: %s', query => {
+        const router = new ToolRouter({ activeScene: 'coding', activeTools: [] });
+        expect(router.route(query).commandLane).toEqual(expect.objectContaining({
+            recommended: true, reason: 'local_project_artifact_authoring',
+        }));
+        expect(router.buildRoutingHint(query)).toContain('local document creation does not depend on a working SharePoint');
+    });
+
+    test('does not route remote document creation or explanation to local authoring', () => {
+        const router = new ToolRouter({ activeScene: 'coding', activeTools: [] });
+        expect(router.route('請在 SharePoint 建立 Word 報告').commandLane.recommended).toBe(false);
+        expect(router.route('使用本機資料在 SharePoint 建立 Word 報告').commandLane.recommended).toBe(false);
+        expect(router.route('請解釋 Word 報告是什麼').commandLane.recommended).toBe(false);
+    });
+
     test('does not treat opening or explaining a webpage as local artifact authoring', () => {
         const router = new ToolRouter({
             activeScene: 'coding',
