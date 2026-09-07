@@ -1446,19 +1446,6 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                 <DialogContent onCloseAutoFocus={event => { event.preventDefault(); inspectorTriggerRef.current?.focus(); }} className="fixed left-auto right-0 top-0 h-dvh max-h-dvh w-[min(92vw,420px)] max-w-none translate-x-0 translate-y-0 overflow-y-auto rounded-none p-4 motion-reduce:animate-none">
                 <DialogHeader><DialogTitle>來源與執行</DialogTitle><DialogDescription>查看專案來源、核准及任務實際進度。</DialogDescription></DialogHeader>
                 <aside className="min-w-0">
-                    <div className="flex items-start justify-between gap-3">
-                        <div>
-                            <p className="text-xs font-semibold uppercase tracking-[0.12em] text-primary">Workspace</p>
-                            <h3 className="mt-1 font-semibold">來源與執行</h3>
-                            <p className="mt-1 text-xs leading-5 text-muted-foreground">把專案脈絡、工具核准與多步驟工作放在同一工作區。</p>
-                        </div>
-                        <div className="flex gap-1.5">
-                            <button type="button" onClick={() => { setShowRuns(false); window.localStorage.setItem("m365-ux-inspector", "closed"); }} className="flex h-9 w-9 items-center justify-center rounded-xl border border-border text-muted-foreground hover:bg-accent" aria-label="關閉來源與執行面板">
-                                <X className="h-4 w-4" />
-                            </button>
-                        </div>
-                    </div>
-
                     <div className="mt-4 space-y-3">
                         <section className={cn(
                             "rounded-2xl border bg-card p-4",
