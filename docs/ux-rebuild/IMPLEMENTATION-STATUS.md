@@ -33,9 +33,11 @@ Branch：`codex/chat-desktop-usability`。UX 程式提交：`10a171c`。起始 H
 
 ## 設計差異／限制
 
+- 後續 UI 修正：移除 Inspector 重複標題／關閉鈕；1280 CSS px 以上改為 380px 並排側欄，聊天區隨之縮窄且可繼續操作。窄視窗保留有 focus trap 的 Dialog。側欄標頭固定、內容獨立捲動；關閉後焦點返回入口。建置、元件 lint、mock browser 的縮寬／不遮擋／持續輸入／按鈕切換／Escape／窄視窗檢查通過，更新合成截圖。
+
 - M1 按現有路由格式新增 `/api/projects/:projectId/conversations/:conversationId/draft` GET／POST，沒有重造 chat dispatch。GET 回應 no-store；新增端點檢查實際 socket、精確本機 Host／Origin，拒絕 forwarded headers。
 - 草稿 controller、query ticket 與訊息工具列已拆出 features；chat page 尚未完全拆成藍圖中所有元件。M2 繼續按功能拆分，不為拆檔改控制層。
-- 第一版 Inspector 在大螢幕也使用按需抽屜，確保同一套鍵盤焦點行為；未實作可拖拉欄寬。
+- Inspector 桌面並排、窄視窗抽屜；未實作可拖拉欄寬。
 - 正文複製使用已保存的可見回答內容，不額外取得遠端協定。沒有假串流、假模型選擇、假 Undo／分支／成果 vault。
 - 最後一刻關閉／斷電前的未保存按鍵不保證恢復。記憶體中的 File 不落盤，重載需重選。未新增全文搜尋、事件 journal 或跨視窗全局提交 intent ledger（M2）。
 

@@ -1,5 +1,7 @@
 "use client";
 
+import { WorkspaceInspector } from "@/features/m365-workspace/components/WorkspaceInspector";
+
 import React, { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
     ArrowDown,
@@ -1003,7 +1005,8 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                             <button
                                 type="button"
                                 ref={inspectorTriggerRef}
-                                onClick={() => { setShowRuns(true); window.localStorage.setItem("m365-ux-inspector", "open"); }}
+                                aria-expanded={showRuns}
+                                onClick={() => { setShowRuns(!showRuns); window.localStorage.setItem("m365-ux-inspector", showRuns ? "closed" : "open"); }}
                                 className="inline-flex h-9 items-center gap-2 rounded-xl bg-primary px-3 text-xs font-medium text-primary-foreground"
                             >
                                 <ListChecks className="h-3.5 w-3.5" />來源與執行
@@ -1442,9 +1445,7 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                     <button onClick={() => controller.resolveConflict(false, remoteDraft || undefined).then(() => setRemoteDraft(null)).catch(() => setError("無法取得保存版本。"))}>使用已保存版本</button>
                 </DialogContent>
             </Dialog>
-            <Dialog open={showRuns} onOpenChange={open => { setShowRuns(open); window.localStorage.setItem("m365-ux-inspector", open ? "open" : "closed"); }}>
-                <DialogContent onCloseAutoFocus={event => { event.preventDefault(); inspectorTriggerRef.current?.focus(); }} className="fixed left-auto right-0 top-0 h-dvh max-h-dvh w-[min(92vw,420px)] max-w-none translate-x-0 translate-y-0 overflow-y-auto rounded-none p-4 motion-reduce:animate-none">
-                <DialogHeader><DialogTitle>來源與執行</DialogTitle><DialogDescription>查看專案來源、核准及任務實際進度。</DialogDescription></DialogHeader>
+            <WorkspaceInspector open={showRuns} triggerRef={inspectorTriggerRef} onOpenChange={open => { setShowRuns(open); window.localStorage.setItem("m365-ux-inspector", open ? "open" : "closed"); }}>
                 <aside className="min-w-0">
                     <div className="mt-4 space-y-3">
                         <section className={cn(
@@ -1746,8 +1747,7 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                         每一步都保存狀態；需要判斷、核准或傳送結果不明時會停下，不會偷偷重送。
                     </div>
                 </aside>
-                </DialogContent>
-            </Dialog>
+            </WorkspaceInspector>
 
             <Dialog open={showAgentsEditor} onOpenChange={setShowAgentsEditor}>
                 <DialogContent className="sm:max-w-2xl">
