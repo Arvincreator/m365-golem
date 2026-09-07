@@ -2,7 +2,7 @@
 
 日期：2026-09-07。狀態：implemented／automated_test_passed；manual_uat 未執行。M2–M4 未開始。
 
-Branch：`codex/chat-desktop-usability`。起始 HEAD 與既有工作基準提交見 `BASELINE.md`。UX 程式提交以本文件所在功能分支的後續 commit 為準。
+Branch：`codex/chat-desktop-usability`。UX 程式提交：`10a171c`。起始 HEAD 與既有工作基準提交見 `BASELINE.md`。
 
 ## 這次完成
 
