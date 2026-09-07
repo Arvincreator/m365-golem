@@ -577,6 +577,9 @@ async function handleUnifiedMessage(ctx, forceTargetId = null) {
             workspacePlanStepId: ctx.workspacePlanStepId || null,
             workspaceActionId: ctx.workspaceActionId || null,
             protocolRequestId: ctx.workspaceProtocolRequestId || null,
+            goalMode: ctx.workspaceGoalMode === true,
+            maxActionDepth: Number(ctx.workspaceMaxActionDepth || process.env.GOLEM_MAX_AUTO_TURNS || 5),
+            autoTurnBudget: ctx.workspaceAutoTurnBudget || undefined,
             // Snapshot the user's choice on the queued task. A later composer
             // change must not alter how an earlier queued message is sent.
             m365ResponseMode: ctx.m365ResponseMode || undefined,

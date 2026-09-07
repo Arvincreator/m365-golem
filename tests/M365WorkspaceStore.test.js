@@ -239,6 +239,33 @@ describe('M365WorkspaceStore', () => {
         });
     });
 
+    test('persists Goal mode without the normal twelve-step ceiling', async () => {
+        const project = await store.createProject({ name: 'Goal Work' });
+        const conversation = await store.createConversation(project.id, { title: 'Persistent objective' });
+        const run = await store.createRun(conversation.id, {
+            objective: 'Continue until the verified project objective is reached.',
+            verification: 'Host evidence satisfies the completion check.',
+            maxSteps: 2,
+            goalMode: true,
+            startImmediately: true,
+            origin: 'copilot',
+        });
+
+        expect(run).toEqual(expect.objectContaining({
+            status: 'RUNNING',
+            goalMode: true,
+            maxSteps: M365WorkspaceStore.GOAL_MODE_MAX_STEPS,
+        }));
+        const [created] = await store.listRunEvents(run.id);
+        expect(created).toEqual(expect.objectContaining({
+            eventType: 'run_created',
+            payload: expect.objectContaining({ goalMode: true }),
+        }));
+        expect((await store.getLatestCheckpoint(run.id)).state).toEqual(expect.objectContaining({
+            goalMode: true,
+        }));
+    });
+
     test('persists approval requests and accepts exactly one decision', async () => {
         const project = await store.createProject({ name: 'Approval Work' });
         const conversation = await store.createConversation(project.id, { title: 'Approval chat' });

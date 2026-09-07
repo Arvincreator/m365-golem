@@ -92,6 +92,7 @@ export type M365Run = {
     status: M365RunStatus;
     maxSteps: number;
     currentStep: number;
+    goalMode: boolean;
     errorCode: string | null;
     createdAt: string;
     startedAt: string | null;

@@ -26,6 +26,7 @@ import {
     Send,
     ShieldCheck,
     Square,
+    Target,
     Paperclip,
     UserRound,
     X,
@@ -39,7 +40,7 @@ import { shouldSubmit } from "@/features/m365-workspace/lib/composer-input";
 import { LatestQuery } from "@/features/m365-workspace/lib/latest-query";
 import { MessageToolbar } from "@/features/m365-workspace/components/MessageToolbar";
 import type { Draft } from "@/features/m365-workspace/lib/draft-controller";
-import { apiGet, apiPost } from "@/lib/api-client";
+import { apiGet, apiPost, isApiAbortError } from "@/lib/api-client";
 import { apiUrl } from "@/lib/api";
 import { buildM365ConversationTimeline, isNearChatBottom } from "@/lib/m365-message-rendering";
 import { socket } from "@/lib/socket";
@@ -328,6 +329,7 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
     const [toolActionsEnabled, setToolActionsEnabled] = useState(true);
     const [decidingActionId, setDecidingActionId] = useState("");
     const [automationMode, setAutomationMode] = useState<AutomationMode>("guided");
+    const [goalMode, setGoalMode] = useState(false);
     const [savingAutomationMode, setSavingAutomationMode] = useState(false);
     const [composerMenuOpen, setComposerMenuOpen] = useState(false);
     const [composerPicker, setComposerPicker] = useState<ComposerPicker>(null);
@@ -353,7 +355,10 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
     const [replyingToRun, setReplyingToRun] = useState(false);
     const [followingLatest, setFollowingLatest] = useState(true);
     const scrollRef = useRef<HTMLDivElement>(null);
+    const conversationContentRef = useRef<HTMLDivElement>(null);
     const followingLatestRef = useRef(true);
+    const followRequestIdRef = useRef<string | null>(null);
+    const followCompletionTimerRef = useRef<number | null>(null);
     const initialConversationScrollRef = useRef(false);
     const golemActivityWasVisibleRef = useRef(false);
     const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -427,6 +432,11 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
     const handleConversationScroll = useCallback(() => {
         const target = scrollRef.current;
         if (!target) return;
+        if (followRequestIdRef.current) {
+            followingLatestRef.current = true;
+            setFollowingLatest(true);
+            return;
+        }
         const next = isNearChatBottom(target);
         followingLatestRef.current = next;
         setFollowingLatest((current) => current === next ? current : next);
@@ -554,7 +564,7 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
         let mounted = true;
         setLoading(true);
         loadContext()
-            .catch((requestError) => mounted && setError(errorMessage(requestError)))
+            .catch((requestError) => mounted && !isApiAbortError(requestError) && setError(errorMessage(requestError)))
             .finally(() => mounted && setLoading(false));
         return () => { mounted = false; };
     }, [activeConversationId, activeProjectId, hydrated, loadContext]);
@@ -569,6 +579,9 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
         followingLatestRef.current = true;
         initialConversationScrollRef.current = false;
         golemActivityWasVisibleRef.current = false;
+        followRequestIdRef.current = null;
+        if (followCompletionTimerRef.current !== null) window.clearTimeout(followCompletionTimerRef.current);
+        followCompletionTimerRef.current = null;
         setFollowingLatest(true);
     }, [activeConversationId]);
 
@@ -623,7 +636,7 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
             const detail = (event as CustomEvent<{ conversationId?: string }>).detail;
             if (detail?.conversationId && detail.conversationId !== activeConversationId) return;
             setError("");
-            loadContext().catch((requestError) => setError(errorMessage(requestError)));
+            loadContext().catch((requestError) => { if (!isApiAbortError(requestError)) setError(errorMessage(requestError)); });
         };
         window.addEventListener("m365-workspace-updated", handleWorkspaceUpdate);
         return () => window.removeEventListener("m365-workspace-updated", handleWorkspaceUpdate);
@@ -667,7 +680,7 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
         const frame = window.requestAnimationFrame(() => {
             if (isInitialPosition) {
                 scrollToLatest("auto");
-            } else if (followingLatestRef.current) {
+            } else if (followingLatestRef.current || followRequestIdRef.current) {
                 scrollToLatest("auto");
             }
         });
@@ -681,10 +694,41 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
         }
         if (golemActivityWasVisibleRef.current) return;
         golemActivityWasVisibleRef.current = true;
-        if (!followingLatestRef.current) return;
+        if (!followingLatestRef.current && !followRequestIdRef.current) return;
         const frame = window.requestAnimationFrame(() => scrollToLatest("auto"));
         return () => window.cancelAnimationFrame(frame);
     }, [scrollToLatest, showGolemActivity]);
+
+    useEffect(() => {
+        const content = conversationContentRef.current;
+        if (!content || typeof ResizeObserver === "undefined") return;
+        const observer = new ResizeObserver(() => {
+            if (!followingLatestRef.current && !followRequestIdRef.current) return;
+            window.requestAnimationFrame(() => scrollToLatest("auto"));
+        });
+        observer.observe(content);
+        return () => observer.disconnect();
+    }, [activeConversationId, scrollToLatest]);
+
+    useEffect(() => {
+        const requestId = followRequestIdRef.current;
+        if (!requestId || requestId === "pending") return;
+        const response = messages.find((message) => message.role === "assistant" && message.requestId === requestId);
+        if (!response) return;
+        const responseRun = response.runId ? runsById.get(response.runId) : null;
+        if (responseRun && ["QUEUED", "RUNNING"].includes(responseRun.status)) return;
+        if (followCompletionTimerRef.current !== null) window.clearTimeout(followCompletionTimerRef.current);
+        followCompletionTimerRef.current = window.setTimeout(() => {
+            if (followRequestIdRef.current !== requestId) return;
+            scrollToLatest("auto");
+            followRequestIdRef.current = null;
+            followCompletionTimerRef.current = null;
+        }, 1200);
+        return () => {
+            if (followCompletionTimerRef.current !== null) window.clearTimeout(followCompletionTimerRef.current);
+            followCompletionTimerRef.current = null;
+        };
+    }, [latestMessageKey, messages, runsById, scrollToLatest]);
 
     const toggleReferenceFile = (id: string) => {
         setComposerResourceError("");
@@ -877,14 +921,20 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
             return;
         }
         sendGuard.current = true;
+        followRequestIdRef.current = "pending";
+        scrollToLatest("auto");
         setSending(true);
         setError("");
         setNotice("");
         setAttachmentWarnings([]);
         let attachmentBatchId = "";
+        let acceptedRequestId = "";
         try {
             const snapshot = await controller.beginSubmit();
-            if (!snapshot) return;
+            if (!snapshot) {
+                followRequestIdRef.current = null;
+                return;
+            }
             const submitted = snapshot.draft;
             const text = submitted.quote ? `引用回答：\n${submitted.quote.excerpt}\n\n追問：\n${submitted.text.trim()}` : submitted.text.trim();
             attachmentBatchId = await stagePendingAttachmentBatch(snapshot.files);
@@ -899,20 +949,37 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                 referenceFileIds: submitted.referenceFileIds,
                 selectedLocalFolderIds: submitted.localFolders.map((folder) => folder.id),
                 attachmentBatchId: attachmentBatchId || undefined,
+                goalMode,
             });
             if (!accepted.requestId) throw new Error("傳送結果未確認；請先核對對話，不要直接重送。");
+            acceptedRequestId = accepted.requestId;
+            followRequestIdRef.current = accepted.requestId;
             await controller.accepted(snapshot);
             if (!alive.current) return;
             setAttachmentProgress(attachmentBatchId ? "附件已交付本機服務；M365 處理與送出結果以對話狀態為準。" : "");
             setComposerMenuOpen(false);
             setNotice("訊息已加入對話隊列；你可以繼續輸入下一則，Golem 會依序送往 M365。");
-            await loadMessages();
+            await loadMessages().catch((refreshError) => {
+                if (!isApiAbortError(refreshError)) {
+                    setNotice("訊息已加入對話隊列；本機畫面暫時未更新，系統會自動重新載入。");
+                }
+            });
         } catch (requestError) {
             if (!alive.current) return;
+            if (acceptedRequestId) {
+                if (!isApiAbortError(requestError)) {
+                    setNotice("訊息已加入對話隊列；後續本機處理未完成，請先查看工作狀態，不會自動重送。");
+                    await loadContext().catch(() => undefined);
+                }
+                return;
+            }
+            if (followRequestIdRef.current === "pending") followRequestIdRef.current = null;
             setSending(false);
             setAttachmentProgress("");
-            setError(`${errorMessage(requestError)} 內容已保留；請先核對是否已排隊，不會自動重送。`);
-            await loadContext().catch(() => undefined);
+            setError(isApiAbortError(requestError)
+                ? "傳送連線已中止；內容仍保留。請先核對是否已排隊，不會自動重送。"
+                : `${errorMessage(requestError)} 內容已保留；請先核對是否已排隊，不會自動重送。`);
+            if (!isApiAbortError(requestError)) await loadContext().catch(() => undefined);
         } finally {
             sendGuard.current = false;
             controller.endSubmit();
@@ -975,10 +1042,16 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
         setError("");
         try {
             await apiPost(apiUrl(`/api/runs/${encodeURIComponent(run.id)}/${action}`), body);
-            await Promise.all([loadRuns(), loadMessages()]);
+            const refreshed = await Promise.allSettled([loadRuns(), loadMessages()]);
+            const refreshFailure = refreshed.find(
+                (result): result is PromiseRejectedResult => result.status === "rejected" && !isApiAbortError(result.reason)
+            );
+            if (refreshFailure) setNotice("操作已接受；本機畫面暫時未更新，系統會自動重新載入。");
             return true;
         } catch (requestError) {
-            setError(errorMessage(requestError));
+            setError(isApiAbortError(requestError)
+                ? "操作連線已中止；請先查看目前工作狀態，不會自動重送。"
+                : errorMessage(requestError));
             return false;
         } finally {
             setRunSaving(false);
@@ -1172,7 +1245,7 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                 <div className="flex flex-1 flex-col overflow-hidden rounded-xl border border-border bg-card">
                 <div className="relative min-h-0 flex-1">
                 <div ref={scrollRef} onScroll={handleConversationScroll} className="custom-scrollbar h-full overflow-y-auto p-4">
-                    <div className="mx-auto max-w-[840px] space-y-5">
+                    <div ref={conversationContentRef} className="mx-auto max-w-[840px] space-y-5">
                         {(activeDialogueCount > 0 || queuedDialogueCount > 0) && (
                             <div className="flex items-center gap-2 rounded-xl border border-cyan-500/20 bg-cyan-500/5 px-3 py-2 text-xs text-cyan-800 dark:text-cyan-200">
                                 <Loader2 className="h-3.5 w-3.5 animate-spin" />
@@ -1433,6 +1506,23 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                                     <option value="thoughtful">仔細</option>
                                 </select>
 
+                                <button
+                                    type="button"
+                                    aria-label="目標模式"
+                                    aria-pressed={goalMode}
+                                    disabled={Boolean(currentRun && !isRunTerminal(currentRun))}
+                                    onClick={() => setGoalMode((enabled) => !enabled)}
+                                    title={currentRun && !isRunTerminal(currentRun)
+                                        ? "請先完成或停止目前的多步驟工作，再建立新的目標工作。"
+                                        : "持續執行到宿主證據確認目標完成；授權與專案範圍不變。"}
+                                    className={cn(
+                                        "inline-flex h-8 items-center gap-1.5 rounded-lg border px-2 text-[11px] font-medium disabled:cursor-not-allowed disabled:opacity-40",
+                                        goalMode ? "border-cyan-500/40 bg-cyan-500/10 text-cyan-700 dark:text-cyan-200" : "border-transparent text-muted-foreground hover:bg-accent"
+                                    )}
+                                >
+                                    <Target className="h-3.5 w-3.5" />目標
+                                </button>
+
                                 <select
                                     aria-label="自動核准等級"
                                     value={automationMode}
@@ -1473,7 +1563,7 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                         )}
                         {composerResourceError && <p className="mt-1.5 text-center text-[11px] text-amber-700 dark:text-amber-300">{composerResourceError}</p>}
                         <p className="mt-2 text-center text-[11px] text-muted-foreground">
-                            可見 M365 網頁傳輸 · 檔案附件會上傳；本機資料夾只提供路徑並按需讀取 · {AUTOMATION_MODE_NOTICE[automationMode]} · 不使用 Copilot Chat API
+                            可見 M365 網頁傳輸 · 檔案附件會上傳；本機資料夾只提供路徑並按需讀取 · {goalMode ? "目標模式會持續到證據確認完成；需要授權或補充時仍會停下。" : AUTOMATION_MODE_NOTICE[automationMode]} · 不使用 Copilot Chat API
                         </p>
                     </div>
                 </form>
@@ -1710,11 +1800,14 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                                     {run.status === "COMPLETED" ? <CheckCircle2 className="h-4 w-4 shrink-0 text-emerald-500" /> : <ListChecks className="h-4 w-4 shrink-0 text-primary" />}
                                 </div>
                                 <div className="mt-3 flex items-center justify-between text-xs">
-                                    <span className="rounded-full bg-secondary px-2 py-1 font-medium">{getRunStatusLabel(run.status)}</span>
+                                    <span className="flex flex-wrap gap-1.5">
+                                        <span className="rounded-full bg-secondary px-2 py-1 font-medium">{getRunStatusLabel(run.status)}</span>
+                                        {run.goalMode && <span className="rounded-full bg-cyan-500/10 px-2 py-1 font-medium text-cyan-700 dark:text-cyan-200">目標模式</span>}
+                                    </span>
                                     <span className="text-right text-muted-foreground">
                                         {run.id === currentRun?.id && runDetail?.plan
-                                            ? `計畫 ${runDetail.plan.steps.filter((step) => step.status === "completed").length}/${runDetail.plan.steps.length} · 宿主執行 ${run.currentStep}/${run.maxSteps}`
-                                            : `宿主執行 ${run.currentStep}/${run.maxSteps}`}
+                                            ? `計畫 ${runDetail.plan.steps.filter((step) => step.status === "completed").length}/${runDetail.plan.steps.length} · 宿主執行 ${run.currentStep}${run.goalMode ? " · 無固定上限" : `/${run.maxSteps}`}`
+                                            : `宿主執行 ${run.currentStep}${run.goalMode ? " · 無固定上限" : `/${run.maxSteps}`}`}
                                     </span>
                                 </div>
                                 {run.id === currentRun?.id && runDetail?.plan ? (

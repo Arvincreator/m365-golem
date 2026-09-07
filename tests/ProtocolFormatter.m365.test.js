@@ -277,6 +277,9 @@ describe('ProtocolFormatter M365 Web safe mode', () => {
         expect(initial).toContain('A final complete plan is the required signal that closes the local multi-step run');
         expect(continuation).toContain('plan_id=run-1, last accepted revision=3');
         expect(continuation).toContain('increment the revision by exactly one');
+        expect(continuation).toContain('replace or mark skipped only unfinished steps');
+        expect(continuation).toContain('Replanning is not completion');
+        expect(continuation).toContain('revised running plan must still include its next real action');
 
         delete process.env.M365_RUNNER_ENABLED;
         const disabled = ProtocolFormatter.buildEnvelope('完成任務', 'plan-disabled', {

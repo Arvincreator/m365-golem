@@ -12,7 +12,6 @@ const {
     describeAction,
     validatePlanCompletion,
 } = require('./M365ExecutionContract');
-
 const TERMINAL_STATUSES = new Set(['FAILED', 'CANCELED', 'COMPLETED']);
 
 function planForStorage(plan, planId) {
@@ -198,7 +197,7 @@ class M365RunCoordinator {
         });
     }
 
-    async resumeRun(runId, userInput = '') {
+    async resumeRun(runId, userInput = '', options = {}) {
         await this.init();
         return this._withRunLock(runId, async () => {
             const run = await this.store.getRun(runId);
@@ -206,6 +205,39 @@ class M365RunCoordinator {
                 throw serviceError('M365_RUN_RESUME_INVALID', 'This run cannot be resumed from its current state.', 409);
             }
             const input = String(userInput || '').trim();
+            const grantAutoTurns = Math.max(0, Math.floor(Number(options.grantAutoTurns) || 0));
+            if (run.status === 'WAITING_USER' && run.errorCode === 'M365_AUTO_TURN_LIMIT') {
+                if (grantAutoTurns !== 1) {
+                    throw serviceError(
+                        'M365_AUTO_TURN_GRANT_REQUIRED',
+                        'Choose “Run 1 more turn” to continue this saved work.',
+                        400
+                    );
+                }
+                const events = await this.store.listRunEvents(runId);
+                const gate = [...events].reverse().find((event) => event.eventType === 'auto_turn_limit_reached');
+                const pendingPrompt = String(gate?.payload?.pendingPrompt || '').trim();
+                if (!pendingPrompt) {
+                    throw serviceError(
+                        'M365_AUTO_TURN_PENDING_MISSING',
+                        'The saved continuation could not be found. Stop this work or add a new clarification.',
+                        409
+                    );
+                }
+                const used = Math.max(0, Math.floor(Number(gate.payload.used) || 0));
+                const previousLimit = Math.max(1, Math.floor(Number(gate.payload.limit) || used || 1));
+                const nextLimit = previousLimit + 1;
+                await this.store.appendRunEvent(runId, 'auto_turn_limit_extended', {
+                    from: previousLimit,
+                    to: nextLimit,
+                    grantedTurns: 1,
+                });
+                const queuedRun = await this.store.transitionRun(runId, 'QUEUED', {
+                    reason: 'USER_GRANTED_ONE_AUTO_TURN',
+                });
+                this._scheduleDeferredAutoTurn(queuedRun.id, pendingPrompt, { used, limit: nextLimit });
+                return this.store.getRun(runId);
+            }
             if (['WAITING_USER', 'BLOCKED'].includes(run.status) && !input) {
                 throw serviceError('M365_RUN_INPUT_REQUIRED', 'Add the requested clarification before continuing.', 400);
             }
@@ -238,6 +270,39 @@ class M365RunCoordinator {
                 this._scheduleStep(runId, step.id);
             }
             return this.store.getRun(runId);
+        });
+    }
+
+    async pauseForAutoTurnLimit({ runId, pendingPrompt, used, limit }) {
+        await this.init();
+        return this._withRunLock(runId, async () => {
+            let run = await this.store.getRun(runId);
+            if (TERMINAL_STATUSES.has(run.status) || run.goalMode) return run;
+            const prompt = String(pendingPrompt || '').trim().slice(0, 200000);
+            if (!prompt) {
+                throw serviceError('M365_AUTO_TURN_PENDING_REQUIRED', 'The pending continuation is empty.', 400);
+            }
+            const resolvedUsed = Math.max(0, Math.floor(Number(used) || 0));
+            const resolvedLimit = Math.max(1, Math.floor(Number(limit) || resolvedUsed || 1));
+            this._clearDispatchTimer(runId);
+            if (run.status === 'QUEUED') {
+                run = await this.store.transitionRun(runId, 'RUNNING', {
+                    reason: 'AUTO_TURN_LIMIT_PREPARE_PAUSE',
+                });
+            }
+            await this.store.appendRunEvent(runId, 'auto_turn_limit_reached', {
+                pendingPrompt: prompt,
+                used: resolvedUsed,
+                limit: resolvedLimit,
+                nextLimit: resolvedLimit + 1,
+            });
+            if (run.status === 'RUNNING') {
+                return this.store.transitionRun(runId, 'WAITING_USER', {
+                    reason: 'AUTO_TURN_LIMIT_REACHED',
+                    errorCode: 'M365_AUTO_TURN_LIMIT',
+                });
+            }
+            return run;
         });
     }
 
@@ -446,6 +511,62 @@ class M365RunCoordinator {
         this.dispatchTimers.set(runId, timer);
     }
 
+    _scheduleDeferredAutoTurn(runId, pendingPrompt, autoTurnBudget) {
+        this._clearDispatchTimer(runId);
+        const timer = setTimeout(() => {
+            this.dispatchTimers.delete(runId);
+            this._beginDeferredAutoTurn(runId, pendingPrompt, autoTurnBudget).catch((error) => {
+                console.error('[M365RunCoordinator] Failed to dispatch saved auto turn:', error);
+            });
+        }, 100);
+        if (typeof timer.unref === 'function') timer.unref();
+        this.dispatchTimers.set(runId, timer);
+    }
+
+    async _beginDeferredAutoTurn(runId, pendingPrompt, autoTurnBudget) {
+        await this.init();
+        let dispatchInput = null;
+        await this._withRunLock(runId, async () => {
+            const run = await this.store.getRun(runId);
+            if (run.status !== 'QUEUED') return;
+            const conversation = await this.store.getConversation(run.conversationId);
+            const latestPlan = await this._latestAutonomousPlan(runId);
+            await this.store.transitionRun(runId, 'RUNNING', { reason: 'AUTO_TURN_GRANT_DISPATCH' });
+            dispatchInput = {
+                golemId: 'golem_A',
+                projectId: conversation.projectId,
+                conversationId: conversation.id,
+                message: String(pendingPrompt || ''),
+                runId,
+                planId: runId,
+                planRevision: Number(latestPlan?.payload?.plan?.revision || 0),
+                requestId: crypto.randomUUID(),
+                internalControl: true,
+                toolRoutingQuery: run.objective,
+                goalMode: run.goalMode === true,
+                maxActionDepth: run.maxSteps,
+                autoTurnBudget,
+            };
+        });
+        if (!dispatchInput) return;
+        try {
+            await this._requireDispatcher()(dispatchInput);
+        } catch (error) {
+            await this._withRunLock(runId, async () => {
+                const run = await this.store.getRun(runId);
+                if (run.status !== 'RUNNING') return;
+                const preDispatch = new Set([
+                    'M365_HUMAN_LOGIN_REQUIRED', 'M365_TENANT_BLOCKED', 'M365_UI_NOT_READY',
+                    'M365_UI_BUSY', 'M365_UNEXPECTED_HOST', 'M365_INSECURE_URL', 'BROWSER_PROFILE_IN_USE',
+                ]).has(String(error?.code || ''));
+                await this.store.transitionRun(runId, preDispatch ? 'WAITING_USER' : 'RECONCILE_REQUIRED', {
+                    reason: preDispatch ? 'AUTO_TURN_GRANT_PRE_DISPATCH_FAILED' : 'AUTO_TURN_GRANT_AMBIGUOUS',
+                    errorCode: String(error?.code || 'M365_RUN_DISPATCH_FAILED'),
+                });
+            });
+        }
+    }
+
     async _beginAutonomousContinuation(runId, plan, userInput, reason) {
         await this.init();
         let dispatchInput = null;
@@ -461,6 +582,10 @@ class M365RunCoordinator {
                 `Resume reason: ${reason}.`,
                 'Re-evaluate the saved plan. If status=running, emit exactly one GOLEM_ACTION for the current step. Otherwise return a valid non-running plan status.',
             ];
+            if (run.goalMode) lines.push(
+                'Goal mode remains active: keep working until the objective is verified, unless human authorization, essential user input, a safety boundary, or repeated no-progress requires a pause.',
+                'Do not access or modify paths outside the assigned project workspace. User-selected folders remain bounded read-only sources. Action Gate permissions are unchanged.'
+            );
             if (reason === 'MISSING_ACTION_REPAIR') lines.push(
                 'The previous response updated the plan but supplied no action and no concrete blocker. No new tool was executed. Lack of an observation for an unattempted step is not a blocker.',
                 'Using the existing goal and verified results, emit the next necessary GOLEM_ACTION with status=running. Do not repeat completed work. If genuinely blocked, specify the actual failure or missing input in question. Preserve approval and access boundaries.'
@@ -478,6 +603,8 @@ class M365RunCoordinator {
                 requestId: crypto.randomUUID(),
                 internalControl: true,
                 toolRoutingQuery: run.objective,
+                goalMode: run.goalMode === true,
+                maxActionDepth: run.maxSteps,
             };
         });
         if (!dispatchInput) return;
@@ -531,6 +658,8 @@ class M365RunCoordinator {
                 requestId: step.requestId,
                 internalControl: true,
                 toolRoutingQuery: run.objective,
+                goalMode: run.goalMode === true,
+                maxActionDepth: run.maxSteps,
             };
         });
         if (!dispatchInput) return;
@@ -590,16 +719,77 @@ class M365RunCoordinator {
         return [...events].reverse().find((event) => event.eventType === 'autonomous_plan_received') || null;
     }
 
-    async startExecutionContract({ conversationId, requestId = '', objective, verification, localFolders = [] }) {
+    async _activePlanConflictResult(activeRun, { resumeFromUser = false } = {}) {
+        const priorStatus = activeRun.status;
+        const priorErrorCode = activeRun.errorCode;
+        let run = activeRun;
+        if (resumeFromUser && ['WAITING_USER', 'BLOCKED'].includes(run.status)) {
+            run = await this.store.transitionRun(run.id, 'QUEUED', {
+                reason: 'USER_MESSAGE_REQUESTED_REPLAN',
+            });
+            run = await this.store.transitionRun(run.id, 'RUNNING', {
+                reason: 'USER_MESSAGE_REPLAN_APPLYING',
+            });
+        }
+        const activePlan = await this._latestAutonomousPlan(run.id);
+        const activeRevision = Number(activePlan?.payload?.plan?.revision || 0);
+        const hasAcceptedPlan = activeRevision > 0;
+        const prompt = [
+            '[GOLEM_ACTIVE_PLAN_CONFLICT]',
+            `The host rejected the new plan because run ${run.id} was still ${priorStatus}.`,
+            priorErrorCode ? `Host state reason: ${priorErrorCode}.` : '',
+            resumeFromUser && ['WAITING_USER', 'BLOCKED'].includes(priorStatus)
+                ? 'The newest user message is an allowed intervention. The host resumed this same run so you may continue it or redesign its unfinished steps.'
+                : '',
+            hasAcceptedPlan
+                ? `Continue with plan_id=${run.id}; the next revision must be ${activeRevision + 1}. Do not create another plan yet.`
+                : 'The host has reserved this run but has not accepted its first plan. Return plan_id=null and revision=1; do not create another host run.',
+            'Use the active plan and the newest user message to decide whether to continue, replan, or ask for the specific missing input.',
+            'You may replace unfinished steps in the next revision and mark obsolete steps skipped. Preserve completed steps that have host evidence. Replanning is allowed and does not require closing this run.',
+            'Only mark the active plan complete when host Observations satisfy its completion check. Never fake completion to clear it.',
+            'Once the host accepts a terminal state, the next user task can start as a new plan.',
+            '[/GOLEM_ACTIVE_PLAN_CONFLICT]',
+        ].filter(Boolean).join('\n');
+        return {
+            accepted: false,
+            allowActions: false,
+            planMode: true,
+            runId: run.id,
+            planId: hasAcceptedPlan ? run.id : null,
+            planRevision: activeRevision,
+            maxActionDepth: run.maxSteps,
+            goalMode: run.goalMode === true,
+            resetAutoTurnBudget: resumeFromUser,
+            protocolRepair: {
+                status: 'retry',
+                prompt,
+                toolRoutingQuery: run.objective,
+                message: '偵測到尚未結案的工作，正在把狀態交回 Copilot 續接或重新規劃。',
+            },
+        };
+    }
+
+    async startExecutionContract({ conversationId, requestId = '', objective, verification, localFolders = [], goalMode = false }) {
         await this.init();
-        const run = await this.store.createRun(conversationId, {
-            objective,
-            constraints: 'The user explicitly requested execution. Discover and use available resources, retain Action Gate controls, and do not replace execution with suggestions.',
-            verification,
-            maxSteps: 12,
-            startImmediately: true,
-            origin: 'host_execution_contract',
-        });
+        let run;
+        try {
+            run = await this.store.createRun(conversationId, {
+                objective,
+                constraints: 'The user explicitly requested execution. Discover and use available resources, retain Action Gate controls, and do not replace execution with suggestions.',
+                verification,
+                maxSteps: 12,
+                goalMode,
+                startImmediately: true,
+                origin: 'host_execution_contract',
+            });
+        } catch (error) {
+            if (error?.code === 'M365_CONVERSATION_HAS_ACTIVE_RUN') {
+                const activeRun = (await this.store.listRuns(conversationId))
+                    .find((item) => !TERMINAL_STATUSES.has(item.status));
+                if (activeRun) return this._activePlanConflictResult(activeRun, { resumeFromUser: true });
+            }
+            throw error;
+        }
         this.rememberRunLocalFolders(run.id, localFolders);
         await this.store.appendRunEvent(run.id, 'execution_contract_created', { requestId });
         return this.requestProtocolRepair({ runId: run.id, kind: 'missing_initial_execution' });
@@ -618,7 +808,8 @@ class M365RunCoordinator {
         const events = await this.store.listRunEvents(runId);
         const sameKindRepairs = events.filter((event) => event.eventType === 'autonomous_protocol_repair'
             && event.payload?.kind === kind).length;
-        if (sameKindRepairs >= 2) {
+        const repairLimit = run.goalMode ? 3 : 2;
+        if (sameKindRepairs >= repairLimit) {
             if (run.status === 'QUEUED') run = await this.store.transitionRun(run.id, 'RUNNING', { reason: 'PROTOCOL_REPAIR_LIMIT' });
             if (run.status === 'RUNNING') {
                 run = await this.store.transitionRun(run.id, 'BLOCKED', {
@@ -634,7 +825,7 @@ class M365RunCoordinator {
                 planId: run.id,
                 protocolRepair: {
                     status: 'blocked',
-                    message: '我已嘗試修正兩次，但仍沒有產生可執行的下一步。工作已暫停；請在右側查看受阻原因後重新執行。',
+                    message: `我已嘗試修正 ${repairLimit} 次，但仍沒有產生可執行的下一步。工作已暫停；請在右側查看受阻原因後重新執行。`,
                 },
             };
         }
@@ -715,6 +906,7 @@ class M365RunCoordinator {
         isSystemFeedback = false,
         workspaceRoot = '',
         localFolders = [],
+        goalMode = false,
     }) {
         await this.init();
         if (planError) {
@@ -770,11 +962,19 @@ class M365RunCoordinator {
                     constraints: 'Copilot-authored autonomous plan. Tool actions remain subject to Action Gate and host policy.',
                     verification: plan.completionCriteria,
                     maxSteps: 12,
+                    goalMode,
                     startImmediately: true,
                     origin: 'copilot',
                 });
                 resolvedRunId = created.id;
             } catch (error) {
+                if (error?.code === 'M365_CONVERSATION_HAS_ACTIVE_RUN') {
+                    const activeRun = (await this.store.listRuns(conversationId))
+                        .find((item) => !TERMINAL_STATUSES.has(item.status));
+                    if (activeRun) return this._activePlanConflictResult(activeRun, {
+                        resumeFromUser: isSystemFeedback !== true,
+                    });
+                }
                 return this._planRejection(error.code || 'M365_PLAN_CREATE_FAILED', error.message || '無法建立自主計畫。');
             }
         }
@@ -834,6 +1034,14 @@ class M365RunCoordinator {
                     planRevision: latestRevision,
                 });
             }
+            if (run.status === 'BLOCKED' && run.errorCode === 'M365_GOAL_NO_PROGRESS' && isSystemFeedback) {
+                return this._planRejection('M365_GOAL_NO_PROGRESS', '連續三個工具結果都沒有進展；已保留工作並等待使用者補充或停止。', {
+                    runId: run.id,
+                    planId: run.id,
+                    planRevision: latestRevision,
+                    goalMode: true,
+                });
+            }
             if (run.status === 'WAITING_USER' && isSystemFeedback && plan.status === 'running') {
                 return this._planRejection('M365_PLAN_USER_INPUT_REQUIRED', '上一個工具動作被拒絕或計畫正在等待使用者補充，不能自行恢復。', {
                     runId: run.id,
@@ -855,7 +1063,8 @@ class M365RunCoordinator {
                 if (!lastStep || lastStep.status === 'completed') {
                     const events = await this.store.listRunEvents(run.id);
                     const repairs = events.filter(event => event.eventType === 'autonomous_plan_action_repair').length;
-                    if (repairs < 2 && run.currentStep < run.maxSteps) {
+                    const repairLimit = run.goalMode ? 3 : 2;
+                    if (repairs < repairLimit && run.currentStep < run.maxSteps) {
                         const storedPlan = planForStorage(plan, run.id);
                         await this.store.appendRunEvent(run.id, 'autonomous_plan_received', { requestId, plan: storedPlan });
                         await this.store.appendRunEvent(run.id, 'autonomous_plan_action_repair', { revision: plan.revision, attempt: repairs + 1 });
@@ -908,6 +1117,28 @@ class M365RunCoordinator {
                 });
             }
 
+            const evidenceEvents = await this.store.listRunEvents(run.id);
+            const observedCompletedStepIds = [...new Set(evidenceEvents
+                .filter((event) => event.eventType === 'autonomous_observation_recorded'
+                    && event.payload?.status === 'succeeded'
+                    && String(event.payload?.planStepId || '').trim())
+                .map((event) => String(event.payload.planStepId).trim()))];
+            const missingCompletedEvidence = observedCompletedStepIds.filter((planStepId) => {
+                const step = plan.steps.find((item) => item.id === planStepId);
+                return !step || step.status !== 'completed';
+            });
+            if (latestRevision > 0 && missingCompletedEvidence.length > 0) {
+                await this.store.appendRunEvent(run.id, 'autonomous_plan_evidence_history_rejected', {
+                    revision: plan.revision,
+                    planStepIds: missingCompletedEvidence,
+                });
+                return this._requestProtocolRepairLocked({
+                    runId: run.id,
+                    kind: 'completed_evidence_not_preserved',
+                    issues: missingCompletedEvidence.map((id) => `completed_step_not_preserved:${id}`),
+                });
+            }
+
             const remainingInSameWaitState = (run.status === 'WAITING_USER' && plan.status === 'wait_user')
                 || (run.status === 'BLOCKED' && plan.status === 'blocked');
             if (['WAITING_USER', 'BLOCKED'].includes(run.status) && !remainingInSameWaitState) {
@@ -915,7 +1146,6 @@ class M365RunCoordinator {
                 run = await this.store.transitionRun(run.id, 'RUNNING', { reason: 'COPILOT_PLAN_STATE_APPLYING' });
             }
 
-            const evidenceEvents = await this.store.listRunEvents(run.id);
             const unverifiedStop = classifyUnverifiedStop(plan, evidenceEvents);
             if (unverifiedStop) {
                 await this.store.appendRunEvent(run.id, 'autonomous_plan_stop_rejected', {
@@ -1074,6 +1304,27 @@ class M365RunCoordinator {
                 summary: summary.slice(0, 4000),
             });
             let updatedRun = await this.store.getRun(runId);
+            if (!succeeded && !denied && run.goalMode && updatedRun.status === 'RUNNING') {
+                const events = await this.store.listRunEvents(runId);
+                let consecutiveFailures = 0;
+                for (const event of [...events].reverse()) {
+                    if (event.eventType !== 'autonomous_observation_recorded') continue;
+                    if (event.payload?.status === 'succeeded') break;
+                    if (event.payload?.status === 'failed') consecutiveFailures += 1;
+                    if (consecutiveFailures >= 3) break;
+                }
+                if (consecutiveFailures >= 3) {
+                    updatedRun = await this.store.transitionRun(runId, 'BLOCKED', {
+                        stepId,
+                        reason: 'GOAL_MODE_REPEATED_NO_PROGRESS',
+                        errorCode: 'M365_GOAL_NO_PROGRESS',
+                    });
+                    await this.store.appendRunEvent(runId, 'goal_no_progress_paused', {
+                        consecutiveFailures,
+                        lastSummary: summary.slice(0, 1000),
+                    });
+                }
+            }
             if (denied && updatedRun.status === 'RUNNING') {
                 updatedRun = await this.store.transitionRun(runId, 'WAITING_USER', {
                     stepId,

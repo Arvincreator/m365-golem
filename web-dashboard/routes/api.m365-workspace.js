@@ -548,7 +548,9 @@ module.exports = function registerM365WorkspaceRoutes(server) {
     router.post('/api/runs/:runId/resume', async (req, res) => {
         try {
             const coordinator = await getM365RunCoordinator(server);
-            const run = await coordinator.resumeRun(req.params.runId, req.body.input || '');
+            const run = await coordinator.resumeRun(req.params.runId, req.body.input || '', {
+                grantAutoTurns: req.body.grantAutoTurns,
+            });
             return res.json({ success: true, run });
         } catch (error) {
             return sendError(res, error);

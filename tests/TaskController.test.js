@@ -194,6 +194,44 @@ describe('TaskController', () => {
         controller.destroy();
     });
 
+    test('blocks Goal-mode commands that escape the assigned project workspace', async () => {
+        const controller = new TaskController({ golemId: 'test-golem' });
+        const ctx = {
+            reply: jest.fn().mockResolvedValue(undefined),
+            workspaceRoot: 'C:\\local\\m365-projects\\project-1',
+            workspaceGoalMode: true,
+        };
+
+        const outside = await controller.runSequence(ctx, [
+            { action: 'command', parameter: 'dir "D:\\Other\\secret"' },
+        ]);
+        const traversal = await controller.runSequence(ctx, [
+            { action: 'command', parameter: 'dir ..' },
+        ]);
+
+        expect(outside).toContain('Goal-mode workspace boundary blocked this command');
+        expect(outside).toContain('outside the assigned project workspace');
+        expect(traversal).toContain('Parent-directory traversal is not allowed');
+        expect(controller.internalExecutor).toBeFalsy();
+        controller.destroy();
+    });
+
+    test('allows a Goal-mode command that stays inside the assigned project workspace', async () => {
+        const controller = new TaskController({ golemId: 'test-golem' });
+        const workspaceRoot = 'C:\\local\\m365-projects\\project-1';
+        const command = `dir "${workspaceRoot}\\reports"`;
+
+        const result = await controller.runSequence({
+            reply: jest.fn().mockResolvedValue(undefined),
+            workspaceRoot,
+            workspaceGoalMode: true,
+        }, [{ action: 'command', parameter: command }], 0, null, { approvalGranted: true });
+
+        expect(result).toContain('[Step 1 Success]');
+        expect(controller.internalExecutor.run).toHaveBeenCalledWith(command, { cwd: workspaceRoot });
+        controller.destroy();
+    });
+
     test('runSequence should still require approval for complex command', async () => {
         const controller = new TaskController({ golemId: 'test-golem' });
         const ctx = { reply: jest.fn().mockResolvedValue(undefined) };

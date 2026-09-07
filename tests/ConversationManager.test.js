@@ -1,4 +1,5 @@
 const ConversationManager = require('../src/core/ConversationManager');
+const ConfigManager = require('../src/config');
 
 describe('ConversationManager', () => {
     let cm;
@@ -314,5 +315,129 @@ describe('ConversationManager', () => {
             workspaceStepId: 'step-1',
         }));
         expect(mockBrain.sendMessage).not.toHaveBeenCalled();
+    });
+
+    test('saves the exact next internal turn at the cap and grants exactly one more turn', async () => {
+        const originalLimit = ConfigManager.CONFIG.MAX_AUTO_TURNS;
+        ConfigManager.CONFIG.MAX_AUTO_TURNS = 2;
+        const onAutoTurnLimit = jest.fn().mockResolvedValue();
+        mockCtx = {
+            ...mockCtx,
+            workspaceRunId: 'run-soft-cap',
+            onAutoTurnLimit,
+        };
+        cm = new ConversationManager(mockBrain, mockShunter, mockController);
+
+        try {
+            for (const text of ['Observation one', 'Observation two']) {
+                cm.queue.push({
+                    ctx: mockCtx,
+                    text,
+                    attachment: null,
+                    options: { isSystemFeedback: true, workspaceRunId: 'run-soft-cap' },
+                });
+                await cm._processQueue();
+            }
+
+            cm.queue.push({
+                ctx: mockCtx,
+                text: 'Exact deferred observation',
+                attachment: null,
+                options: { isSystemFeedback: true, workspaceRunId: 'run-soft-cap' },
+            });
+            await cm._processQueue();
+
+            expect(mockBrain.sendMessage).toHaveBeenCalledTimes(2);
+            expect(onAutoTurnLimit).toHaveBeenCalledWith({
+                runId: 'run-soft-cap',
+                pendingPrompt: 'Exact deferred observation',
+                used: 2,
+                limit: 2,
+                nextLimit: 3,
+            });
+            expect(mockCtx.reply).toHaveBeenCalledWith(
+                expect.stringContaining('上限會由 2 增加為 3'),
+                expect.any(Object)
+            );
+
+            cm.queue.push({
+                ctx: mockCtx,
+                text: 'Exact deferred observation',
+                attachment: null,
+                options: {
+                    isSystemFeedback: true,
+                    workspaceRunId: 'run-soft-cap',
+                    autoTurnBudget: { used: 2, limit: 3 },
+                },
+            });
+            await cm._processQueue();
+
+            expect(mockBrain.sendMessage).toHaveBeenCalledTimes(3);
+            expect(mockBrain.sendMessage).toHaveBeenLastCalledWith(
+                'Exact deferred observation',
+                false,
+                expect.objectContaining({ isSystemFeedback: true })
+            );
+            expect(onAutoTurnLimit).toHaveBeenCalledTimes(1);
+        } finally {
+            ConfigManager.CONFIG.MAX_AUTO_TURNS = originalLimit;
+        }
+    });
+
+    test('does not apply the fixed automatic-turn cap to Goal mode', async () => {
+        const originalLimit = ConfigManager.CONFIG.MAX_AUTO_TURNS;
+        ConfigManager.CONFIG.MAX_AUTO_TURNS = 1;
+        const onAutoTurnLimit = jest.fn().mockResolvedValue();
+        mockCtx = {
+            ...mockCtx,
+            workspaceRunId: 'run-goal',
+            workspaceGoalMode: true,
+            onAutoTurnLimit,
+        };
+        cm = new ConversationManager(mockBrain, mockShunter, mockController);
+
+        try {
+            for (const text of ['Goal observation one', 'Goal observation two', 'Goal observation three']) {
+                cm.queue.push({
+                    ctx: mockCtx,
+                    text,
+                    attachment: null,
+                    options: { isSystemFeedback: true, workspaceRunId: 'run-goal', goalMode: true },
+                });
+                await cm._processQueue();
+            }
+
+            expect(mockBrain.sendMessage).toHaveBeenCalledTimes(3);
+            expect(onAutoTurnLimit).not.toHaveBeenCalled();
+        } finally {
+            ConfigManager.CONFIG.MAX_AUTO_TURNS = originalLimit;
+        }
+    });
+
+    test('resets a run budget when a real user turn asks Copilot to replan it', async () => {
+        const originalLimit = ConfigManager.CONFIG.MAX_AUTO_TURNS;
+        ConfigManager.CONFIG.MAX_AUTO_TURNS = 2;
+        mockCtx = { ...mockCtx, workspaceRunId: 'run-user-replan' };
+        cm = new ConversationManager(mockBrain, mockShunter, mockController);
+        cm.autoTurnStateByRun.set('run-user-replan', { used: 5, limit: 5 });
+
+        try {
+            cm.queue.push({
+                ctx: mockCtx,
+                text: 'Replan from the newest user message',
+                attachment: null,
+                options: {
+                    isSystemFeedback: true,
+                    workspaceRunId: 'run-user-replan',
+                    resetAutoTurnBudget: true,
+                },
+            });
+            await cm._processQueue();
+
+            expect(mockBrain.sendMessage).toHaveBeenCalledTimes(1);
+            expect(cm.autoTurnStateByRun.get('run-user-replan')).toEqual({ used: 1, limit: 2 });
+        } finally {
+            ConfigManager.CONFIG.MAX_AUTO_TURNS = originalLimit;
+        }
     });
 });

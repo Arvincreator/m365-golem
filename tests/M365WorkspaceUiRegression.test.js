@@ -105,7 +105,7 @@ describe('M365 workspace UI regressions', () => {
         expect(source).toContain('等待 Observation');
         expect(source).toContain('進行中');
         expect(source).toContain('`計畫 ${runDetail.plan.steps.filter');
-        expect(source).toContain('宿主執行 ${run.currentStep}/${run.maxSteps}');
+        expect(source).toContain('run.goalMode ? " · 無固定上限" : `/${run.maxSteps}`');
         expect(source).toContain('const displayedStatus = step.status;');
         expect(source).toContain('runAction(run, "complete"');
         expect(source).toContain('確認已完成');
@@ -119,11 +119,46 @@ describe('M365 workspace UI regressions', () => {
         expect(source).toContain('if (loading || !target || messages.length === 0) return;');
         expect(source).toContain('[latestMessageKey, loading, messages.length, scrollToLatest]');
         expect(source).toContain('window.requestAnimationFrame');
-        expect(source).toContain('else if (followingLatestRef.current)');
+        expect(source).toContain('else if (followingLatestRef.current || followRequestIdRef.current)');
         expect(source).toContain('scrollToLatest("auto");');
         expect(source).not.toContain('else if (followingLatestRef.current) {\n                scrollToLatest("smooth");');
         expect(source).toContain('aria-label="回到最新對話"');
         expect(source).not.toContain('}, [messages]);\n\n    const toggleReferenceFile');
+    });
+
+    test('forces follow from send through the matching Copilot response and growing content', () => {
+        const source = read('web-dashboard/src/app/dashboard/chat/page.tsx');
+        expect(source).toContain('followRequestIdRef.current = "pending";');
+        expect(source).toContain('followRequestIdRef.current = accepted.requestId;');
+        expect(source).toContain('message.role === "assistant" && message.requestId === requestId');
+        expect(source).toContain('const observer = new ResizeObserver');
+        expect(source).toContain('if (!followingLatestRef.current && !followRequestIdRef.current) return;');
+    });
+
+    test('offers an opt-in Goal mode and shows its unbounded execution state', () => {
+        const source = read('web-dashboard/src/app/dashboard/chat/page.tsx');
+        expect(source).toContain('aria-label="目標模式"');
+        expect(source).toContain('goalMode,');
+        expect(source).toContain('目標模式會持續到證據確認完成');
+        expect(source).toContain('無固定上限');
+        expect(source).toContain('需要授權或補充時仍會停下');
+    });
+
+    test('turns the automatic-turn ceiling into a one-turn continuation gate', () => {
+        const source = read('web-dashboard/src/features/m365-workspace/components/RunAttention.tsx');
+        expect(source).toContain('run.errorCode === "M365_AUTO_TURN_LIMIT"');
+        expect(source).toContain('下一回合尚未送出');
+        expect(source).toContain('{ grantAutoTurns: 1 }');
+        expect(source).toContain('再執行 1 回合');
+        expect(source).toContain('再次到達上限時會重新詢問');
+    });
+
+    test('suppresses browser cancellation text instead of showing it as a workspace failure', () => {
+        const client = read('web-dashboard/src/lib/api-client.ts');
+        const source = read('web-dashboard/src/app/dashboard/chat/page.tsx');
+        expect(client).toContain('export function isApiAbortError');
+        expect(client).toContain('the user aborted a request');
+        expect(source).toContain('!isApiAbortError(requestError)');
     });
 
     test('shows a wave-style Golem activity bubble while a delivered turn awaits a reply', () => {

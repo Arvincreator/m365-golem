@@ -110,12 +110,29 @@ function getBackoffDelayMs(attempt: number, options: ResolvedRetryOptions): numb
     return Math.floor(exp * jitterFactor);
 }
 
-function isAbortError(error: unknown): boolean {
-    return error instanceof DOMException && error.name === "AbortError";
+export function isApiAbortError(error: unknown): boolean {
+    if (!error) return false;
+    if (typeof error === "string") {
+        return /^(?:the user aborted a request|this operation was aborted)\.?$/i.test(error.trim());
+    }
+    if (typeof DOMException !== "undefined" && error instanceof DOMException && error.name === "AbortError") {
+        return true;
+    }
+    if (error instanceof Error) {
+        return error.name === "AbortError"
+            || /^(?:the user aborted a request|this operation was aborted)\.?$/i.test(error.message.trim());
+    }
+    if (typeof error === "object") {
+        const value = error as { name?: unknown; message?: unknown };
+        return value.name === "AbortError"
+            || (typeof value.message === "string"
+                && /^(?:the user aborted a request|this operation was aborted)\.?$/i.test(value.message.trim()));
+    }
+    return false;
 }
 
 function shouldRetry(error: unknown, options: ResolvedRetryOptions): boolean {
-    if (isAbortError(error)) return false;
+    if (isApiAbortError(error)) return false;
     if (error instanceof ApiError) {
         return options.retryOnStatuses.includes(error.status);
     }

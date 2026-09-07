@@ -40,7 +40,7 @@ class CommandHandler {
             }
             const nextDepth = Number(dispatchOptions.actionDepth || 0) + 1;
             const maxDepth = Number(dispatchOptions.maxActionDepth || process.env.GOLEM_MAX_AUTO_TURNS || 5);
-            const mayContinue = nextDepth < maxDepth && !['PAUSED', 'CANCELED', 'COMPLETED', 'RECONCILE_REQUIRED'].includes(recorded?.run?.status);
+            const mayContinue = nextDepth < maxDepth && !['PAUSED', 'BLOCKED', 'CANCELED', 'COMPLETED', 'RECONCILE_REQUIRED'].includes(recorded?.run?.status);
             const feedbackPrompt = buildM365PlanObservation({
                 planId: dispatchOptions.workspacePlanId || recorded?.planId,
                 planRevision: dispatchOptions.workspacePlanRevision || recorded?.planRevision,

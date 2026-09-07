@@ -3,6 +3,7 @@ const Executor = require('./Executor');
 const { SecurityManager } = require('../../packages/security');
 const ToolScanner = require('../managers/ToolScanner');
 const NodeRouter = require('./NodeRouter');
+const nodePath = require('path');
 
 // Golem 內建斜線指令前綴（以 /learn、/skills … 開頭的指令）
 // 凡是符合此清單的指令，直接由 NodeRouter 處理，不送進 shell。
@@ -15,6 +16,34 @@ const GOLEM_SLASH_PREFIXES = [
 
 function shellQuote(value) {
     return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+function goalModeScopeViolation(command, workspaceRoot) {
+    const text = String(command || '');
+    const root = String(workspaceRoot || '').trim();
+    if (!root) return 'The assigned project workspace is unavailable.';
+    if (/(?:^|[\\/\s"'=])\.\.(?:[\\/]|$)/.test(text)) {
+        return 'Parent-directory traversal is not allowed in Goal mode.';
+    }
+    if (/(?:%\s*(?:USERPROFILE|HOMEDRIVE|HOMEPATH|APPDATA|LOCALAPPDATA|TEMP|TMP)\s*%|\$\{?env:(?:USERPROFILE|HOMEDRIVE|HOMEPATH|APPDATA|LOCALAPPDATA|TEMP|TMP)\}?|(?:^|\s)~[\\/])/i.test(text)) {
+        return 'User-profile, environment, and temporary-directory shortcuts are outside the Goal-mode project boundary.';
+    }
+
+    const candidates = new Set();
+    for (const match of text.matchAll(/["']((?:[a-zA-Z]:[\\/]|\\\\)[^"']+)["']/g)) {
+        candidates.add(match[1]);
+    }
+    for (const match of text.matchAll(/(?:^|[\s=,(])((?:[a-zA-Z]:[\\/]|\\\\)[^\s"'|;&),]+)/g)) {
+        candidates.add(match[1]);
+    }
+    const normalizedRoot = nodePath.win32.resolve(root).replace(/[\\/]+$/, '').toLowerCase();
+    for (const candidate of candidates) {
+        const normalizedPath = nodePath.win32.resolve(String(candidate).replace(/[),]+$/, '')).toLowerCase();
+        if (normalizedPath !== normalizedRoot && !normalizedPath.startsWith(`${normalizedRoot}\\`)) {
+            return `Absolute path is outside the assigned project workspace: ${candidate}`;
+        }
+    }
+    return '';
 }
 
 // ============================================================
@@ -245,6 +274,17 @@ class TaskController {
                     );
                 }
                 continue;
+            }
+
+            if (ctx?.workspaceGoalMode === true && isNativeCommand) {
+                const scopeViolation = goalModeScopeViolation(cmdToRun, ctx.workspaceRoot);
+                if (scopeViolation) {
+                    reportBuffer.push(
+                        `[Step ${i + 1} Failed] Goal-mode workspace boundary blocked this command. ${scopeViolation} ` +
+                        'Use a path inside the assigned project workspace, or ask the user for an explicitly scoped source.'
+                    );
+                    continue;
+                }
             }
 
             const risk = this.security.assess(cmdToRun);

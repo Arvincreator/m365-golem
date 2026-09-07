@@ -20,13 +20,15 @@ async function main() {
     let submits = 0;
     let rejectResume = true;
     const runRequests = [];
-    let draft = { schemaVersion: 1, revision: 0, text: '', responseMode: 'auto', referenceFileIds: [], mcpServerNames: [], skillIds: [], quote: null, attachmentDescriptors: [] };
+    const chatRequests = [];
+    let draft = { schemaVersion: 1, revision: 0, text: '', responseMode: 'auto', referenceFileIds: [], mcpServerNames: [], skillIds: [], localFolders: [], quote: null, attachmentDescriptors: [] };
     const drafts = new Map();
     const project = { id: 'synthetic-project', name: '合成示範專案', description: '', instructions: '', status: 'active', contextVersion: 1 };
     const conversation = { id: 'synthetic-chat', projectId: project.id, title: '桌面助理體驗驗收', bindingState: 'unbound', status: 'active' };
     const second = { ...conversation, id: 'synthetic-second', title: '另一個合成對話' };
-    const run = { id: 'synthetic-run', conversationId: conversation.id, objective: '合成任務：驗證逐步狀態', status: 'COMPLETED', currentStep: 1, maxSteps: 5, updatedAt: '2026-09-07T01:00:00Z' };
-    const message = { id: 'synthetic-message', conversationId: conversation.id, role: 'assistant', source: 'm365', content: '## 工作摘要\n\n這是合成資料，用於檢查閱讀、引用和草稿保存。\n\nGOLEM_ACTION 是協定名稱，這段解說不代表待核准動作。\n\n| 步驟 | 狀態 |\n| --- | --- |\n| 整理資料 | 已完成 |\n| 人工核對 | 待確認 |', deliveryState: 'response_confirmed', createdAt: '2026-09-07T01:00:00Z' };
+    const run = { id: 'synthetic-run', conversationId: conversation.id, objective: '合成任務：驗證逐步狀態', status: 'COMPLETED', currentStep: 1, maxSteps: 5, goalMode: false, errorCode: null, updatedAt: '2026-09-07T01:00:00Z' };
+    const message = { id: 'synthetic-message', conversationId: conversation.id, role: 'assistant', source: 'm365', content: `## 工作摘要\n\n這是合成資料，用於檢查閱讀、引用和草稿保存。\n\nGOLEM_ACTION 是協定名稱，這段解說不代表待核准動作。\n\n| 步驟 | 狀態 |\n| --- | --- |\n| 整理資料 | 已完成 |\n| 人工核對 | 待確認 |\n\n${Array.from({ length: 45 }, (_, index) => `閱讀測試內容 ${index + 1}`).join('\n\n')}`, deliveryState: 'response_confirmed', createdAt: '2026-09-07T01:00:00Z' };
+    const messages = [message];
     await page.addInitScript(() => { localStorage.setItem('m365_active_project_id', 'synthetic-project'); localStorage.setItem('m365_active_conversation_id', 'synthetic-chat'); });
     await context.route('**/*', async route => {
         const url = new URL(route.request().url());
@@ -35,9 +37,11 @@ async function main() {
             const pathname = url.pathname;
             let body = { success: true };
             if (/\/api\/runs\/[^/]+\/(resume|cancel|reconcile)$/.test(pathname)) {
-                runRequests.push({ path: pathname, body: route.request().postDataJSON() });
-                if (pathname.endsWith('/resume') && rejectResume) return route.fulfill({ status: 400, json: { error: 'Synthetic resume failure' } });
+                const requestBody = route.request().postDataJSON();
+                runRequests.push({ path: pathname, body: requestBody });
+                if (pathname.endsWith('/resume') && rejectResume && requestBody.grantAutoTurns !== 1) return route.fulfill({ status: 400, json: { error: 'Synthetic resume failure' } });
                 run.status = pathname.endsWith('/cancel') ? 'CANCELED' : 'RUNNING';
+                run.errorCode = null;
             } else if (pathname.endsWith('/draft')) {
                 const stored = drafts.get(pathname) || { ...draft, text: '', revision: 0, quote: null };
                 if (route.request().method() === 'POST') {
@@ -47,8 +51,17 @@ async function main() {
                 }
                 body.draft = drafts.get(pathname) || stored;
                 if (pathname.includes(conversation.id)) draft = body.draft;
-            } else if (pathname === '/api/chat') { submits++; await new Promise(r => setTimeout(r, 250)); body.requestId = `synthetic-request-${submits}`; }
-            else if (pathname.endsWith('/messages')) body.messages = [message];
+            } else if (pathname === '/api/chat') {
+                submits++;
+                const request = route.request().postDataJSON();
+                const requestId = `synthetic-request-${submits}`;
+                chatRequests.push(request);
+                messages.push({ id: `synthetic-user-${submits}`, conversationId: conversation.id, role: 'user', source: 'user', content: request.message, requestId, deliveryState: 'confirmed', createdAt: new Date().toISOString() });
+                setTimeout(() => messages.push({ id: `synthetic-reply-${submits}`, conversationId: conversation.id, role: 'assistant', source: 'm365', content: '合成 Copilot 回覆已完成。', requestId, deliveryState: 'response_confirmed', createdAt: new Date().toISOString() }), 500);
+                await new Promise(r => setTimeout(r, 250));
+                body.requestId = requestId;
+            }
+            else if (pathname.endsWith('/messages')) body.messages = messages;
             else if (pathname.endsWith('/runs')) body.runs = [run];
             else if (pathname === `/api/runs/${run.id}`) Object.assign(body, { run, approvals: [], steps: [], plan: { revision: 1, status: 'blocked', steps: [
                 { id: 'one', title: '資料整理', status: 'completed', doneWhen: '已有資料' },
@@ -88,13 +101,22 @@ async function main() {
         assert.equal(submits, 0);
         await input.fill('第一行'); await input.press('Shift+Enter');
         assert.match(await input.inputValue(), /\n/);
+        const goalToggle = page.getByRole('button', { name: '目標模式', exact: true });
+        await goalToggle.click();
+        assert.equal(await goalToggle.getAttribute('aria-pressed'), 'true');
+        const chatScroller = page.getByRole('heading', { name: '工作摘要', exact: true }).locator('xpath=ancestor::div[contains(concat(" ", normalize-space(@class), " "), " custom-scrollbar ")][1]');
+        await chatScroller.evaluate(node => { node.scrollTop = 0; });
         await input.fill('A');
         await page.getByRole('button', { name: '傳送', exact: true }).click();
-        await page.waitForTimeout(50); await input.fill('B：新的草稿不可被清除');
-        await page.waitForTimeout(1000);
+        await page.waitForTimeout(50);
+        assert.equal(await chatScroller.evaluate(node => node.scrollTop + node.clientHeight >= node.scrollHeight - 40), true);
+        await input.fill('B：新的草稿不可被清除');
+        await page.getByText('合成 Copilot 回覆已完成。', { exact: true }).waitFor({ timeout: 6000 });
+        assert.equal(await chatScroller.evaluate(node => node.scrollTop + node.clientHeight >= node.scrollHeight - 40), true);
         assert.equal(submits, 1); assert.equal(await input.inputValue(), 'B：新的草稿不可被清除');
+        assert.equal(chatRequests[0].goalMode, true);
         assert.equal(draft.text, 'B：新的草稿不可被清除');
-        await page.getByRole('button', { name: '引用追問', exact: true }).click();
+        await page.getByRole('button', { name: '引用追問', exact: true }).last().click();
         assert.equal(submits, 1);
         await page.getByRole('button', { name: '移除引用', exact: true }).waitFor();
         await page.getByRole('button', { name: second.title, exact: true }).click();
@@ -153,16 +175,23 @@ async function main() {
         assert.equal(await page.evaluate(() => JSON.stringify(localStorage).includes('新的草稿不可被清除')), false);
         await page.setViewportSize({ width: 1366, height: 900 });
         run.status = 'WAITING_USER';
+        run.errorCode = 'M365_AUTO_TURN_LIMIT';
         const attention = page.getByRole('region', { name: '多步驟待處理' });
         await attention.waitFor({ timeout: 10000 });
         await page.getByRole('status', { name: '工作提醒' }).waitFor();
         await page.screenshot({ path: path.join(output, 'run-notification-1366.png'), fullPage: true });
         assert.equal(await page.getByRole('dialog').count(), 0);
         await page.getByRole('button', { name: '知道了', exact: true }).click();
-        await page.waitForTimeout(3000);
+        await page.waitForTimeout(100);
         assert.equal(await page.getByRole('status', { name: '工作提醒' }).count(), 0);
-        await attention.getByRole('button', { name: '補充說明', exact: true }).click();
+        await attention.getByRole('button', { name: '再執行 1 回合', exact: true }).click();
+        await attention.waitFor({ state: 'hidden' });
+        assert.equal(runRequests.at(-1).body.grantAutoTurns, 1);
+        run.status = 'WAITING_USER';
+        run.errorCode = null;
+        await attention.waitFor({ timeout: 10000 });
         const supplement = page.getByLabel('補充此多步驟工作（原對話草稿已保留）');
+        await supplement.waitFor();
         await supplement.fill('這是補充資料');
         assert.equal(await input.isVisible(), false);
         await attention.getByRole('button', { name: '返回一般對話' }).click();
@@ -178,7 +207,7 @@ async function main() {
         await attention.waitFor({ state: 'hidden' });
         assert.equal(await input.inputValue(), 'B：新的草稿不可被清除');
         assert.equal(submits, 1);
-        assert.equal(runRequests.filter(item => item.path.endsWith('/resume')).length, 2);
+        assert.equal(runRequests.filter(item => item.path.endsWith('/resume')).length, 3);
         assert.equal(runRequests[1].body.input, '這是補充資料');
         run.status = 'RECONCILE_REQUIRED';
         await attention.waitFor({ timeout: 10000 });

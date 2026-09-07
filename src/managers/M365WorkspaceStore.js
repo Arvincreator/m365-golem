@@ -61,6 +61,7 @@ const RUN_TRANSITIONS = Object.freeze({
 
 const WORKSPACE_MODES = new Set(['managed', 'create', 'existing']);
 const PROJECT_ID_PATTERN = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/;
+const GOAL_MODE_MAX_STEPS = 2147483647;
 
 function workspaceError(code, message, details = null) {
     const error = new Error(message);
@@ -337,6 +338,14 @@ class M365WorkspaceStore {
                 await this._run('INSERT OR IGNORE INTO schema_migrations(version, applied_at) VALUES(3, ?)', [this._now()]);
             });
         }
+        const versionFour = await this._get('SELECT version FROM schema_migrations WHERE version = 4');
+        if (!versionFour) await this._transaction(async () => {
+            await this._run('ALTER TABLE runs ADD COLUMN goal_mode INTEGER NOT NULL DEFAULT 0 CHECK (goal_mode IN (0, 1))');
+            await this._run(
+                'INSERT INTO schema_migrations(version, applied_at) VALUES(4, ?)',
+                [this._now()]
+            );
+        });
     }
 
     async _ensureUxSchema() {
@@ -992,8 +1001,11 @@ class M365WorkspaceStore {
         const objective = requireText(input.objective, 'objective', 20000);
         const constraints = optionalText(input.constraints, 'constraints', 20000);
         const verification = requireText(input.verification, 'verification', 20000);
+        const goalMode = input.goalMode === true;
         const rawMaxSteps = Number(input.maxSteps || 6);
-        const maxSteps = Number.isFinite(rawMaxSteps) ? Math.max(1, Math.min(Math.floor(rawMaxSteps), 12)) : 6;
+        const maxSteps = goalMode
+            ? GOAL_MODE_MAX_STEPS
+            : (Number.isFinite(rawMaxSteps) ? Math.max(1, Math.min(Math.floor(rawMaxSteps), 12)) : 6);
         const startImmediately = input.startImmediately === true;
         const initialStatus = startImmediately ? 'RUNNING' : 'WAITING_START_APPROVAL';
         const origin = String(input.origin || (startImmediately ? 'copilot' : 'user')).trim().slice(0, 40) || 'user';
@@ -1023,8 +1035,8 @@ class M365WorkspaceStore {
                     objective_ciphertext, objective_iv, objective_tag,
                     constraints_ciphertext, constraints_iv, constraints_tag,
                     verification_ciphertext, verification_iv, verification_tag,
-                    status, max_steps, current_step, created_at, started_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?)
+                    status, max_steps, current_step, goal_mode, created_at, started_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?)
             `, [
                 id,
                 conversationId,
@@ -1033,15 +1045,17 @@ class M365WorkspaceStore {
                 ...this._encryptedParams(verification, `runs:${id}:verification`),
                 initialStatus,
                 maxSteps,
+                goalMode ? 1 : 0,
                 now,
                 startImmediately ? now : null,
                 now,
             ]);
-            await this._appendRunEventDirect(id, 'run_created', { maxSteps, origin, startImmediately });
+            await this._appendRunEventDirect(id, 'run_created', { maxSteps, goalMode, origin, startImmediately });
             await this._appendCheckpointDirect(id, null, {
                 status: initialStatus,
                 currentStep: 0,
                 pendingApproval: startImmediately ? null : 'run_start',
+                goalMode,
                 origin,
             });
             return this._decodeRun(await this._get('SELECT * FROM runs WHERE id = ?', [id]));
@@ -1059,6 +1073,7 @@ class M365WorkspaceStore {
             status: row.status,
             maxSteps: row.max_steps,
             currentStep: row.current_step,
+            goalMode: row.goal_mode === 1,
             errorCode: row.error_code,
             createdAt: row.created_at,
             startedAt: row.started_at,
@@ -1436,5 +1451,6 @@ class M365WorkspaceStore {
 module.exports = M365WorkspaceStore;
 module.exports.RUN_STATUSES = RUN_STATUSES;
 module.exports.RUN_TRANSITIONS = RUN_TRANSITIONS;
+module.exports.GOAL_MODE_MAX_STEPS = GOAL_MODE_MAX_STEPS;
 module.exports.parseEncryptionKey = parseEncryptionKey;
 module.exports.workspaceError = workspaceError;

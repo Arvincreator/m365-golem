@@ -797,6 +797,7 @@ describe('NeuroShunter M365 safety gates', () => {
             planId: null,
             planRevision: 0,
             maxActionDepth: 12,
+            resetAutoTurnBudget: true,
             protocolRepair: {
                 status: 'retry',
                 prompt: '[GOLEM_EXECUTION_REPAIR]use the real tool[/GOLEM_EXECUTION_REPAIR]',
@@ -849,6 +850,7 @@ describe('NeuroShunter M365 safety gates', () => {
                 planMode: true,
                 workspaceRunId: 'run-repair-1',
                 workspacePlanId: null,
+                resetAutoTurnBudget: true,
                 toolRoutingQuery: '在工作區建立 Word 報告',
             })
         );

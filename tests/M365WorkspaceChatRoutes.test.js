@@ -349,6 +349,36 @@ describe('workspace-aware M365 chat route', () => {
         }));
     });
 
+    test('injects Goal-mode resource and safety rules into an opted-in user turn', async () => {
+        mockHandleDashboardMessage.mockImplementation(async (ctx) => {
+            expect(ctx.workspaceGoalMode).toBe(true);
+            expect(ctx.workspaceMaxActionDepth).toBeUndefined();
+            expect(ctx.workspaceAutoTurnBudget).toBeUndefined();
+            expect(ctx.textOverride).toContain('[GOAL_MODE]');
+            expect(ctx.textOverride).toContain('golem-check tools <specific task>');
+            expect(ctx.textOverride).toContain('replace unfinished plan steps');
+            expect(ctx.textOverride).toContain('confined to the assigned project workspace');
+            expect(ctx.textOverride).toContain('Do not mark the goal complete until successful host Observations');
+            await ctx.onTransportStart();
+            await ctx.onTransportAccepted();
+            await ctx.onTransportComplete({ text: 'Goal work accepted.' });
+            await ctx.reply('Goal work accepted.');
+        });
+
+        const result = await postChat({
+            golemId: 'golem_A',
+            projectId: 'project-1',
+            conversationId: 'conversation-1',
+            message: '持續處理此專案，直到驗證目標完成。',
+            goalMode: true,
+            maxActionDepth: 999,
+            autoTurnBudget: { used: 99, limit: 999 },
+        });
+
+        expect(result.response.status).toBe(200);
+        await waitFor(() => serverContext.m365DispatchLease === null);
+    });
+
     test('accepts Copilot title metadata for a placeholder conversation and broadcasts the rename', async () => {
         mockHandleDashboardMessage.mockImplementation(async (ctx) => {
             expect(ctx.workspaceConversationTitleRequested).toBe(true);
@@ -543,6 +573,8 @@ describe('workspace-aware M365 chat route', () => {
     test('does not honor an external request to hide a user message as internal control', async () => {
         mockHandleDashboardMessage.mockImplementation(async (ctx) => {
             expect(ctx.m365InternalControl).toBe(false);
+            expect(ctx.workspaceMaxActionDepth).toBeUndefined();
+            expect(ctx.workspaceAutoTurnBudget).toBeUndefined();
             await ctx.onTransportStart({ isSystemFeedback: false });
             await ctx.onTransportAccepted({ isSystemFeedback: false });
             await ctx.onTransportComplete({ text: 'answer' }, { isSystemFeedback: false });
@@ -551,6 +583,8 @@ describe('workspace-aware M365 chat route', () => {
         const result = await postChat({
             golemId: 'golem_A', projectId: 'project-1', conversationId: 'conversation-1',
             message: 'normal visible request', internalControl: true,
+            maxActionDepth: 999,
+            autoTurnBudget: { used: 99, limit: 999 },
         });
         expect(result.response.status).toBe(200);
         await waitFor(() => serverContext.m365DispatchLease === null);

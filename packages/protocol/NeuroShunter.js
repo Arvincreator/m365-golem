@@ -362,6 +362,7 @@ class NeuroShunter {
                         workspacePlanRevision: protocolResult.planRevision ?? options.workspacePlanRevision ?? 0,
                         workspacePlanStepId: protocolResult.planStepId || options.workspacePlanStepId || null,
                         workspaceActionId: protocolResult.actionId || options.workspaceActionId || null,
+                        resetAutoTurnBudget: protocolResult.resetAutoTurnBudget === true,
                     };
                     if (protocolResult.accepted === false) parsed.actions = [];
                     if (protocolResult.warning) {
@@ -682,6 +683,7 @@ class NeuroShunter {
                     workspaceRunId: options.workspaceRunId || null,
                     workspacePlanId: options.workspacePlanId || null,
                     workspacePlanRevision: Number(options.workspacePlanRevision || 0),
+                    resetAutoTurnBudget: options.resetAutoTurnBudget === true,
                     toolRoutingQuery: String(protocolRepair.toolRoutingQuery || ''),
                 });
             } else if (!protocolRepair.message) {
