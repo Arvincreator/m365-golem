@@ -1,5 +1,6 @@
 "use client";
 
+import { RunAttention } from "@/features/m365-workspace/components/RunAttention";
 import { WorkspaceInspector } from "@/features/m365-workspace/components/WorkspaceInspector";
 
 import React, { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -292,7 +293,7 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
     const [showRuns, setShowRuns] = useState(false);
     const [runSaving, setRunSaving] = useState(false);
     const [runDetail, setRunDetail] = useState<M365RunDetail | null>(null);
-    const [runInput, setRunInput] = useState("");
+    const [replyingToRun, setReplyingToRun] = useState(false);
     const [followingLatest, setFollowingLatest] = useState(true);
     const scrollRef = useRef<HTMLDivElement>(null);
     const followingLatestRef = useRef(true);
@@ -590,9 +591,10 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
             loadPendingLocalActions().catch(() => undefined);
             loadPendingResponses().catch(() => undefined);
             loadMessages().catch(() => undefined);
+            loadRuns().catch(() => undefined);
         }, 2500);
         return () => window.clearInterval(timer);
-    }, [activeConversationId, loadMessages, loadPendingLocalActions, loadPendingResponses]);
+    }, [activeConversationId, loadMessages, loadPendingLocalActions, loadPendingResponses, loadRuns]);
 
     useEffect(() => {
         const target = scrollRef.current;
@@ -874,8 +876,10 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
         try {
             await apiPost(apiUrl(`/api/runs/${encodeURIComponent(run.id)}/${action}`), body);
             await Promise.all([loadRuns(), loadMessages()]);
+            return true;
         } catch (requestError) {
             setError(errorMessage(requestError));
+            return false;
         } finally {
             setRunSaving(false);
         }
@@ -1145,6 +1149,8 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                 )}
                 </div>
 
+                <RunAttention run={currentRun} detail={runDetail} busy={runSaving} replying={replyingToRun} onReplyingChange={setReplyingToRun} act={runAction} />
+
                 <form
                     onSubmit={sendMessage}
                     onDragEnter={(event) => { event.preventDefault(); if (!sending) setDragActive(true); }}
@@ -1153,7 +1159,7 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                         if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragActive(false);
                     }}
                     onDrop={(event) => void handleAttachmentDrop(event)}
-                    className="relative border-t border-border bg-card/50 p-3"
+                    className={cn("relative border-t border-border bg-card/50 p-3", replyingToRun && "hidden")}
                 >
                     <div className="mb-2 text-xs text-muted-foreground" role="status">
                         {draftState.status === "saved" ? "已在本機加密保存" : draftState.status === "saving" ? "保存中…" : draftState.status === "loading" ? "載入草稿…" : "尚未保存"}
@@ -1673,36 +1679,8 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                                                 </div>
                                             </div>
                                         )}
-                                        {["WAITING_USER", "BLOCKED"].includes(run.status) && (
-                                            <div className="space-y-2">
-                                                <textarea
-                                                    value={runInput}
-                                                    onChange={(event) => setRunInput(event.target.value)}
-                                                    rows={3}
-                                                    maxLength={20000}
-                                                    className="w-full resize-y rounded-xl border border-input bg-background px-3 py-2 text-xs outline-none focus:ring-2 focus:ring-ring"
-                                                    placeholder="補充缺少的資訊或人工判斷後再繼續"
-                                                />
-                                                <button
-                                                    disabled={runSaving || !runInput.trim()}
-                                                    onClick={() => {
-                                                        runAction(run, "resume", { input: runInput }).then(() => setRunInput(""));
-                                                    }}
-                                                    className="inline-flex items-center gap-1.5 rounded-lg bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground disabled:opacity-40"
-                                                >
-                                                    <RotateCcw className="h-3 w-3" />加入補充並繼續
-                                                </button>
-                                            </div>
-                                        )}
-                                        {run.status === "RECONCILE_REQUIRED" && (
-                                            <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 p-3 text-xs leading-5">
-                                                <p className="font-medium">請先查看可見 Edge 中的實際結果，再選一項：</p>
-                                                <div className="mt-2 flex flex-col gap-1.5">
-                                                    <button disabled={runSaving} onClick={() => runAction(run, "reconcile", { resolution: "not_sent", note: "使用者已在 Edge 確認前一步未送出。" })} className="rounded-lg border border-border bg-background px-3 py-1.5 text-left">確認未送出，可安全重試</button>
-                                                    <button disabled={runSaving} onClick={() => runAction(run, "reconcile", { resolution: "completed" })} className="rounded-lg border border-border bg-background px-3 py-1.5 text-left">已在 Edge 確認工作完成</button>
-                                                    <button disabled={runSaving} onClick={() => runAction(run, "reconcile", { resolution: "abandon" })} className="rounded-lg border border-destructive/30 bg-background px-3 py-1.5 text-left text-destructive">停止這次工作</button>
-                                                </div>
-                                            </div>
+                                        {["WAITING_USER", "BLOCKED", "RECONCILE_REQUIRED"].includes(run.status) && (
+                                            <p className="rounded-xl border border-amber-500/30 p-3 text-sm">此工作需要你處理，請使用主對話輸入區上方的提示。</p>
                                         )}
                                         <div className="flex flex-wrap gap-2">
                                         {run.status === "WAITING_START_APPROVAL" && (

@@ -33,6 +33,8 @@ Branch：`codex/chat-desktop-usability`。UX 程式提交：`10a171c`。起始 H
 
 ## 設計差異／限制
 
+- 後續提醒修正：WAITING_USER／BLOCKED／RECONCILE_REQUIRED 的操作移至主對話輸入區上方，側欄保留狀態摘要。新增八秒通知與持續提示，不因相同狀態輪詢重複彈出；定期同步 runs，涵蓋遺漏 socket 事件。使用者點選後才進入補充模式，原對話草稿保留；補充失敗不清除文字，補充只走既有 resume API，人工核對仍須明確選擇。補充文字暫存於當前頁面，未聲稱重新載入可恢復。建置、元件 lint 及 mock browser 的通知／輪詢／模式切換／失敗保留／接續／核對／停止檢查通過。
+
 - 後續 UI 修正：移除 Inspector 重複標題／關閉鈕；1280 CSS px 以上改為 380px 並排側欄，聊天區隨之縮窄且可繼續操作。窄視窗保留有 focus trap 的 Dialog。側欄標頭固定、內容獨立捲動；關閉後焦點返回入口。建置、元件 lint、mock browser 的縮寬／不遮擋／持續輸入／按鈕切換／Escape／窄視窗檢查通過，更新合成截圖。
 
 - M1 按現有路由格式新增 `/api/projects/:projectId/conversations/:conversationId/draft` GET／POST，沒有重造 chat dispatch。GET 回應 no-store；新增端點檢查實際 socket、精確本機 Host／Origin，拒絕 forwarded headers。

@@ -18,6 +18,8 @@ async function main() {
     const errors = [];
     page.on('pageerror', error => errors.push(error.message));
     let submits = 0;
+    let rejectResume = true;
+    const runRequests = [];
     let draft = { schemaVersion: 1, revision: 0, text: '', responseMode: 'auto', referenceFileIds: [], mcpServerNames: [], skillIds: [], quote: null, attachmentDescriptors: [] };
     const drafts = new Map();
     const project = { id: 'synthetic-project', name: '合成示範專案', description: '', instructions: '', status: 'active', contextVersion: 1 };
@@ -32,7 +34,11 @@ async function main() {
         if (url.pathname.startsWith('/api/')) {
             const pathname = url.pathname;
             let body = { success: true };
-            if (pathname.endsWith('/draft')) {
+            if (/\/api\/runs\/[^/]+\/(resume|cancel|reconcile)$/.test(pathname)) {
+                runRequests.push({ path: pathname, body: route.request().postDataJSON() });
+                if (pathname.endsWith('/resume') && rejectResume) return route.fulfill({ status: 400, json: { error: 'Synthetic resume failure' } });
+                run.status = pathname.endsWith('/cancel') ? 'CANCELED' : 'RUNNING';
+            } else if (pathname.endsWith('/draft')) {
                 const stored = drafts.get(pathname) || { ...draft, text: '', revision: 0, quote: null };
                 if (route.request().method() === 'POST') {
                     const data = route.request().postDataJSON();
@@ -145,6 +151,44 @@ async function main() {
         await page.reload(); await input.waitFor();
         assert.equal(await input.inputValue(), 'B：新的草稿不可被清除');
         assert.equal(await page.evaluate(() => JSON.stringify(localStorage).includes('新的草稿不可被清除')), false);
+        await page.setViewportSize({ width: 1366, height: 900 });
+        run.status = 'WAITING_USER';
+        const attention = page.getByRole('region', { name: '多步驟待處理' });
+        await attention.waitFor({ timeout: 10000 });
+        await page.getByRole('status', { name: '工作提醒' }).waitFor();
+        await page.screenshot({ path: path.join(output, 'run-notification-1366.png'), fullPage: true });
+        assert.equal(await page.getByRole('dialog').count(), 0);
+        await page.getByRole('button', { name: '知道了', exact: true }).click();
+        await page.waitForTimeout(3000);
+        assert.equal(await page.getByRole('status', { name: '工作提醒' }).count(), 0);
+        await attention.getByRole('button', { name: '補充說明', exact: true }).click();
+        const supplement = page.getByLabel('補充此多步驟工作（原對話草稿已保留）');
+        await supplement.fill('這是補充資料');
+        assert.equal(await input.isVisible(), false);
+        await attention.getByRole('button', { name: '返回一般對話' }).click();
+        assert.equal(await input.inputValue(), 'B：新的草稿不可被清除');
+        await attention.getByRole('button', { name: '補充說明', exact: true }).click();
+        assert.equal(await supplement.inputValue(), '這是補充資料');
+        await attention.getByRole('button', { name: '補充並繼續', exact: true }).click();
+        await page.getByText('Synthetic resume failure', { exact: true }).waitFor();
+        assert.equal(await supplement.inputValue(), '這是補充資料');
+        await page.screenshot({ path: path.join(output, 'run-attention-1366.png'), fullPage: true });
+        rejectResume = false;
+        await attention.getByRole('button', { name: '補充並繼續', exact: true }).click();
+        await attention.waitFor({ state: 'hidden' });
+        assert.equal(await input.inputValue(), 'B：新的草稿不可被清除');
+        assert.equal(submits, 1);
+        assert.equal(runRequests.filter(item => item.path.endsWith('/resume')).length, 2);
+        assert.equal(runRequests[1].body.input, '這是補充資料');
+        run.status = 'RECONCILE_REQUIRED';
+        await attention.waitFor({ timeout: 10000 });
+        await attention.getByRole('button', { name: '已確認未送出，重試' }).click();
+        await attention.waitFor({ state: 'hidden' });
+        assert.equal(runRequests.at(-1).body.resolution, 'not_sent');
+        run.status = 'BLOCKED';
+        await attention.waitFor({ timeout: 10000 });
+        await attention.getByRole('button', { name: '停止後續步驟', exact: true }).click();
+        await attention.waitFor({ state: 'hidden' });
         assert.deepEqual(errors, []);
         console.log('PASS: mock browser IME, 229, Shift+Enter, one submit, ACK/new draft, quote, inspector/Escape, 1366/1920 and narrow viewport overflow. No tenant requests.');
     } catch (error) {
