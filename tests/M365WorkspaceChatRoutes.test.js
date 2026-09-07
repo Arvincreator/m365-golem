@@ -472,6 +472,28 @@ describe('workspace-aware M365 chat route', () => {
         );
     });
 
+    test('requires a real project-memory write for explicit project rules and lessons', async () => {
+        mockHandleDashboardMessage.mockImplementation(async (ctx) => {
+            expect(ctx.workspaceProjectMemoryRequired).toBe(true);
+            expect(ctx.textOverride).toContain('[PROJECT_MEMORY_POLICY]');
+            expect(ctx.textOverride).toContain('memory_write=required');
+            expect(ctx.textOverride).toContain('lessons or pitfalls that should not be repeated');
+            expect(ctx.textOverride).toContain('golem-memory <specific question>');
+            await ctx.onTransportComplete({ text: 'M365 answer' });
+            await ctx.reply('M365 answer');
+        });
+
+        const result = await postChat({
+            golemId: 'golem_A',
+            projectId: 'project-1',
+            conversationId: 'conversation-1',
+            message: '請記住這個專案之前踩過的坑，以後不要再次重複。',
+        });
+
+        expect(result.response.status).toBe(200);
+        await waitFor(() => serverContext.m365DispatchLease === null);
+    });
+
     test('rejects unassigned or cross-project references before reading content or dispatching', async () => {
         mockStore.listProjectReferences.mockResolvedValue([]);
         const result = await postChat({ golemId: 'golem_A', projectId: 'project-1', conversationId: 'conversation-1', message: 'synthetic', referenceFileIds: ['other-project-reference'] });

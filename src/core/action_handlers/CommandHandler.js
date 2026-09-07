@@ -25,6 +25,7 @@ class CommandHandler {
 
         const sendPlanObservation = async (status, result, lane = 'command') => {
             if (dispatchOptions.planMode !== true) return false;
+            if (isM365Workspace && ctx) ctx.workspaceProjectMemoryRequired = true;
             let recorded = null;
             if (typeof ctx.onGolemObservation === 'function') {
                 recorded = await ctx.onGolemObservation({
@@ -66,6 +67,7 @@ class CommandHandler {
                 workspacePlanRevision: dispatchOptions.workspacePlanRevision || recorded?.planRevision,
                 workspacePlanStepId: dispatchOptions.workspacePlanStepId,
                 workspaceActionId: dispatchOptions.workspaceActionId,
+                m365ProjectMemoryRequired: isM365Workspace,
             };
             if (convoManager) {
                 await convoManager.enqueue(ctx, feedbackPrompt, feedbackOptions);
@@ -136,6 +138,7 @@ class CommandHandler {
 
             // 2. 處理正常的執行回報 (String Observation)
             if (typeof result === 'string') {
+                if (isM365Workspace && ctx) ctx.workspaceProjectMemoryRequired = true;
                 const failedSteps = result
                     .split('\n\n----------------\n\n')
                     .filter(block => block.includes('[Step') && block.includes(' Failed]'));
@@ -186,6 +189,9 @@ class CommandHandler {
                       `- 不得提及或照抄內部流程名稱、工具名稱、原始指令、原始 JSON 欄位、診斷值、錯誤代碼、協議標籤或本機路徑。\n` +
                       `- 除非結果本身含有可供使用者開啟的 https 來源，否則不要新增「參考來源」段落。\n`
                     : '';
+                const responseBlockRule = isM365Workspace
+                    ? '- 使用 [GOLEM_REPLY] 整理結果，並依系統的專案記憶規則一併輸出 [GOLEM_PROJECT_MEMORY]；不要加入其他回覆區塊。\n'
+                    : '- 請只使用 [GOLEM_REPLY] 整理結果給使用者。\n';
                 const feedbackPrompt = shouldAutoCorrect
                     ? `[System Observation]\n` +
                     `上一輪指令執行失敗，請你立即修正並重新輸出 [GOLEM_ACTION]。\n\n` +
@@ -201,7 +207,7 @@ class CommandHandler {
                     `以下是上一個指令序列的執行結果。\n\n` +
                     `限制：\n` +
                     `- 你現在處於 observation_summary 模式。\n` +
-                    `- 請只使用 [GOLEM_REPLY] 整理結果給使用者。\n` +
+                    `${responseBlockRule}` +
                     `${isM365Workspace
                         ? m365PresentationRule
                         : '- 若回覆涉及查詢結果/事實資訊，請在結尾附「參考來源」清單並提供可點擊 https 連結；若無公開來源，明確寫「參考來源：本次操作無可公開連結來源（僅本地資料/工具輸出）。」。\n'}` +
@@ -258,6 +264,7 @@ class CommandHandler {
                         correctionAttempt: shouldAutoCorrect ? (currentCorrectionAttempt + 1) : currentCorrectionAttempt,
                         actionDepth: Number(dispatchOptions.actionDepth || 0) + 1,
                         maxActionDepth: Number(dispatchOptions.maxActionDepth || process.env.GOLEM_MAX_AUTO_TURNS || 5),
+                        m365ProjectMemoryRequired: isM365Workspace,
                         suppressReply: isAuto && isSilent // 🎯 [v9.1.13] 全自動且靜默時，隱藏中間過程
                     };
                     await convoManager.enqueue(ctx, feedbackPrompt, feedbackOptions);
@@ -269,6 +276,7 @@ class CommandHandler {
                         correctionAttempt: shouldAutoCorrect ? (currentCorrectionAttempt + 1) : currentCorrectionAttempt,
                         actionDepth: Number(dispatchOptions.actionDepth || 0) + 1,
                         maxActionDepth: Number(dispatchOptions.maxActionDepth || process.env.GOLEM_MAX_AUTO_TURNS || 5),
+                        m365ProjectMemoryRequired: isM365Workspace,
                     });
                     await dispatchFn(ctx, finalRes, brain, controller);
                 }

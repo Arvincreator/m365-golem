@@ -41,6 +41,8 @@ describe('ProtocolFormatter M365 Web safe mode', () => {
         expect(prompt).toContain('consistent project conversation assistant');
         expect(prompt).toContain('[GOLEM_REPLY]');
         expect(prompt).toContain('Do not output [GOLEM_ACTION]');
+        expect(prompt).toContain('No scoped project workspace is active');
+        expect(prompt).toContain('Do not output [GOLEM_PROJECT_MEMORY]');
         expect(prompt).toContain('Do not expose or request local profile data');
         expect(prompt).not.toContain('Google Workspace');
         expect(prompt).not.toContain('mcp_call');
@@ -63,12 +65,13 @@ describe('ProtocolFormatter M365 Web safe mode', () => {
         expect(result.systemPrompt).not.toContain('GOOGLE WORKSPACE');
     });
 
-    test('allows an approval-gated action contract without enabling memory', async () => {
+    test('allows an approval-gated action contract with scoped project memory', async () => {
         const envelope = ProtocolFormatter.buildEnvelope('use the listed tool', 'm365-actions', {
             webBackendId: 'm365-web',
             safeMode: true,
             actionsEnabled: true,
             m365AutoApprove: false,
+            workspaceConversationId: 'conversation-1',
         });
         const result = await ProtocolFormatter.buildSystemPrompt(true, {
             userDataDir: 'm365-actions-profile',
@@ -92,6 +95,24 @@ describe('ProtocolFormatter M365 Web safe mode', () => {
         expect(result.systemPrompt).toContain('local approval gate handles confirmation');
         expect(result.systemPrompt).toContain('Never output generic [GOLEM_MEMORY]');
         expect(result.skillMemoryText).toBeNull();
+    });
+
+    test('treats project memory as a running project record and requires explicit writes', () => {
+        const envelope = ProtocolFormatter.buildEnvelope('記住這個專案不要再重複未驗證就回報完成。', 'm365-memory', {
+            webBackendId: 'm365-web',
+            safeMode: true,
+            actionsEnabled: true,
+            workspaceConversationId: 'conversation-1',
+            m365ProjectMemoryRequired: true,
+        });
+
+        expect(envelope).toContain('ongoing record of this project');
+        expect(envelope).toContain('verified work performed and its result (worklog)');
+        expect(envelope).toContain('successful approaches, failed approaches, pitfalls, root causes');
+        expect(envelope).toContain('"operation":"add|upsert|update|remove"');
+        expect(envelope).toContain('"kind":"rule|context|decision|preference|worklog|lesson"');
+        expect(envelope).toContain('golem-memory <specific question>');
+        expect(envelope).toContain('must contain at least one valid');
     });
 
     test('describes balanced mode without promising either approval or execution too early', async () => {

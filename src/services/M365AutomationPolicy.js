@@ -28,6 +28,11 @@ function mayAutoApproveM365Actions(actions) {
     const env = process.env;
     const mode = inferAutomationMode(env);
     if (isFullAutoMode(mode)) return true;
+    const hostReadOnlyInspection = Array.isArray(actions) && actions.length > 0 && actions.every((action) => {
+        if (normalizeActionName(action?.action) !== 'command') return false;
+        return /^golem[-_](?:check|memory)(?:\s|$)/i.test(extractCommand(action));
+    });
+    if (hostReadOnlyInspection) return true;
     if (mode !== 'balanced' || !Array.isArray(actions) || actions.length === 0) return false;
 
     const presetLevel = Number(getAutomationModePreset(mode)?.AUTONOMY_LEVEL || 0);

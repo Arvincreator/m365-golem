@@ -144,6 +144,54 @@ class TaskController {
                 continue; // 跳過後續 shell 執行邏輯
             }
 
+            // Project memory queries are scoped host operations, not arbitrary shell reads.
+            // This keeps the model inside the active project and returns only bounded entries.
+            const memoryQueryMatch = cmdToRun.match(/^golem[-_]memory(?:\s+([\s\S]*))?$/i);
+            if (memoryQueryMatch) {
+                const service = ctx && ctx.m365ProjectWorkspaceService;
+                const projectId = String(ctx && ctx.workspaceProjectId || '').trim();
+                const workspacePath = String(ctx && ctx.workspaceRoot || '').trim();
+                const query = String(memoryQueryMatch[1] || '').trim().slice(0, 500);
+                if (!service || !projectId) {
+                    reportBuffer.push('[Step ' + (i + 1) + ' Failed] Project memory query requires an active scoped project workspace.');
+                    continue;
+                }
+                try {
+                    let entries;
+                    if (!query || /^recent$/i.test(query)) {
+                        entries = service.getRecentMemories(projectId, { workspacePath, limit: 12 });
+                    } else {
+                        const activeBrain = brain || ctx.brain || null;
+                        const embedder = activeBrain?.toolVectorIndex?.embedder
+                            || (typeof activeBrain?._resolveToolVectorEmbedder === 'function'
+                                ? activeBrain._resolveToolVectorEmbedder()
+                                : null);
+                        entries = await service.getRelevantMemories(projectId, query, {
+                            workspacePath,
+                            embedder,
+                            limit: 12,
+                            recentLimit: 4,
+                        });
+                    }
+                    const bounded = (Array.isArray(entries) ? entries : []).map((entry) => ({
+                        id: entry.id,
+                        kind: entry.kind,
+                        importance: entry.importance,
+                        content: entry.content,
+                        tags: entry.tags || [],
+                        updatedAt: entry.updatedAt,
+                        selected: entry.retrievalReason || 'relevant',
+                    }));
+                    reportBuffer.push(
+                        `[ProjectMemoryQuery] Scoped to the active project. Query: ${query || 'recent'}\n` +
+                        `${bounded.length > 0 ? JSON.stringify(bounded, null, 2) : 'No stored project memory entries matched.'}`
+                    );
+                } catch (error) {
+                    reportBuffer.push(`[Step ${i + 1} Failed] Project memory query failed: ${error.code || error.message}`);
+                }
+                continue;
+            }
+
             const risk = this.security.assess(cmdToRun);
             if (/^golem[-_]check(?:\s|$)/.test(cmdToRun)) {
                 const toolName = cmdToRun.replace(/^golem[-_]check\s*/, '').trim();

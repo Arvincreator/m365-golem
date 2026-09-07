@@ -223,6 +223,7 @@ class SkillHandler {
 
         const sendFeedback = async (message, hintMeta = {}) => {
             const currentActionDepth = Number(dispatchOptions.actionDepth || 0);
+            if (isM365Workspace && ctx) ctx.workspaceProjectMemoryRequired = true;
             if (dispatchOptions.planMode === true) {
                 const observationStatus = hintMeta.status
                     || (SkillHandler._looksLikeFailure(message) ? 'failed' : 'succeeded');
@@ -268,6 +269,7 @@ class SkillHandler {
                     workspacePlanRevision: dispatchOptions.workspacePlanRevision || recorded?.planRevision,
                     workspacePlanStepId: dispatchOptions.workspacePlanStepId,
                     workspaceActionId: dispatchOptions.workspaceActionId,
+                    m365ProjectMemoryRequired: isM365Workspace,
                 };
                 if (convoManager) {
                     await convoManager.enqueue(ctx, feedbackPrompt, planOptions);
@@ -295,11 +297,14 @@ class SkillHandler {
                   `- 不得提及或照抄內部流程名稱、工具名稱、伺服器名稱、原始 JSON 欄位、診斷值、錯誤代碼、協議標籤或本機路徑。\n` +
                   `- 除非工具結果本身含有可供使用者開啟的 https 來源，否則不要新增「參考來源」段落。`
                 : `- 若回覆涉及查詢結果/事實資訊，請在結尾附「參考來源」清單並提供可點擊 https 連結；若無公開來源，明確寫「參考來源：本次操作無可公開連結來源（僅本地資料/工具輸出）。」。`;
+            const responseBlockRule = isM365Workspace
+                ? '- 使用 [GOLEM_REPLY] 整理結果，並依系統的專案記憶規則一併輸出 [GOLEM_PROJECT_MEMORY]；不要加入其他回覆區塊。'
+                : '- 請只使用 [GOLEM_REPLY] 整理結果給使用者。';
             const feedbackPrompt = `[System Observation]\n` +
                 `以下是上一個工具、技能或 MCP 呼叫的執行結果。\n\n` +
                 `限制：\n` +
                 `- 你現在處於 observation_summary 模式。\n` +
-                `- 請只使用 [GOLEM_REPLY] 整理結果給使用者。\n` +
+                `${responseBlockRule}\n` +
                 `${presentationRule}\n` +
                 `${actionRule}\n\n` +
                 `工具結果：\n${fullMessage}`;
@@ -313,6 +318,7 @@ class SkillHandler {
                     allowActions: allowActionRetry,
                     actionDepth: currentActionDepth + 1,
                     maxActionDepth: Number(dispatchOptions.maxActionDepth || process.env.GOLEM_MAX_AUTO_TURNS || 5),
+                    m365ProjectMemoryRequired: isM365Workspace,
                     suppressReply: isAuto && isSilent
                 };
                 await convoManager.enqueue(ctx, feedbackPrompt, feedbackOptions);

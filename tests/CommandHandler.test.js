@@ -91,9 +91,13 @@ describe('CommandHandler', () => {
         await CommandHandler.execute(mockCtx, [{ action: 'cmd' }], mockController, mockBrain, mockDispatchFn);
 
         const observationPrompt = mockConvoManager.enqueue.mock.calls[0][1];
+        const observationOptions = mockConvoManager.enqueue.mock.calls[0][2];
         expect(observationPrompt).toContain('只說明已確認的結果、限制與下一步');
         expect(observationPrompt).toContain('不得提及或照抄內部流程名稱');
+        expect(observationPrompt).toContain('[GOLEM_PROJECT_MEMORY]');
         expect(observationPrompt).not.toContain('參考來源：本次操作無可公開連結來源');
+        expect(observationOptions.m365ProjectMemoryRequired).toBe(true);
+        expect(mockCtx.workspaceProjectMemoryRequired).toBe(true);
     });
 
     test('passes a scoped M365 approval to the command safety pipeline', async () => {
@@ -132,6 +136,7 @@ describe('CommandHandler', () => {
 
     test('plan mode records a bound host Observation and queues the next revision', async () => {
         mockController.runSequence.mockResolvedValue('[Step 1 Success]\nResult:\nfile-a.txt');
+        mockBrain.webBackend = { id: 'm365-web' };
         mockCtx.workspaceConversationId = 'conversation-1';
         mockCtx.onGolemObservation = jest.fn().mockResolvedValue({
             planId: 'run-1',
@@ -174,6 +179,7 @@ describe('CommandHandler', () => {
                 allowActions: true,
                 planMode: true,
                 workspacePlanRevision: 1,
+                m365ProjectMemoryRequired: true,
             })
         );
     });

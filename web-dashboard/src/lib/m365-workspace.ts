@@ -30,7 +30,7 @@ export type M365ProjectWorkspace = {
     agentsTruncated: boolean;
     memoryEntries: Array<{
         id: string;
-        kind: "rule" | "context" | "decision" | "preference";
+        kind: "rule" | "context" | "decision" | "preference" | "worklog" | "lesson";
         importance: "core" | "normal";
         content: string;
         tags: string[];

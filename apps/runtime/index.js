@@ -569,6 +569,7 @@ async function handleUnifiedMessage(ctx, forceTargetId = null) {
             m365Bootstrap: ctx.workspaceBootstrapRequired === true,
             workspaceConversationId: ctx.workspaceConversationId || null,
             m365ConversationTitleRequested: ctx.workspaceConversationTitleRequested === true,
+            m365ProjectMemoryRequired: ctx.workspaceProjectMemoryRequired === true,
             workspaceRunId: ctx.workspaceRunId || null,
             workspaceStepId: ctx.workspaceStepId || null,
             workspacePlanId: ctx.workspacePlanId || null,

@@ -134,6 +134,16 @@ describe('M365 workspace UI regressions', () => {
         expect(source).toContain('!pausedResponseRequestIds.has(message.requestId)');
     });
 
+    test('keeps multi-step progress in one collapsed execution card with a live running indicator', () => {
+        const source = read('web-dashboard/src/app/dashboard/chat/page.tsx');
+        expect(source).toContain('function RunExecutionCard');
+        expect(source).toContain('buildM365ConversationTimeline(messages)');
+        expect(source).toContain('詳細執行過程');
+        expect(source).toContain('<Loader2 className="h-4 w-4 animate-spin" />');
+        expect(source).toContain('aria-label={`Golem ${statusLabel}`}');
+        expect(source).not.toContain('function CollapsibleActionMessage');
+    });
+
     test('scrolls the conversation to the Golem activity bubble when processing begins', () => {
         const source = read('web-dashboard/src/app/dashboard/chat/page.tsx');
         expect(source).toContain('golemActivityWasVisibleRef.current = false;');

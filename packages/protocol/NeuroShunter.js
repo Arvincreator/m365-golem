@@ -82,6 +82,24 @@ function buildReplyOptions(ctx, finalReply, extra = {}) {
     return options;
 }
 
+function hasProjectMemoryOperations(value) {
+    const payload = String(value || '')
+        .trim()
+        .replace(/^```(?:json)?\s*/i, '')
+        .replace(/```\s*$/i, '')
+        .trim();
+    if (!payload || /^(?:null|\[\s*\]|\{\s*\}|\(無\))$/i.test(payload)) return false;
+    try {
+        let parsed = JSON.parse(payload);
+        if (parsed && Array.isArray(parsed.entries)) parsed = parsed.entries;
+        if (Array.isArray(parsed)) return parsed.length > 0;
+        return Boolean(parsed && typeof parsed === 'object' && Object.keys(parsed).length > 0);
+    } catch (_) {
+        // A malformed non-empty payload is handled by the scoped memory validator.
+        return true;
+    }
+}
+
 // ============================================================
 // 🧬 NeuroShunter (神經分流中樞 - 核心路由器)
 // ============================================================
@@ -133,6 +151,9 @@ class NeuroShunter {
             status: 'succeeded',
             result,
         });
+        if (brain?.webBackend?.id === 'm365-web' && ctx) {
+            ctx.workspaceProjectMemoryRequired = true;
+        }
 
         const nextDepth = Number(options.actionDepth || 0) + 1;
         const maxDepth = Number(options.maxActionDepth || CONFIG.MAX_AUTO_TURNS || 5);
@@ -164,6 +185,7 @@ class NeuroShunter {
             workspacePlanRevision: options.workspacePlanRevision || recorded?.planRevision,
             workspacePlanStepId: options.workspacePlanStepId,
             workspaceActionId: options.workspaceActionId,
+            m365ProjectMemoryRequired: brain?.webBackend?.id === 'm365-web',
         };
 
         let convoManager = controller && controller.convoManager;
@@ -305,6 +327,8 @@ class NeuroShunter {
             ? true
             : brain.areActionsEnabled();
         let protocolRepair = null;
+        let projectMemoryRepair = null;
+        let projectMemoryUpdateCount = 0;
 
         if (parsed.conversationTitle && typeof ctx?.onGolemConversationTitle === 'function') {
             try {
@@ -364,6 +388,39 @@ class NeuroShunter {
         } else if (parsed.plan || parsed.planError) {
             parsed.actions = [];
             parsed.reply = `${parsed.reply || ''}\n\n⚠️ 自主計畫已暫停：目前沒有可用的本機計畫控制器。`.trim();
+        }
+
+        const projectMemoryRequired = ctx?.workspaceProjectMemoryRequired === true
+            || options.m365ProjectMemoryRequired === true;
+        const canRepairProjectMemory = projectMemoryRequired
+            && parsed.actions.length === 0
+            && !protocolRepair
+            && brain?.webBackend?.id === 'm365-web';
+        const projectMemoryRepairAttempt = Number(options.projectMemoryRepairAttempt || 0);
+        const requestProjectMemoryRepair = (reason) => {
+            if (!canRepairProjectMemory || projectMemoryRepair) return 'not_applicable';
+            const repairReason = String(reason || '').trim();
+            if (projectMemoryRepairAttempt < 1) {
+                projectMemoryRepair = {
+                    prompt: [
+                        '[GOLEM_PROJECT_MEMORY_REPAIR]',
+                        'The prior response did not persist project memory required by this turn. A prose promise is not a write.',
+                        repairReason ? `Host validation: ${repairReason}` : '',
+                        'Return exactly one non-empty [GOLEM_PROJECT_MEMORY] JSON array using the allowed schema, plus one concise [GOLEM_REPLY] that says what project state was recorded.',
+                        'Record the project-scoped work record, rule, decision, current status, preference or habit, or reusable experience/lesson/pitfall established by the turn. Do not mark unverified work complete and do not include a GOLEM_PLAN or GOLEM_ACTION.',
+                        '[/GOLEM_PROJECT_MEMORY_REPAIR]',
+                    ].filter(Boolean).join('\n'),
+                    attempt: projectMemoryRepairAttempt + 1,
+                };
+                shouldSuppressReply = true;
+                return 'queued';
+            }
+            parsed.reply = `${parsed.reply || ''}\n\n⚠️ 本輪應更新專案記憶，但模型沒有提供可寫入的專案紀錄。`.trim();
+            return 'exhausted';
+        };
+        const hasProjectMemoryWrite = hasProjectMemoryOperations(parsed.projectMemory);
+        if (projectMemoryRequired && !hasProjectMemoryWrite) {
+            requestProjectMemoryRepair('The project-memory block was missing, null, or empty.');
         }
 
         if (options.planMode === true && parsed.actions.length > 0 && !parsed.plan && options.m365ActionApproved !== true) {
@@ -452,7 +509,7 @@ class NeuroShunter {
         }
 
         // 🎯 [v9.1.13] 靜默模式自癒：如果沒有後續動作 (Action)，代表任務結束，強制解除靜默以顯示最終回覆
-        if (shouldSuppressReply && parsed.actions.length === 0) {
+        if (shouldSuppressReply && parsed.actions.length === 0 && !projectMemoryRepair) {
             console.log(`📢 [NeuroShunter] 偵測到任務結束或無後續動作，自動解除靜默模式。`);
             shouldSuppressReply = false;
         }
@@ -479,7 +536,7 @@ class NeuroShunter {
         // 1a. M365 專案／使用者記憶是非執行型協議：像原版 GOLEM_MEMORY
         // 一樣由模型自主維護，但由宿主限制可寫欄位、敏感資料與專案範圍。
         // 這兩條記憶 lane 不進入 Action Gate；工具與外部副作用仍照常核准。
-        if (parsed.projectMemory) {
+        if (parsed.projectMemory && hasProjectMemoryWrite) {
             try {
                 if (!brain || !brain.webBackend || brain.webBackend.id !== 'm365-web'
                     || !ctx || !ctx.workspaceProjectId
@@ -496,10 +553,20 @@ class NeuroShunter {
                         workspacePath: ctx.workspaceRoot,
                     }
                 );
-                console.log(`[GOLEM_PROJECT_MEMORY] updated=${result.results.filter((item) => item.changed).length} project=${ctx.workspaceProjectId}`);
+                const memoryResults = Array.isArray(result?.results) ? result.results : [];
+                projectMemoryUpdateCount = memoryResults.filter((item) => item.changed).length;
+                console.log(`[GOLEM_PROJECT_MEMORY] updated=${projectMemoryUpdateCount} project=${ctx.workspaceProjectId}`);
+                if (projectMemoryRequired && projectMemoryUpdateCount === 0) {
+                    requestProjectMemoryRepair('The project-memory block produced no stored change.');
+                }
             } catch (error) {
                 console.warn(`[GOLEM_PROJECT_MEMORY] rejected: ${error.code || error.message}`);
-                parsed.reply = `${parsed.reply || ''}\n\n⚠️ 專案記憶未寫入：格式、敏感資料或專案邊界檢查未通過。`.trim();
+                const repairStatus = requestProjectMemoryRepair(
+                    `The project-memory block failed host validation (${error.code || 'invalid payload'}).`
+                );
+                if (repairStatus === 'not_applicable') {
+                    parsed.reply = `${parsed.reply || ''}\n\n⚠️ 專案記憶未寫入：格式、敏感資料或專案邊界檢查未通過。`.trim();
+                }
             }
         }
 
@@ -556,6 +623,9 @@ class NeuroShunter {
             // following it with a second message that incorrectly says execution
             // has already started.
             parsed.reply = '';
+        }
+        if (projectMemoryUpdateCount > 0 && !useM365ActionProgressReply && !needsM365Approval) {
+            parsed.reply = `${parsed.reply || ''}\n\n✓ 已更新此專案的狀態紀錄（${projectMemoryUpdateCount} 則）`.trim();
         }
 
         // 1. 處理直接回覆 (讓 AI 的解說文字在行動之前出現)
@@ -619,6 +689,29 @@ class NeuroShunter {
             }
         }
 
+        if (projectMemoryRepair?.prompt) {
+            const convoManager = controller && controller.convoManager;
+            const repairOptions = {
+                isPriority: true,
+                bypassDebounce: true,
+                isSystemFeedback: true,
+                allowActions: false,
+                planMode: false,
+                m365ProjectMemoryRequired: true,
+                projectMemoryRepairAttempt: projectMemoryRepair.attempt,
+                workspaceConversationId: ctx.workspaceConversationId || null,
+                toolRoutingQuery: String(ctx.toolRoutingQuery || ''),
+            };
+            if (convoManager && typeof convoManager.enqueue === 'function') {
+                await convoManager.enqueue(ctx, projectMemoryRepair.prompt, repairOptions);
+            } else if (brain && typeof brain.sendMessage === 'function') {
+                const repaired = await brain.sendMessage(projectMemoryRepair.prompt, false, repairOptions);
+                await this.dispatch(ctx, repaired, brain, controller, repairOptions);
+            } else {
+                await ctx.reply('⚠️ 本輪需要更新專案記憶，但目前找不到可用的補正佇列。');
+            }
+        }
+
         const blockedObservationActions = isSystemFeedback
             && parsed.actions.length > 0
             && (!allowActions || actionDepth >= maxActionDepth);
@@ -654,6 +747,7 @@ class NeuroShunter {
                         actionDepth: Number(actionDepth || 0) + 1,
                         maxActionDepth: Number(maxActionDepth || CONFIG.MAX_AUTO_TURNS || 5),
                         observationRetryAttempt: retryAttempt + 1,
+                        m365ProjectMemoryRequired: brain?.webBackend?.id === 'm365-web',
                     });
                 } else if (controller && controller.pendingTasks) {
                     // 第二次仍錯：才出現通訊端批准按鈕
@@ -819,6 +913,9 @@ class NeuroShunter {
                             result: observationText,
                         });
                     }
+                    if (brain?.webBackend?.id === 'm365-web' && ctx) {
+                        ctx.workspaceProjectMemoryRequired = true;
+                    }
                     const nextDepth = actionDepth + 1;
                     const planObservation = buildM365PlanObservation({
                         planId: options.workspacePlanId || recorded?.planId,
@@ -848,9 +945,13 @@ class NeuroShunter {
                             workspacePlanRevision: options.workspacePlanRevision || recorded?.planRevision,
                             workspacePlanStepId: options.workspacePlanStepId,
                             workspaceActionId: options.workspaceActionId,
+                            m365ProjectMemoryRequired: brain?.webBackend?.id === 'm365-web',
                         });
                     }
                 } else if (controller && controller.convoManager) {
+                    if (brain?.webBackend?.id === 'm365-web' && ctx) {
+                        ctx.workspaceProjectMemoryRequired = true;
+                    }
                     await controller.convoManager.enqueue(ctx, observationText, {
                         isPriority: true,
                         bypassDebounce: true,
@@ -859,6 +960,7 @@ class NeuroShunter {
                         allowActions: canRetryFromGateFeedback,
                         actionDepth: actionDepth + 1,
                         maxActionDepth,
+                        m365ProjectMemoryRequired: brain?.webBackend?.id === 'm365-web',
                     });
                 } else if (brain && typeof brain.sendMessage === 'function') {
                     try {
@@ -869,6 +971,7 @@ class NeuroShunter {
                             suppressReply: true,
                             actionDepth: actionDepth + 1,
                             maxActionDepth,
+                            m365ProjectMemoryRequired: brain?.webBackend?.id === 'm365-web',
                         });
                     } catch (injectErr) {
                         console.warn(`[ActionGate] Failed to inject fallback observation to brain: ${injectErr.message}`);

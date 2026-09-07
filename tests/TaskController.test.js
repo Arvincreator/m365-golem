@@ -20,6 +20,81 @@ describe('TaskController', () => {
             expect(controller.internalExecutor).toBeFalsy();
         } finally { controller.destroy(); }
     });
+
+    test('queries only the active project memory without invoking the shell', async () => {
+        const controller = new TaskController({ golemId: 'test-golem' });
+        const projectMemoryService = {
+            getRelevantMemories: jest.fn().mockResolvedValue([{
+                id: 'pm_aaaaaaaaaaaaaaaa',
+                kind: 'lesson',
+                importance: 'core',
+                content: 'Do not repeat a plan-only turn without its current action.',
+                tags: ['pitfall'],
+                updatedAt: '2026-09-07T00:00:00.000Z',
+                retrievalReason: 'relevant',
+            }]),
+        };
+        const ctx = {
+            workspaceProjectId: 'project-1',
+            workspaceRoot: 'C:\\local\\m365-projects\\project-1',
+            m365ProjectWorkspaceService: projectMemoryService,
+        };
+        try {
+            const result = await controller.runSequence(ctx, [
+                { action: 'command', parameter: 'golem-memory 之前有哪些踩坑經驗' },
+            ], 0, { _resolveToolVectorEmbedder: jest.fn(() => null) });
+            expect(projectMemoryService.getRelevantMemories).toHaveBeenCalledWith(
+                'project-1',
+                '之前有哪些踩坑經驗',
+                expect.objectContaining({ workspacePath: ctx.workspaceRoot, limit: 12, recentLimit: 4 })
+            );
+            expect(result).toContain('[ProjectMemoryQuery]');
+            expect(result).toContain('plan-only turn');
+            expect(controller.internalExecutor).toBeFalsy();
+        } finally { controller.destroy(); }
+    });
+
+    test('returns recent project memory when no query is supplied', async () => {
+        const controller = new TaskController({ golemId: 'test-golem' });
+        const projectMemoryService = {
+            getRecentMemories: jest.fn().mockReturnValue([{
+                id: 'pm_bbbbbbbbbbbbbbbb',
+                kind: 'worklog',
+                importance: 'normal',
+                content: 'Verified the latest project output.',
+                tags: ['verification'],
+                updatedAt: '2026-09-07T01:00:00.000Z',
+                retrievalReason: 'recent',
+            }]),
+        };
+        const ctx = {
+            workspaceProjectId: 'project-1',
+            workspaceRoot: 'C:\\local\\m365-projects\\project-1',
+            m365ProjectWorkspaceService: projectMemoryService,
+        };
+        try {
+            const result = await controller.runSequence(ctx, [
+                { action: 'command', parameter: 'golem-memory' },
+            ]);
+            expect(projectMemoryService.getRecentMemories).toHaveBeenCalledWith(
+                'project-1',
+                { workspacePath: ctx.workspaceRoot, limit: 12 }
+            );
+            expect(result).toContain('Verified the latest project output.');
+            expect(controller.internalExecutor).toBeFalsy();
+        } finally { controller.destroy(); }
+    });
+
+    test('refuses a project-memory query outside an active project without invoking the shell', async () => {
+        const controller = new TaskController({ golemId: 'test-golem' });
+        try {
+            const result = await controller.runSequence({}, [
+                { action: 'command', parameter: 'golem-memory previous failures' },
+            ]);
+            expect(result).toContain('requires an active scoped project workspace');
+            expect(controller.internalExecutor).toBeFalsy();
+        } finally { controller.destroy(); }
+    });
     beforeEach(() => {
         delete process.env.COMMAND_WHITELIST;
         delete process.env.GOLEM_TRUST_SYSTEM_COMMANDS;

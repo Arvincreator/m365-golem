@@ -477,6 +477,9 @@ class ConversationManager {
                 workspacePlanRevision: Number(task.options.workspacePlanRevision || task.ctx?.workspacePlanRevision || 0),
                 workspacePlanStepId: task.options.workspacePlanStepId || task.ctx?.workspacePlanStepId || null,
                 workspaceActionId: task.options.workspaceActionId || task.ctx?.workspaceActionId || null,
+                m365ProjectMemoryRequired: task.options.m365ProjectMemoryRequired === true
+                    || task.ctx?.workspaceProjectMemoryRequired === true,
+                projectMemoryRepairAttempt: Number(task.options.projectMemoryRepairAttempt || 0),
                 m365ToolRoute: brainResponse?.m365ToolRoute || null
             });
         } catch (e) {

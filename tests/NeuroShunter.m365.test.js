@@ -406,7 +406,174 @@ describe('NeuroShunter M365 safety gates', () => {
         );
         expect(userProfile.applyM365MemoryBlock).toHaveBeenCalledTimes(1);
         expect(brain.memorize).not.toHaveBeenCalled();
-        expect(ctx.reply).toHaveBeenCalledWith('我已保留跨對話仍需沿用的規則。');
+        expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('我已保留跨對話仍需沿用的規則。'));
+        expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('已更新此專案的狀態紀錄（1 則）'));
+    });
+
+    test('repairs an explicit project-memory turn when Copilot only promises to remember it', async () => {
+        const enqueue = jest.fn().mockResolvedValue();
+        const ctx = {
+            reply: jest.fn().mockResolvedValue(),
+            shouldMentionSender: false,
+            platform: 'web',
+            workspaceProjectId: 'project-1',
+            workspaceConversationId: 'conversation-1',
+            workspaceProjectMemoryRequired: true,
+            toolRoutingQuery: '記住這個專案不要再次踩坑。',
+            m365ProjectWorkspaceService: { applyMemoryBlock: jest.fn() },
+        };
+        const brain = {
+            webBackend: { id: 'm365-web', safeMode: true },
+            memorize: jest.fn().mockResolvedValue(),
+            _appendChatLog: jest.fn(),
+            areActionsEnabled: jest.fn(() => true),
+            isLocalContextEnabled: jest.fn(() => false),
+        };
+        ResponseParser.parse.mockReturnValue({
+            memory: null,
+            projectMemory: null,
+            reply: '好的，我會記住。',
+            actions: [],
+        });
+
+        await NeuroShunter.dispatch(ctx, 'raw', brain, { pendingTasks: new Map(), convoManager: { enqueue } });
+
+        expect(ctx.reply).not.toHaveBeenCalledWith('好的，我會記住。');
+        expect(enqueue).toHaveBeenCalledWith(
+            ctx,
+            expect.stringContaining('[GOLEM_PROJECT_MEMORY_REPAIR]'),
+            expect.objectContaining({
+                allowActions: false,
+                m365ProjectMemoryRequired: true,
+                projectMemoryRepairAttempt: 1,
+                workspaceConversationId: 'conversation-1',
+            })
+        );
+    });
+
+    test('warns after one failed project-memory repair instead of looping', async () => {
+        const enqueue = jest.fn().mockResolvedValue();
+        const ctx = {
+            reply: jest.fn().mockResolvedValue(),
+            shouldMentionSender: false,
+            platform: 'web',
+            workspaceProjectId: 'project-1',
+            workspaceConversationId: 'conversation-1',
+            workspaceProjectMemoryRequired: true,
+            m365ProjectWorkspaceService: { applyMemoryBlock: jest.fn() },
+        };
+        const brain = {
+            webBackend: { id: 'm365-web', safeMode: true },
+            memorize: jest.fn().mockResolvedValue(),
+            _appendChatLog: jest.fn(),
+            areActionsEnabled: jest.fn(() => true),
+            isLocalContextEnabled: jest.fn(() => false),
+        };
+        ResponseParser.parse.mockReturnValue({
+            memory: null,
+            projectMemory: '[]',
+            reply: '已處理。',
+            actions: [],
+        });
+
+        await NeuroShunter.dispatch(
+            ctx,
+            'raw',
+            brain,
+            { pendingTasks: new Map(), convoManager: { enqueue } },
+            { m365ProjectMemoryRequired: true, projectMemoryRepairAttempt: 1 }
+        );
+
+        expect(enqueue).not.toHaveBeenCalled();
+        expect(ctx.m365ProjectWorkspaceService.applyMemoryBlock).not.toHaveBeenCalled();
+        expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('模型沒有提供可寫入的專案紀錄'));
+    });
+
+    test('repairs malformed project memory instead of accepting it as recorded', async () => {
+        const enqueue = jest.fn().mockResolvedValue();
+        const applyMemoryBlock = jest.fn(() => {
+            const error = new Error('Project memory must be valid JSON.');
+            error.code = 'M365_PROJECT_MEMORY_FORMAT_INVALID';
+            throw error;
+        });
+        const ctx = {
+            reply: jest.fn().mockResolvedValue(),
+            shouldMentionSender: false,
+            platform: 'web',
+            workspaceProjectId: 'project-1',
+            workspaceConversationId: 'conversation-1',
+            workspaceProjectMemoryRequired: true,
+            m365ProjectWorkspaceService: { applyMemoryBlock },
+        };
+        const brain = {
+            webBackend: { id: 'm365-web', safeMode: true },
+            memorize: jest.fn().mockResolvedValue(),
+            _appendChatLog: jest.fn(),
+            areActionsEnabled: jest.fn(() => true),
+            isLocalContextEnabled: jest.fn(() => false),
+        };
+        ResponseParser.parse.mockReturnValue({
+            memory: null,
+            projectMemory: '[{"operation":"upsert"',
+            reply: '已記住。',
+            actions: [],
+        });
+
+        await NeuroShunter.dispatch(
+            ctx,
+            'raw',
+            brain,
+            { pendingTasks: new Map(), convoManager: { enqueue } }
+        );
+
+        expect(applyMemoryBlock).toHaveBeenCalledTimes(1);
+        expect(ctx.reply).not.toHaveBeenCalledWith('已記住。');
+        expect(enqueue).toHaveBeenCalledWith(
+            ctx,
+            expect.stringContaining('failed host validation'),
+            expect.objectContaining({ projectMemoryRepairAttempt: 1 })
+        );
+    });
+
+    test('does not delay a real action when the same turn still owes a project-memory update', async () => {
+        Object.assign(process.env, getAutomationModePreset('balanced'));
+        const enqueue = jest.fn().mockResolvedValue();
+        const ctx = {
+            reply: jest.fn().mockResolvedValue(),
+            shouldMentionSender: false,
+            platform: 'web',
+            workspaceProjectId: 'project-1',
+            workspaceConversationId: 'conversation-1',
+            workspaceProjectMemoryRequired: true,
+            m365ProjectWorkspaceService: { applyMemoryBlock: jest.fn() },
+        };
+        const brain = {
+            webBackend: { id: 'm365-web', safeMode: true },
+            memorize: jest.fn().mockResolvedValue(),
+            _appendChatLog: jest.fn(),
+            areActionsEnabled: jest.fn(() => true),
+            isLocalContextEnabled: jest.fn(() => false),
+        };
+        ResponseParser.parse.mockReturnValue({
+            memory: null,
+            projectMemory: null,
+            reply: '',
+            actions: [{ action: 'command', parameter: 'cat README.md', progress: '讀取專案說明並核對內容' }],
+        });
+
+        await NeuroShunter.dispatch(
+            ctx,
+            'raw',
+            brain,
+            { pendingTasks: new Map(), convoManager: { enqueue } }
+        );
+
+        expect(CommandHandler.execute).toHaveBeenCalledTimes(1);
+        expect(enqueue).not.toHaveBeenCalledWith(
+            ctx,
+            expect.stringContaining('[GOLEM_PROJECT_MEMORY_REPAIR]'),
+            expect.any(Object)
+        );
     });
 
     test('rejects scoped memory protocols outside an active M365 project conversation', async () => {

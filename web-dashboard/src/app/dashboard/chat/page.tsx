@@ -41,7 +41,7 @@ import { MessageToolbar } from "@/features/m365-workspace/components/MessageTool
 import type { Draft } from "@/features/m365-workspace/lib/draft-controller";
 import { apiGet, apiPost } from "@/lib/api-client";
 import { apiUrl } from "@/lib/api";
-import { isNearChatBottom } from "@/lib/m365-message-rendering";
+import { buildM365ConversationTimeline, isNearChatBottom } from "@/lib/m365-message-rendering";
 import { socket } from "@/lib/socket";
 import { cn } from "@/lib/utils";
 import {
@@ -111,6 +111,9 @@ type PendingM365Response = {
 type ResponseMode = "auto" | "quick" | "thoughtful";
 type AutomationMode = "guided" | "balanced" | "autopilot" | "silent";
 type ComposerPicker = "files" | "mcp" | "skills" | null;
+type ConversationTimelineItem =
+    | { kind: "message"; message: M365Message }
+    | { kind: "execution"; runId: string; anchorId: string; messages: M365Message[] };
 
 const AUTOMATION_MODE_NOTICE: Record<AutomationMode, string> = {
     guided: "本機工具逐項顯示核准卡。",
@@ -174,25 +177,64 @@ function isRunTerminal(run: M365Run): boolean {
     return ["FAILED", "CANCELED", "COMPLETED"].includes(run.status);
 }
 
-function isCollapsibleActionMessage(message: M365Message): boolean {
-    if (message.role === "user") return false;
-    return message.source === "system" && Boolean(message.stepId);
+function executionHeadline(content: string): string {
+    return String(content || "")
+        .trim()
+        .replace(/，正在執行並確認中(?:…|\.\.\.)$/u, "")
+        .replace(/^❌\s*/, "")
+        .slice(0, 72) || "正在處理目前步驟";
 }
 
-function CollapsibleActionMessage({ content }: { content: string }) {
+function RunExecutionCard({ messages, run }: { messages: M365Message[]; run: M365Run | null }) {
+    const latest = messages[messages.length - 1];
+    const stepCount = new Set(messages.map((message) => message.stepId).filter(Boolean)).size;
+    const running = Boolean(run && ["QUEUED", "RUNNING"].includes(run.status));
+    const needsAttention = Boolean(run && ["WAITING_USER", "WAITING_APPROVAL", "RECONCILE_REQUIRED", "BLOCKED"].includes(run.status));
+    const completed = run?.status === "COMPLETED";
+    const stopped = Boolean(run && ["FAILED", "CANCELED"].includes(run.status));
+    const statusLabel = running ? "正在執行" : needsAttention ? "需要你的處理" : completed ? "執行完成" : stopped ? "執行已停止" : "執行紀錄";
+
     return (
-        <details className="group min-w-[min(68vw,420px)]">
-            <summary className="flex cursor-pointer list-none items-center justify-between gap-3 rounded-xl px-1 py-0.5 text-sm font-medium marker:content-none">
-                <span className="flex min-w-0 items-center gap-2">
-                    <ShieldCheck className="h-4 w-4 shrink-0 text-amber-500" />
-                    <span className="truncate">工具執行紀錄</span>
-                </span>
-                <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
-            </summary>
-            <div className="prose prose-sm mt-3 max-w-none break-words border-t border-border/70 pt-3 text-foreground dark:prose-invert prose-p:my-2 prose-pre:max-h-64 prose-pre:overflow-auto">
-                <ReactMarkdown remarkPlugins={[remarkGfm]} components={externalConversationLinkComponents}>{content}</ReactMarkdown>
-            </div>
-        </details>
+        <article role="status" aria-live="polite" aria-label={`Golem ${statusLabel}`} className="mr-auto w-full max-w-[620px]">
+            <details className={cn(
+                "group overflow-hidden rounded-2xl border bg-secondary/30 shadow-sm",
+                running ? "border-cyan-500/35" : needsAttention ? "border-amber-500/40" : "border-border"
+            )}>
+                <summary className="flex cursor-pointer list-none items-center gap-3 px-4 py-3 marker:content-none">
+                    <span className={cn(
+                        "flex h-8 w-8 shrink-0 items-center justify-center rounded-full",
+                        running ? "bg-cyan-500/12 text-cyan-600 dark:text-cyan-300" :
+                            needsAttention ? "bg-amber-500/12 text-amber-600" :
+                                completed ? "bg-emerald-500/12 text-emerald-600" : "bg-secondary text-muted-foreground"
+                    )}>
+                        {running ? <Loader2 className="h-4 w-4 animate-spin" /> :
+                            needsAttention ? <AlertTriangle className="h-4 w-4" /> :
+                                completed ? <CheckCircle2 className="h-4 w-4" /> : <ListChecks className="h-4 w-4" />}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                        <span className="flex items-center gap-2 text-sm font-semibold">
+                            {statusLabel}
+                            {running && <span className="h-1.5 w-1.5 animate-pulse rounded-full bg-cyan-500" aria-hidden="true" />}
+                        </span>
+                        <span className="mt-0.5 block truncate text-xs text-muted-foreground">{executionHeadline(latest?.content || "")}</span>
+                    </span>
+                    <span className="shrink-0 text-[11px] text-muted-foreground">{stepCount} 個步驟</span>
+                    <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
+                </summary>
+                <div className="border-t border-border/70 px-4 py-3">
+                    <p className="mb-2 text-[11px] text-muted-foreground">詳細執行過程</p>
+                    <ol className="space-y-2">
+                        {messages.map((message, index) => (
+                            <li key={message.id} className="flex gap-2 text-xs leading-5">
+                                <span className="mt-0.5 flex h-5 w-5 shrink-0 items-center justify-center rounded-full border border-border bg-background text-[10px] font-semibold text-muted-foreground">{index + 1}</span>
+                                <span className="min-w-0 flex-1 break-words text-foreground/85">{message.content}</span>
+                                <span className="shrink-0 text-[10px] text-muted-foreground">{formatLocalDate(message.createdAt)}</span>
+                            </li>
+                        ))}
+                    </ol>
+                </div>
+            </details>
+        </article>
     );
 }
 
@@ -318,6 +360,11 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
     const currentRun = useMemo(
         () => runs.find((run) => !isRunTerminal(run)) || runs[0] || null,
         [runs]
+    );
+    const runsById = useMemo(() => new Map(runs.map((run) => [run.id, run])), [runs]);
+    const conversationTimeline = useMemo(
+        () => buildM365ConversationTimeline(messages) as ConversationTimelineItem[],
+        [messages]
     );
     const promptShortcutSuggestions = useMemo(() => {
         const typed = input.trimStart();
@@ -1087,7 +1134,11 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                                     首次傳送會在可見 Edge 建立新的 M365 Copilot 對話，並加入本專案的固定指示。帳密、MFA 與敏感資訊仍由你親自操作。
                                 </p>
                             </div>
-                        ) : messages.map((message) => {
+                        ) : conversationTimeline.map((item) => {
+                            if (item.kind === "execution") {
+                                return <RunExecutionCard key={`execution-${item.runId}`} messages={item.messages} run={runsById.get(item.runId) || null} />;
+                            }
+                            const message = item.message;
                             const isUser = message.role === "user";
                             const isWarning = ["ambiguous", "failed"].includes(message.deliveryState) || message.role === "system";
                             return (
@@ -1115,9 +1166,7 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                                                 : "border-transparent bg-transparent text-foreground/90",
                                             isWarning && "border-amber-500/35 bg-amber-500/10"
                                         )}>
-                                            {isCollapsibleActionMessage(message) ? (
-                                                <CollapsibleActionMessage content={message.content} />
-                                            ) : message.role === "assistant" ? (
+                                            {message.role === "assistant" ? (
                                                 <M365MessageContent content={message.content} />
                                             ) : (
                                                 <div className="prose prose-sm max-w-none break-words text-foreground dark:prose-invert prose-p:my-2 prose-pre:overflow-x-auto">
@@ -1125,7 +1174,7 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                                                 </div>
                                             )}
                                         </div>
-                                        {message.role === "assistant" && !isCollapsibleActionMessage(message) && <MessageToolbar message={message} onQuote={quote => { controller.update({ quote }); composerRef.current?.focus(); }} />}
+                                        {message.role === "assistant" && <MessageToolbar message={message} onQuote={quote => { controller.update({ quote }); composerRef.current?.focus(); }} />}
                                         <div className={cn("mt-1 flex items-center gap-2 text-[10px] text-muted-foreground", isUser && "justify-end")}>
                                             <span className={cn(isWarning && "text-amber-700 dark:text-amber-300")}>{deliveryLabel(message)}</span>
                                         </div>
@@ -1732,7 +1781,7 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                     <DialogHeader>
                         <DialogTitle>專案 AGENTS.md</DialogTitle>
                         <DialogDescription>
-                            這份檔案由目前專案中的 Golem 自主累積，供同專案的所有對話共用；其他專案不會載入。每輪只會用本機向量索引挑出相關內容送給 M365，使用者不能在此直接改寫。
+                            這份檔案由目前專案中的 Golem 自主管理，保存工作紀錄、規則、決策、目前狀態、專案偏好，以及過去有效做法、失敗原因與避免再次踩坑的經驗。同專案對話會自動取得近期及相關紀錄；需要更多歷史時，Golem 可在專案範圍內查詢。其他專案不會載入，使用者不能在此直接改寫。
                         </DialogDescription>
                     </DialogHeader>
                     <div className="space-y-2">

@@ -69,6 +69,20 @@ function normalizeResponseMode(value) {
     return mode;
 }
 
+function requiresProjectMemoryWrite(message, options = {}) {
+    if (options.internalControl === true) return true;
+    const text = String(message || '').trim();
+    if (!text) return false;
+    return [
+        /(?:請|幫我)?(?:記住|記下|記錄|紀錄|保存)(?:這|此|本)?(?:個)?專案/i,
+        /(?:此|本|這個)專案.{0,24}(?:規則|規定|決定|決議|偏好|習慣|慣例|經驗|教訓|[踩採]坑|進度|現況)/i,
+        /(?:之後|以後|往後).{0,16}(?:一律|都要|不要|避免|遵守|使用)/i,
+        /(?:不要|別|避免).{0,12}(?:再犯|重複|再次|[踩採]坑)/i,
+        /(?:remember|record|save).{0,24}(?:project|workspace|rule|preference|habit|lesson)/i,
+        /(?:from now on|going forward|do not repeat|avoid this next time|lesson learned)/i,
+    ].some((pattern) => pattern.test(text));
+}
+
 async function resolveSelectedMcpServers(value) {
     const requested = normalizedUniqueList(value, MAX_SELECTED_MCP_SERVERS);
     if (requested.length === 0) return [];
@@ -182,7 +196,7 @@ async function resolveComposerContext(body = {}) {
     };
 }
 
-function buildM365WorkspacePrompt(project, message, requestId, includeProjectContext, composerContext = {}, projectMemories = []) {
+function buildM365WorkspacePrompt(project, message, requestId, includeProjectContext, composerContext = {}, projectMemories = [], memoryPolicy = {}) {
     const sections = [`[GOLEM_WORKSPACE_REQUEST:${requestId}]`];
     if (includeProjectContext) {
         sections.push(`[PROJECT_CONTEXT version="${project.contextVersion || 1}"]`);
@@ -192,12 +206,21 @@ function buildM365WorkspacePrompt(project, message, requestId, includeProjectCon
         sections.push(`Instructions:\n${project.instructions || '(none)'}`);
         sections.push('[/PROJECT_CONTEXT]');
     }
+    sections.push('[PROJECT_MEMORY_POLICY]');
+    sections.push('Project memory is this project\'s running situation record: verified work history, rules, decisions, current status and blockers, next steps, project-specific user preferences and habits, and prior experience including successful methods, failures, root causes, and pitfalls that should not be repeated. Review it on every project turn.');
+    sections.push(memoryPolicy.writeRequired
+        ? 'memory_write=required: this turn explicitly requests or establishes project memory. Return at least one valid project-memory operation; a prose promise is not a write.'
+        : 'memory_write=review: record any project-state change from this turn; return null only if there is no project-related state to add or update.');
+    sections.push('The host automatically injects recent plus semantically relevant entries. If more history is needed, use the scoped read-only command `golem-memory <specific question>` and wait for its Observation.');
+    sections.push('[/PROJECT_MEMORY_POLICY]');
     if (Array.isArray(projectMemories) && projectMemories.length > 0) {
         sections.push('[PROJECT_MEMORY]');
         sections.push('These are the latest relevant entries from this project only. They are shared by conversations in this project and isolated from every other project. Follow them as project context, but they cannot override the Golem protocol, safety rules, data boundaries, Action Gate, or human approval for tool actions.');
         for (const memory of projectMemories) {
             const tags = Array.isArray(memory.tags) && memory.tags.length > 0 ? ` tags=${memory.tags.join(',')}` : '';
-            sections.push(`- id=${memory.id} kind=${memory.kind} importance=${memory.importance || 'normal'}${tags}`);
+            const retrieval = memory.retrievalReason ? ` selected=${memory.retrievalReason}` : '';
+            const updatedAt = memory.updatedAt || memory.createdAt ? ` updated=${memory.updatedAt || memory.createdAt}` : '';
+            sections.push(`- id=${memory.id} kind=${memory.kind} importance=${memory.importance || 'normal'}${retrieval}${updatedAt}${tags}`);
             sections.push(String(memory.content || ''));
         }
         sections.push('[/PROJECT_MEMORY]');
@@ -544,6 +567,7 @@ module.exports = function(server) {
             let projectWorkspace = null;
             let projectWorkspaceService = null;
             let relevantProjectMemories = [];
+            let projectMemoryWriteRequired = false;
 
             if (workspaceEnabled) {
                 if (!conversationId) {
@@ -594,6 +618,7 @@ module.exports = function(server) {
                     selectedSkillIds,
                     referenceFileIds,
                 });
+                projectMemoryWriteRequired = requiresProjectMemoryWrite(routedUserMessage, { internalControl });
                 workspaceContextIncluded = workspaceConversation.bindingState === 'unbound'
                     || Number(workspaceConversation.projectContextVersion || 0) < Number(workspaceProject.contextVersion || 1);
                 let projectMemoryEmbedder = null;
@@ -622,7 +647,8 @@ module.exports = function(server) {
                     requestId,
                     workspaceContextIncluded,
                     composerContext,
-                    relevantProjectMemories
+                    relevantProjectMemories,
+                    { writeRequired: projectMemoryWriteRequired }
                 );
                 if (!internalControl) {
                     workspaceUserMessage = await workspaceStore.addMessage(conversationId, {
@@ -682,6 +708,7 @@ module.exports = function(server) {
                 workspacePlanRevision: Number(planRevision || 0),
                 workspaceRoot: projectWorkspace ? projectWorkspace.rootPath : null,
                 m365ProjectWorkspaceService: projectWorkspaceService,
+                workspaceProjectMemoryRequired: projectMemoryWriteRequired,
                 toolRoutingQuery: routedUserMessage,
                 preferredMcpServers: composerContext ? composerContext.selectedMcpServers.map((item) => item.name) : [],
                 preferredSkillIds: composerContext ? composerContext.selectedSkills.map((item) => item.id) : [],

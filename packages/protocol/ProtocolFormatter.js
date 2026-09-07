@@ -89,13 +89,26 @@ ${userProfilePrompt || '- 尚無經驗證的長期使用者偏好；依目前訊
 - 不得發明 action、Skill、MCP server、tool 或參數欄位。`;
 }
 
-function buildM365MemoryRules() {
-    return `- Project memory is automatic host-managed memory, not a tool action. It never enters Action Gate and must not be placed in [GOLEM_ACTION].
-- To retain a durable rule, decision, project preference, or cross-conversation working context for this project, output at most one [GOLEM_PROJECT_MEMORY]...[/GOLEM_PROJECT_MEMORY] block containing a JSON array or null.
-- Project memory schema: [{"operation":"upsert|update|remove","id":"pm_... only for update/remove","kind":"rule|context|decision|preference","importance":"core|normal","content":"durable concise fact","tags":["..."]}]. Omit id for a new entry. Use only ids supplied in [PROJECT_MEMORY] when changing or removing an entry.
-- Do not store transient step narration, unverified tool results, full replies, raw documents, secrets, credentials, tokens, cookies, or sensitive personal data in project memory.
+function buildM365MemoryRules(options = {}) {
+    const hasProjectWorkspace = Boolean(options.workspaceConversationId);
+    if (!hasProjectWorkspace) {
+        return `- No scoped project workspace is active. Do not output [GOLEM_PROJECT_MEMORY].
 - To retain a stable, non-sensitive user preference, output at most one [GOLEM_USER_MEMORY]...[/GOLEM_USER_MEMORY] block containing a JSON array or null. Allowed forms are {"operation":"set","path":"identity.preferredLanguage|identity.timezone|communication.tone|communication.responseLength|communication.preferredScriptType|communication.usesEmoji|communication.codeExamplesPreferred|tech.prefersCli|work.workStyle","value":...} and {"operation":"add|remove","path":"identity.knownNames|tech.languages|tech.frameworks|tech.tools|tech.os|work.commonTasks|work.projectTypes|preferences.topics|preferences.dislikes|preferences.taboos|preferences.favoriteBots","value":"..."}.
-- Never output generic [GOLEM_MEMORY] in M365 mode. If no durable memory change is warranted, omit both scoped memory blocks or set them to null.`;
+- Never output generic [GOLEM_MEMORY] in M365 mode.`;
+    }
+    const requiredRule = options.m365ProjectMemoryRequired === true
+        ? '- This turn explicitly establishes or requests project memory. [GOLEM_PROJECT_MEMORY] must contain at least one valid add/upsert/update/remove operation; do not return null and do not merely say that you remembered it.'
+        : '- Review this turn for project-state changes. Use null only when the turn contains no project-related work, rule, decision, preference, habit, current state, blocker, next step, or reusable lesson.';
+    return `- Project memory is the ongoing record of this project, not only exceptional long-term facts. It is automatic host-managed memory, not a tool action, never enters Action Gate, and must not be placed in [GOLEM_ACTION].
+- In every active project-workspace response, output exactly one [GOLEM_PROJECT_MEMORY]...[/GOLEM_PROJECT_MEMORY] block containing a JSON array or null.
+- Record concise project-scoped changes: verified work performed and its result (worklog); rules and constraints (rule); decisions (decision); current status, blockers, dependencies, and next steps (context); this project's user work preferences or habits (preference); and prior experience including successful approaches, failed approaches, pitfalls, root causes, and how to avoid repeating them (lesson).
+- After a host Observation, record or update the verified work result, current state, and any reusable lesson. Never record requested, proposed, or attempted work as completed without evidence.
+${requiredRule}
+- Project memory schema: [{"operation":"add|upsert|update|remove","id":"pm_... only for update/remove","kind":"rule|context|decision|preference|worklog|lesson","importance":"core|normal","content":"concise project fact","tags":["..."]}]. Omit id for a new entry. Use only ids supplied in [PROJECT_MEMORY] or a project-memory query when changing or removing an entry.
+- If the injected recent and relevant entries are insufficient, query this same project's memory with a command action: {"action":"command","parameter":"golem-memory <specific question>","progress":"查詢專案記憶並確認相關紀錄"}. With no question, golem-memory returns the most recent entries. Wait for the Observation before using the result.
+- Do not store transient narration, unsupported claims, full replies, raw documents, secrets, credentials, tokens, cookies, or sensitive personal data. Summarize only the minimum project context needed for future work.
+- To retain a stable, non-sensitive preference that applies across every project, use at most one [GOLEM_USER_MEMORY]...[/GOLEM_USER_MEMORY] block. Project-specific preferences and habits belong in [GOLEM_PROJECT_MEMORY].
+- Never output generic [GOLEM_MEMORY] in M365 mode.`;
 }
 
 function buildM365ConversationTitleRules(requested) {
@@ -232,7 +245,7 @@ class ProtocolFormatter {
                 || (options.m365AutoApprove === false ? 'guided' : null)
                 || inferAutomationMode(process.env);
             const actionRules = buildM365ActionRules(actionsEnabled, automationMode);
-            const memoryRules = buildM365MemoryRules();
+            const memoryRules = buildM365MemoryRules(options);
             const conversationTitleRules = buildM365ConversationTitleRules(
                 options.m365ConversationTitleRequested === true
                     && options.isSystemFeedback !== true
