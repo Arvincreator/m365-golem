@@ -27,6 +27,12 @@ describe('M365 automation policy', () => {
             { action: 'command', parameter: 'golem-check tools 建立文件' },
         ])).toBe(true);
         expect(mayAutoApproveM365Actions([
+            { action: 'command', parameter: 'golem-folder list folder_test' },
+        ])).toBe(true);
+        expect(mayAutoApproveM365Actions([
+            { action: 'command', parameter: 'golem-folder delete folder_test' },
+        ])).toBe(false);
+        expect(mayAutoApproveM365Actions([
             { action: 'command', parameter: 'cat AGENTS.md' },
         ])).toBe(false);
     });

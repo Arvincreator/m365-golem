@@ -33,7 +33,7 @@ class SecurityManager {
                 /mkfs/, /dd(\s|$)/, />\s*\//, /curl.*\|\s*(bash|sh)/, /wget.*\|\s*(bash|sh)/
             ]
         };
-        this.SAFE_COMMANDS = ['ls', 'dir', 'pwd', 'date', 'echo', 'cat', 'grep', 'find', 'whoami', 'tail', 'head', 'df', 'free', 'Get-ChildItem', 'Select-String', 'golem-check', 'golem-memory'];
+        this.SAFE_COMMANDS = ['ls', 'dir', 'pwd', 'date', 'echo', 'cat', 'grep', 'find', 'whoami', 'tail', 'head', 'df', 'free', 'Get-ChildItem', 'Select-String', 'golem-check', 'golem-memory', 'golem-folder'];
         // Guided keeps only the minimum workspace inspection primitives always safe.
         // The broader safe-command library is enabled by Balanced/Autopilot/Silent.
         this.BASELINE_SAFE_COMMANDS = ['ls', 'pwd'];

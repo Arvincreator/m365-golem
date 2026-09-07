@@ -63,13 +63,21 @@ describe('M365 durable run coordinator', () => {
             steps: [{ id: 'step_1', title: 'List files', status: 'in_progress', doneWhen: 'Files listed' }],
             question: '', approvalRequest: '', completionSummary: '',
         };
-        const first = await coordinator.handleAutonomousPlan({ conversationId: conversation.id, plan, actions: [], actionCount: 0 });
+        const localFolders = [{ id: 'folder_test', name: 'Selected', path: 'C:\\Selected' }];
+        const first = await coordinator.handleAutonomousPlan({
+            conversationId: conversation.id,
+            plan,
+            actions: [],
+            actionCount: 0,
+            localFolders,
+        });
         expect(first.accepted).toBe(true);
         expect((await store.getRun(first.runId)).status).toBe('QUEUED');
         expect(await store.listRunSteps(first.runId)).toHaveLength(0);
         coordinator._clearDispatchTimer(first.runId);
         await coordinator._beginAutonomousContinuation(first.runId, { ...plan, revision: 1 }, '', 'MISSING_ACTION_REPAIR');
         expect(server.dispatchM365WorkspaceMessage.mock.calls[0][0].message).toContain('No new tool was executed');
+        expect(coordinator.getRunLocalFolders(first.runId)).toEqual(localFolders);
         for (const revision of [2, 3]) {
             await coordinator.handleAutonomousPlan({ conversationId: conversation.id, existingRunId: first.runId,
                 plan: { ...plan, planId: first.runId, revision }, actions: [], actionCount: 0 });
@@ -77,6 +85,40 @@ describe('M365 durable run coordinator', () => {
         }
         expect((await store.getRun(first.runId)).status).toBe('BLOCKED');
         expect(await store.listRunSteps(first.runId)).toHaveLength(0);
+    });
+
+    test('does not replace scoped folder references when a run belongs to another conversation', async () => {
+        const plan = {
+            schemaVersion: 'golem_plan/1', planId: null, revision: 1,
+            goal: 'Inspect selected files', status: 'running', currentStepId: 'step_1',
+            completionCriteria: 'A host Observation verifies the result.',
+            steps: [{ id: 'step_1', title: 'Inspect files', status: 'in_progress', doneWhen: 'Files inspected' }],
+            question: '', approvalRequest: '', completionSummary: '',
+        };
+        const originalFolders = [{ id: 'folder_original', name: 'Original', path: 'C:\\Original' }];
+        const accepted = await coordinator.handleAutonomousPlan({
+            conversationId: conversation.id,
+            plan,
+            actions: [{ action: 'command', parameter: 'dir' }],
+            actionCount: 1,
+            localFolders: originalFolders,
+        });
+        const otherConversation = await store.createConversation(project.id, { title: 'Other conversation' });
+
+        const rejected = await coordinator.handleAutonomousPlan({
+            conversationId: otherConversation.id,
+            existingRunId: accepted.runId,
+            plan: { ...plan, planId: accepted.runId, revision: 2 },
+            actions: [{ action: 'command', parameter: 'dir' }],
+            actionCount: 1,
+            localFolders: [{ id: 'folder_other', name: 'Other', path: 'C:\\Other' }],
+        });
+
+        expect(rejected).toEqual(expect.objectContaining({
+            accepted: false,
+            code: 'M365_PLAN_CONVERSATION_MISMATCH',
+        }));
+        expect(coordinator.getRunLocalFolders(accepted.runId)).toEqual(originalFolders);
     });
 
     test('does not automatically repair an explicit blocker', async () => {

@@ -32,14 +32,17 @@ describe('M365 workspace UI regressions', () => {
         expect(source).toContain('/api/m365/workspace/pick-folder');
     });
 
-    test('keeps uploaded attachments distinct from indexed references in the composer', () => {
+    test('keeps uploaded files, on-demand folders, and indexed references distinct in the composer', () => {
         const source = read('web-dashboard/src/app/dashboard/chat/page.tsx');
         expect(source).toContain('新增檔案');
-        expect(source).toContain('新增資料夾');
+        expect(source).toContain('選擇本機資料夾');
         expect(source).toContain('選擇知識來源');
         expect(source).toContain('Prompt 指令池');
         expect(source).toContain('collectDroppedAttachmentCandidates');
-        expect(source).toContain('node.setAttribute("webkitdirectory", "")');
+        expect(source).toContain('/api/m365/workspace/pick-folder');
+        expect(source).toContain('selectedLocalFolderIds: submitted.localFolders.map');
+        expect(source).toContain('本機資料夾只提供路徑並按需讀取');
+        expect(source).not.toContain('node.setAttribute("webkitdirectory", "")');
         expect(source).toContain('onDrop={(event) => void handleAttachmentDrop(event)}');
         expect(source).toContain('M365 處理與送出結果以對話狀態為準');
     });

@@ -95,6 +95,45 @@ describe('TaskController', () => {
             expect(controller.internalExecutor).toBeFalsy();
         } finally { controller.destroy(); }
     });
+
+    test('reads a selected local folder through the bounded host service without invoking shell', async () => {
+        const controller = new TaskController({ golemId: 'test-golem' });
+        const folderService = {
+            list: jest.fn(() => ({ operation: 'list', entries: [{ name: 'brief.md', type: 'file' }] })),
+        };
+        const reference = { id: 'folder_test', name: 'Selected', path: 'C:\\Selected' };
+        try {
+            const result = await controller.runSequence({
+                m365LocalFolderService: folderService,
+                workspaceLocalFolders: [reference],
+            }, [{ action: 'command', parameter: 'golem-folder list folder_test' }]);
+
+            expect(folderService.list).toHaveBeenCalledWith(reference, '.');
+            expect(result).toContain('Bounded local-folder list completed');
+            expect(result).toContain('brief.md');
+            expect(controller.internalExecutor).toBeFalsy();
+        } finally { controller.destroy(); }
+    });
+
+    test('rejects unavailable or incomplete folder commands without invoking shell', async () => {
+        const controller = new TaskController({ golemId: 'test-golem' });
+        const folderService = { read: jest.fn() };
+        try {
+            const missingPath = await controller.runSequence({
+                m365LocalFolderService: folderService,
+                workspaceLocalFolders: [{ id: 'folder_test', path: 'C:\\Selected' }],
+            }, [{ action: 'command', parameter: 'golem-folder read folder_test' }]);
+            const unknownReference = await controller.runSequence({
+                m365LocalFolderService: folderService,
+                workspaceLocalFolders: [],
+            }, [{ action: 'command', parameter: 'golem-folder read folder_test brief.md' }]);
+
+            expect(missingPath).toContain('requires a relative text-file path');
+            expect(unknownReference).toContain('reference is unavailable');
+            expect(folderService.read).not.toHaveBeenCalled();
+            expect(controller.internalExecutor).toBeFalsy();
+        } finally { controller.destroy(); }
+    });
     beforeEach(() => {
         delete process.env.COMMAND_WHITELIST;
         delete process.env.GOLEM_TRUST_SYSTEM_COMMANDS;

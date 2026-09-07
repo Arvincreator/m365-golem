@@ -86,6 +86,8 @@ describe('ProtocolFormatter M365 Web safe mode', () => {
         expect(envelope).toContain('visible user approval');
         expect(envelope).toContain('{"action":"command","parameter":"echo %CD%","progress":"讀取工作區位置並確認實際路徑"}');
         expect(envelope).toContain('Do not merely say that you can propose an action');
+        expect(envelope).toContain('no folder contents have been uploaded or preloaded');
+        expect(envelope).toContain('golem-folder commands');
         expect(envelope).toContain('Never emit XML-style tags such as </GOLEM_REPLY>');
         expect(envelope).toContain('Never output generic [GOLEM_MEMORY]');
         expect(envelope).toContain('[GOLEM_PROJECT_MEMORY]');

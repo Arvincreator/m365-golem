@@ -30,7 +30,9 @@ function mayAutoApproveM365Actions(actions) {
     if (isFullAutoMode(mode)) return true;
     const hostReadOnlyInspection = Array.isArray(actions) && actions.length > 0 && actions.every((action) => {
         if (normalizeActionName(action?.action) !== 'command') return false;
-        return /^golem[-_](?:check|memory)(?:\s|$)/i.test(extractCommand(action));
+        const command = extractCommand(action);
+        return /^golem[-_](?:check|memory)(?:\s|$)/i.test(command)
+            || /^golem[-_]folder\s+(?:list|find|read)\s+[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}(?:\s+[\s\S]+)?$/i.test(command);
     });
     if (hostReadOnlyInspection) return true;
     if (mode !== 'balanced' || !Array.isArray(actions) || actions.length === 0) return false;

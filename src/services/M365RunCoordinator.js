@@ -74,7 +74,26 @@ class M365RunCoordinator {
         this.store = null;
         this.runLocks = new Map();
         this.dispatchTimers = new Map();
+        this.runLocalFolders = new Map();
         this.readyPromise = null;
+    }
+
+    rememberRunLocalFolders(runId, folders) {
+        const id = String(runId || '').trim();
+        if (!id || !Array.isArray(folders) || folders.length === 0) return;
+        this.runLocalFolders.set(id, folders.slice(0, 3).map((folder) => ({
+            id: String(folder.id || ''),
+            name: String(folder.name || ''),
+            path: String(folder.path || ''),
+        })));
+    }
+
+    getRunLocalFolders(runId) {
+        return (this.runLocalFolders.get(String(runId || '').trim()) || []).map((folder) => ({ ...folder }));
+    }
+
+    forgetRunLocalFolders(runId) {
+        this.runLocalFolders.delete(String(runId || '').trim());
     }
 
     async init() {
@@ -226,7 +245,10 @@ class M365RunCoordinator {
         await this.init();
         return this._withRunLock(runId, async () => {
             const run = await this.store.getRun(runId);
-            if (TERMINAL_STATUSES.has(run.status)) return run;
+            if (TERMINAL_STATUSES.has(run.status)) {
+                this.forgetRunLocalFolders(runId);
+                return run;
+            }
             this._clearDispatchTimer(runId);
             const steps = await this.store.listRunSteps(runId);
             const activeStep = [...steps].reverse().find((step) => ['queued', 'running', 'waiting'].includes(step.status));
@@ -238,10 +260,12 @@ class M365RunCoordinator {
                         : 'Canceled before dispatch.',
                 });
             }
-            return this.store.transitionRun(runId, 'CANCELED', {
+            const canceled = await this.store.transitionRun(runId, 'CANCELED', {
                 stepId: activeStep?.id || null,
                 reason: 'USER_CANCELED',
             });
+            this.forgetRunLocalFolders(runId);
+            return canceled;
         });
     }
 
@@ -256,7 +280,10 @@ class M365RunCoordinator {
                 );
             }
             const run = await this.store.getRun(runId);
-            if (run.status === 'COMPLETED') return run;
+            if (run.status === 'COMPLETED') {
+                this.forgetRunLocalFolders(runId);
+                return run;
+            }
             if (!['RUNNING', 'PAUSED', 'WAITING_USER', 'BLOCKED'].includes(run.status)) {
                 throw serviceError(
                     'M365_RUN_COMPLETE_INVALID',
@@ -284,9 +311,11 @@ class M365RunCoordinator {
             await this.store.appendRunEvent(runId, 'completion_confirmed_by_user', {
                 note: String(input.note || '').trim().slice(0, 2000),
             });
-            return this.store.transitionRun(runId, 'COMPLETED', {
+            const completed = await this.store.transitionRun(runId, 'COMPLETED', {
                 reason: 'USER_VERIFIED_COMPLETION',
             });
+            this.forgetRunLocalFolders(runId);
+            return completed;
         });
     }
 
@@ -346,11 +375,15 @@ class M365RunCoordinator {
                 : 'unbound';
             if (resolution === 'abandon') {
                 await this.store.setConversationBindingState(conversation.id, restoredBindingState);
-                return this.store.transitionRun(runId, 'CANCELED', { reason: 'USER_ABANDONED_RECONCILIATION' });
+                const canceled = await this.store.transitionRun(runId, 'CANCELED', { reason: 'USER_ABANDONED_RECONCILIATION' });
+                this.forgetRunLocalFolders(runId);
+                return canceled;
             }
             if (resolution === 'completed') {
                 await this.store.setConversationBindingState(conversation.id, restoredBindingState);
-                return this.store.transitionRun(runId, 'COMPLETED', { reason: 'USER_VERIFIED_COMPLETION' });
+                const completed = await this.store.transitionRun(runId, 'COMPLETED', { reason: 'USER_VERIFIED_COMPLETION' });
+                this.forgetRunLocalFolders(runId);
+                return completed;
             }
             if (resolution !== 'not_sent') {
                 throw serviceError(
@@ -557,7 +590,7 @@ class M365RunCoordinator {
         return [...events].reverse().find((event) => event.eventType === 'autonomous_plan_received') || null;
     }
 
-    async startExecutionContract({ conversationId, requestId = '', objective, verification }) {
+    async startExecutionContract({ conversationId, requestId = '', objective, verification, localFolders = [] }) {
         await this.init();
         const run = await this.store.createRun(conversationId, {
             objective,
@@ -567,6 +600,7 @@ class M365RunCoordinator {
             startImmediately: true,
             origin: 'host_execution_contract',
         });
+        this.rememberRunLocalFolders(run.id, localFolders);
         await this.store.appendRunEvent(run.id, 'execution_contract_created', { requestId });
         return this.requestProtocolRepair({ runId: run.id, kind: 'missing_initial_execution' });
     }
@@ -680,6 +714,7 @@ class M365RunCoordinator {
         actions = [],
         isSystemFeedback = false,
         workspaceRoot = '',
+        localFolders = [],
     }) {
         await this.init();
         if (planError) {
@@ -807,6 +842,10 @@ class M365RunCoordinator {
                 });
             }
 
+            // Bind folder references only after the run is proven to belong to
+            // this conversation and is still eligible for the plan update.
+            this.rememberRunLocalFolders(run.id, localFolders);
+
             const missingAction = actionCount === 0 && (plan.status === 'running'
                 || (plan.status === 'blocked' && !String(plan.question || '').trim()));
             if (missingAction && ['RUNNING', 'QUEUED'].includes(run.status)) {
@@ -915,6 +954,7 @@ class M365RunCoordinator {
                 run = await this.store.transitionRun(run.id, 'COMPLETED', {
                     reason: 'COPILOT_PLAN_COMPLETED',
                 });
+                this.forgetRunLocalFolders(run.id);
                 return { accepted: true, allowActions: false, planMode: true, runId: run.id, planId: run.id, planRevision: plan.revision, maxActionDepth: run.maxSteps };
             }
             if (plan.status === 'blocked') {
@@ -1100,7 +1140,9 @@ class M365RunCoordinator {
             run = await this.store.getRun(runId);
 
             if (control.status === 'complete') {
-                return this.store.transitionRun(runId, 'COMPLETED', { stepId, reason: 'COMPLETION_CHECK_SATISFIED' });
+                const completed = await this.store.transitionRun(runId, 'COMPLETED', { stepId, reason: 'COMPLETION_CHECK_SATISFIED' });
+                this.forgetRunLocalFolders(runId);
+                return completed;
             }
             if (control.status === 'blocked') {
                 return this.store.transitionRun(runId, 'BLOCKED', { stepId, reason: control.question || 'MODEL_REPORTED_BLOCKED' });

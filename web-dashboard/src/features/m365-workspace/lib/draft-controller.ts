@@ -5,9 +5,10 @@ export type Draft = {
     referenceFileIds: string[]; mcpServerNames: string[]; skillIds: string[];
     quote: { messageId: string; excerpt: string } | null;
     attachmentDescriptors: { id: string; fileName: string; size: number; lastModified: number; state: string }[];
+    localFolders: { id: string; name: string; path: string }[];
     revision: number;
 };
-export const emptyDraft = (): Draft => ({ schemaVersion: 1, text: "", responseMode: "auto", referenceFileIds: [], mcpServerNames: [], skillIds: [], quote: null, attachmentDescriptors: [], revision: 0 });
+export const emptyDraft = (): Draft => ({ schemaVersion: 1, text: "", responseMode: "auto", referenceFileIds: [], mcpServerNames: [], skillIds: [], quote: null, attachmentDescriptors: [], localFolders: [], revision: 0 });
 type Transport = { read: () => Promise<Draft>; write: (draft: Draft, expectedRevision: number) => Promise<Draft> };
 type Snapshot = { draft: Draft; files: PendingM365Attachment[]; status: "loading" | "saved" | "saving" | "unsaved" | "conflict"; error: string; edit: number };
 

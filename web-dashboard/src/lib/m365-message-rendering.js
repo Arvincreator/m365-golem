@@ -62,9 +62,10 @@ function readRenderedGutterBlock(lines, languageIndex) {
         cursor += 2;
     }
 
-    // Three consecutive gutter/code pairs are specific enough to distinguish
-    // M365's rendered code viewer from an ordinary numbered list.
-    if (codeLines.length < 3) return null;
+    // A standalone supported language label followed by a separate numeric
+    // gutter is M365's code-viewer shape. Single-line Plain Text cards are
+    // common for paths and identifiers, so requiring three pairs loses them.
+    if (codeLines.length < 1) return null;
 
     let sourceWasCollapsed = false;
     if (/^(?:顯示更多行|show more lines)$/i.test(String(lines[cursor] || "").trim())) {

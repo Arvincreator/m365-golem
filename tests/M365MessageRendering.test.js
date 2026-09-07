@@ -71,6 +71,42 @@ describe('M365 message rendering helpers', () => {
         ]);
     });
 
+    test('restores consecutive one-line Plain Text cards from a live M365 response', () => {
+        const content = [
+            '核心類',
+            '',
+            '1. Wiki Skill',
+            'Plain Text',
+            '1', 'skills/modules/wiki',
+            '用途：',
+            'Wiki 知識管理',
+            '',
+            '2. DuckDuckGo Search',
+            'Plain Text',
+            '1', 'skills/duckduckgo-search',
+            '用途：',
+            '公開網路搜尋',
+        ].join('\n');
+
+        expect(parseM365MessageContent(content)).toEqual([
+            { kind: 'markdown', content: '核心類\n\n1. Wiki Skill' },
+            {
+                kind: 'code',
+                language: 'text',
+                code: 'skills/modules/wiki',
+                sourceWasCollapsed: false,
+            },
+            { kind: 'markdown', content: '用途：\nWiki 知識管理\n\n2. DuckDuckGo Search' },
+            {
+                kind: 'code',
+                language: 'text',
+                code: 'skills/duckduckgo-search',
+                sourceWasCollapsed: false,
+            },
+            { kind: 'markdown', content: '用途：\n公開網路搜尋' },
+        ]);
+    });
+
     test('groups one run execution trace at its latest position without hiding final answers', () => {
         const messages = [
             { id: 'u1', role: 'user', source: 'user', content: '開始研究', runId: null, stepId: null },

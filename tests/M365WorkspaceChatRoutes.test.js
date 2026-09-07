@@ -4,6 +4,7 @@ const express = require('express');
 
 const mockStore = {
     getConversation: jest.fn(),
+    getDraft: jest.fn(),
     listProjectReferences: jest.fn(),
     getProject: jest.fn(),
     addMessage: jest.fn(),
@@ -29,6 +30,10 @@ const mockSkillPackageRegistry = {
 const mockReferenceFileService = {
     list: jest.fn(),
     read: jest.fn(),
+};
+const mockLocalFolderService = {
+    resolveSelectedReferences: jest.fn(),
+    validateReferences: jest.fn(),
 };
 const mockMcpManager = {
     _loaded: true,
@@ -74,6 +79,9 @@ jest.mock('../index.js', () => ({
 }));
 
 jest.mock('../src/services/ReferenceFileService', () => mockReferenceFileService);
+jest.mock('../src/services/M365LocalFolderService', () => ({
+    getM365LocalFolderService: jest.fn(() => mockLocalFolderService),
+}));
 jest.mock('../src/managers/SkillPackageRegistry', () => mockSkillPackageRegistry);
 jest.mock('../src/mcp/MCPManager', () => ({
     getInstance: () => mockMcpManager,
@@ -164,6 +172,9 @@ describe('workspace-aware M365 chat route', () => {
             instructions: 'Keep this project isolated.',
             contextVersion: 1,
         });
+        mockStore.getDraft.mockResolvedValue({ localFolders: [] });
+        mockLocalFolderService.resolveSelectedReferences.mockReturnValue([]);
+        mockLocalFolderService.validateReferences.mockReturnValue([]);
         mockStore.addMessage
             .mockReset()
             .mockResolvedValueOnce({ id: 'user-message-1' })
@@ -657,6 +668,89 @@ describe('workspace-aware M365 chat route', () => {
             content: 'Use my selected context.',
         }));
         expect(mockReferenceFileService.read).toHaveBeenCalledWith('ref-1', expect.objectContaining({ maxChars: 6000 }));
+    });
+
+    test('passes selected folders as scoped on-demand references without reading or uploading files', async () => {
+        const selectedFolder = {
+            id: 'folder_1',
+            name: 'Reports',
+            path: 'C:\\Selected\\Reports',
+        };
+        mockStore.getDraft.mockResolvedValue({ localFolders: [selectedFolder] });
+        mockLocalFolderService.resolveSelectedReferences.mockReturnValue([selectedFolder]);
+        mockHandleDashboardMessage.mockImplementation(async (ctx) => {
+            expect(ctx.textOverride).toContain('[USER_SELECTED_LOCAL_FOLDERS]');
+            expect(ctx.textOverride).toContain('C:\\\\Selected\\\\Reports');
+            expect(ctx.textOverride).toContain('golem-folder list <id>');
+            expect(ctx.textOverride).toContain('golem-folder list folder_1 .');
+            expect(ctx.textOverride).toContain('"action":"command"');
+            expect(ctx.textOverride).toContain('No files were uploaded, enumerated, indexed, or read');
+            expect(ctx.textOverride).not.toContain('[本輪已附加檔案]');
+            expect(ctx.workspaceLocalFolders).toEqual([selectedFolder]);
+            expect(ctx.m365LocalFolderService).toBe(mockLocalFolderService);
+            expect(ctx.toolRoutingQuery).toContain('bounded local command');
+            await ctx.onTransportStart();
+            await ctx.onTransportAccepted();
+            await ctx.onTransportComplete({ text: 'Folder inspected on demand.' });
+            await ctx.reply('Folder inspected on demand.');
+        });
+
+        const result = await postChat({
+            golemId: 'golem_A',
+            projectId: 'project-1',
+            conversationId: 'conversation-1',
+            message: '找出資料夾內的報告。',
+            selectedLocalFolderIds: ['folder_1'],
+        });
+
+        expect(result.response.status).toBe(200);
+        await waitFor(() => serverContext.m365DispatchLease === null);
+        expect(mockStore.getDraft).toHaveBeenCalledWith('project-1', 'conversation-1');
+        expect(mockLocalFolderService.resolveSelectedReferences).toHaveBeenCalledWith(
+            ['folder_1'],
+            [selectedFolder]
+        );
+        expect(mockStore.addMessage).toHaveBeenNthCalledWith(1, 'conversation-1', expect.objectContaining({
+            content: expect.stringContaining('📁 Reports（按需讀取，未上傳檔案）'),
+        }));
+    });
+
+    test('keeps the scoped folder reference available during an internal multi-step continuation', async () => {
+        const selectedFolder = {
+            id: 'folder_1',
+            name: 'Reports',
+            path: 'C:\\Selected\\Reports',
+        };
+        serverContext.m365RunCoordinator = {
+            getRunLocalFolders: jest.fn(() => [selectedFolder]),
+        };
+        mockLocalFolderService.validateReferences.mockReturnValue([selectedFolder]);
+        mockHandleDashboardMessage.mockImplementation(async (ctx) => {
+            expect(ctx.m365InternalControl).toBe(true);
+            expect(ctx.workspaceRunId).toBe('run-folder-1');
+            expect(ctx.workspaceLocalFolders).toEqual([selectedFolder]);
+            expect(ctx.textOverride).toContain('[USER_SELECTED_LOCAL_FOLDERS]');
+            await ctx.onTransportStart({ isSystemFeedback: true });
+            await ctx.onTransportAccepted({ isSystemFeedback: true });
+            await ctx.onTransportComplete({ text: 'continued' }, { isSystemFeedback: true });
+            await ctx.reply('continued');
+        });
+
+        const result = await serverContext.dispatchM365WorkspaceMessage({
+            golemId: 'golem_A',
+            projectId: 'project-1',
+            conversationId: 'conversation-1',
+            message: 'Continue the saved plan.',
+            runId: 'run-folder-1',
+            internalControl: true,
+            toolRoutingQuery: 'Inspect reports.',
+        });
+
+        expect(result).toEqual(expect.objectContaining({ success: true }));
+        await waitFor(() => serverContext.m365DispatchLease === null);
+        expect(serverContext.m365RunCoordinator.getRunLocalFolders).toHaveBeenCalledWith('run-folder-1');
+        expect(mockLocalFolderService.validateReferences).toHaveBeenCalledWith([selectedFolder]);
+        expect(mockStore.getDraft).not.toHaveBeenCalled();
     });
 
     test('marks a native response-mode failure as unsent without requiring reconciliation', async () => {

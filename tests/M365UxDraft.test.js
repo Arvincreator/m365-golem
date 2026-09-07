@@ -36,14 +36,21 @@ describe('encrypted UX drafts', () => {
     });
     test('text, quote, names and selections are encrypted in DB and WAL; File is not restored', async () => {
         const secret = 'SYNTHETIC-PRIVATE-UX-SECRET';
+        const secretFolderPath = path.join(dir, secret);
         await store.saveDraft(project.id, conversation.id, 0, { text: secret, referenceFileIds: [secret],
-            quote: { messageId: 'message-id', excerpt: secret }, attachmentDescriptors: [{ id: 'file', fileName: secret, size: 10, lastModified: 1, state: 'local_selected' }] });
+            quote: { messageId: 'message-id', excerpt: secret }, attachmentDescriptors: [{ id: 'file', fileName: secret, size: 10, lastModified: 1, state: 'local_selected' }],
+            localFolders: [{ id: 'folder_secret', name: 'ignored', path: secretFolderPath }] });
         for (const file of fs.readdirSync(dir)) expect(fs.readFileSync(path.join(dir, file)).includes(Buffer.from(secret))).toBe(false);
         await store.close();
         store = new Store({ dbPath: path.join(dir, 'test.sqlite'), encryptionKey: Buffer.alloc(32, 17).toString('base64') });
         const restored = await store.getDraft(project.id, conversation.id);
         expect(restored.text).toBe(secret);
         expect(restored.attachmentDescriptors[0].state).toBe('needs_reselect');
+        expect(restored.localFolders).toEqual([{
+            id: 'folder_secret',
+            name: secret,
+            path: path.resolve(secretFolderPath),
+        }]);
         const wrong = new Store({ dbPath: path.join(dir, 'test.sqlite'), encryptionKey: Buffer.alloc(32, 18).toString('base64') });
         try {
             await expect(wrong.getDraft(project.id, conversation.id)).rejects.toMatchObject({ code: 'M365_DATA_DECRYPT_FAILED' });
@@ -63,4 +70,10 @@ test('descriptor and content limits fail closed', () => {
     expect(() => normalizeDraft({ text: 'a'.repeat(100001) })).toThrow();
     expect(() => normalizeDraft({ attachmentDescriptors: [{ id: 'x', fileName: 'x', size: 26 * 1024 * 1024, lastModified: 1 }] })).toThrow();
     expect(() => normalizeDraft({ mcpServerNames: ['a', 'b', 'c', 'd'] })).toThrow();
+    expect(() => normalizeDraft({ localFolders: [{ id: 'folder_x', path: 'relative-folder' }] })).toThrow();
+    const duplicatePath = path.join(os.tmpdir(), 'duplicate-folder');
+    expect(() => normalizeDraft({ localFolders: [
+        { id: 'folder_a', path: duplicatePath },
+        { id: 'folder_b', path: duplicatePath },
+    ] })).toThrow();
 });

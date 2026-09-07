@@ -115,6 +115,16 @@ type ConversationTimelineItem =
     | { kind: "message"; message: M365Message }
     | { kind: "execution"; runId: string; anchorId: string; messages: M365Message[] };
 
+function localFolderName(folderPath: string): string {
+    const normalized = String(folderPath || "").replace(/[\\/]+$/, "");
+    return normalized.split(/[\\/]/).filter(Boolean).pop() || normalized;
+}
+
+function localFolderId(): string {
+    if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") return `folder_${crypto.randomUUID()}`;
+    return `folder_${Date.now()}_${Math.random().toString(16).slice(2)}`;
+}
+
 const AUTOMATION_MODE_NOTICE: Record<AutomationMode, string> = {
     guided: "本機工具逐項顯示核准卡。",
     balanced: "受信任且不超過 L1 的指令可自動執行，其他動作仍會要求核准。",
@@ -283,12 +293,16 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
     const selectedReferenceFileIds = draft.referenceFileIds;
     const selectedMcpServerNames = draft.mcpServerNames;
     const selectedSkillIds = draft.skillIds;
+    const selectedLocalFolders = draft.localFolders;
     const pendingAttachments = draftState.files;
     const setInput = (text: string) => controller.update({ text });
     const setResponseMode = (mode: ResponseMode) => controller.update({ responseMode: mode });
     const setSelectedReferenceFileIds = (value: string[] | ((value: string[]) => string[])) => controller.update({ referenceFileIds: typeof value === "function" ? value(controller.getSnapshot().draft.referenceFileIds) : value });
     const setSelectedMcpServerNames = (value: string[] | ((value: string[]) => string[])) => controller.update({ mcpServerNames: typeof value === "function" ? value(controller.getSnapshot().draft.mcpServerNames) : value });
     const setSelectedSkillIds = (value: string[] | ((value: string[]) => string[])) => controller.update({ skillIds: typeof value === "function" ? value(controller.getSnapshot().draft.skillIds) : value });
+    const setSelectedLocalFolders = (value: Draft["localFolders"] | ((value: Draft["localFolders"]) => Draft["localFolders"])) => controller.update({
+        localFolders: typeof value === "function" ? value(controller.getSnapshot().draft.localFolders) : value,
+    });
     const setPendingAttachments = useCallback((value: PendingM365Attachment[] | ((value: PendingM365Attachment[]) => PendingM365Attachment[])) => {
         const files = typeof value === "function" ? value(controller.getSnapshot().files) : value;
         const missing = controller.getSnapshot().draft.attachmentDescriptors.filter(item => item.state === "needs_reselect"
@@ -325,6 +339,7 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
     const [promptShortcuts, setPromptShortcuts] = useState<PromptShortcutOption[]>([]);
     const [attachmentWarnings, setAttachmentWarnings] = useState<string[]>([]);
     const [attachmentProgress, setAttachmentProgress] = useState("");
+    const [pickingLocalFolder, setPickingLocalFolder] = useState(false);
     const [dragActive, setDragActive] = useState(false);
     const [showAgentsEditor, setShowAgentsEditor] = useState(false);
     const [loading, setLoading] = useState(true);
@@ -344,7 +359,6 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
     const composerRef = useRef<HTMLTextAreaElement>(null);
     const inspectorTriggerRef = useRef<HTMLButtonElement>(null);
     const fileInputRef = useRef<HTMLInputElement>(null);
-    const folderInputRef = useRef<HTMLInputElement>(null);
 
     useEffect(() => {
         const textarea = composerRef.current;
@@ -728,6 +742,44 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
         })));
     };
 
+    const pickLocalFolder = async () => {
+        if (pickingLocalFolder || sending) return;
+        if (selectedLocalFolders.length >= 3) {
+            setAttachmentWarnings(["每輪最多選擇 3 個本機資料夾來源。"]);
+            return;
+        }
+        setPickingLocalFolder(true);
+        setAttachmentWarnings([]);
+        try {
+            const result = await apiPost<{ cancelled: boolean; path: string | null }>(
+                apiUrl("/api/m365/workspace/pick-folder"),
+                {
+                    description: "選擇要讓 Golem 按需查看的本機資料夾",
+                    initialPath: selectedLocalFolders[selectedLocalFolders.length - 1]?.path || project?.workspacePath || undefined,
+                },
+                undefined,
+                { retries: 0 }
+            );
+            if (result.cancelled || !result.path) return;
+            const resolvedPath = result.path;
+            setSelectedLocalFolders((current) => {
+                if (current.some((folder) => folder.path.toLowerCase() === resolvedPath.toLowerCase())) {
+                    setAttachmentWarnings(["此資料夾已加入本輪來源"]);
+                    return current;
+                }
+                return [...current, {
+                    id: localFolderId(),
+                    name: localFolderName(resolvedPath),
+                    path: resolvedPath,
+                }];
+            });
+        } catch (pickError) {
+            setAttachmentWarnings([errorMessage(pickError)]);
+        } finally {
+            setPickingLocalFolder(false);
+        }
+    };
+
     const removePendingAttachment = (id: string) => {
         setPendingAttachments((current) => current.filter((item) => item.id !== id));
         setAttachmentWarnings([]);
@@ -816,7 +868,7 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
     const sendMessage = async (event: FormEvent) => {
         event.preventDefault();
         if (sendGuard.current || draftState.status === "loading" || draftState.status === "conflict") return;
-        if ((!input.trim() && pendingAttachments.length === 0) || !project || !conversation) return;
+        if ((!input.trim() && pendingAttachments.length === 0 && selectedLocalFolders.length === 0) || !project || !conversation) return;
         if (draft.attachmentDescriptors.some(item => !pendingAttachments.some(file => file.id === item.id))) {
             setError("附件需要重新選取原檔，或移除附件提示後再傳送。"); return;
         }
@@ -845,6 +897,7 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                 selectedMcpServers: submitted.mcpServerNames,
                 selectedSkillIds: submitted.skillIds,
                 referenceFileIds: submitted.referenceFileIds,
+                selectedLocalFolderIds: submitted.localFolders.map((folder) => folder.id),
                 attachmentBatchId: attachmentBatchId || undefined,
             });
             if (!accepted.requestId) throw new Error("傳送結果未確認；請先核對對話，不要直接重送。");
@@ -1225,23 +1278,9 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                         className="hidden"
                         onChange={(event) => { addFiles(event.target.files); event.target.value = ""; }}
                     />
-                    <input
-                        ref={(node) => {
-                            folderInputRef.current = node;
-                            if (node) {
-                                node.setAttribute("webkitdirectory", "");
-                                node.setAttribute("directory", "");
-                            }
-                        }}
-                        type="file"
-                        multiple
-                        accept={M365_ATTACHMENT_ACCEPT}
-                        className="hidden"
-                        onChange={(event) => { addFiles(event.target.files); event.target.value = ""; }}
-                    />
                     {dragActive && (
                         <div className="pointer-events-none absolute inset-2 z-50 flex items-center justify-center rounded-2xl border-2 border-dashed border-primary bg-background/95 text-sm font-medium text-primary shadow-xl">
-                            <FileUp className="mr-2 h-5 w-5" />放開即可加入檔案或資料夾
+                            <FileUp className="mr-2 h-5 w-5" />放開即可加入檔案
                         </div>
                     )}
                     <div className="mx-auto max-w-4xl">
@@ -1288,7 +1327,7 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                                 placeholder={conversation.bindingState === "reconcile_required" ? "請先完成人工核對" : "傳送訊息給此專案的 M365 Copilot 對話…"}
                             />
 
-                            {(pendingAttachments.length > 0 || selectedReferenceFileIds.length > 0 || selectedMcpServerNames.length > 0 || selectedSkillIds.length > 0) && (
+                            {(pendingAttachments.length > 0 || selectedLocalFolders.length > 0 || selectedReferenceFileIds.length > 0 || selectedMcpServerNames.length > 0 || selectedSkillIds.length > 0) && (
                                 <div className="mb-2 flex flex-wrap gap-1.5 px-1">
                                     {pendingAttachments.map((item) => (
                                         <button
@@ -1302,6 +1341,21 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                                             <Paperclip className="h-3 w-3 shrink-0 text-cyan-500" />
                                             <span className="truncate">{item.displayPath}</span>
                                             <span className="shrink-0 text-muted-foreground">{formatAttachmentSize(item.file.size)}</span>
+                                            <X className="h-3 w-3 shrink-0 text-muted-foreground" />
+                                        </button>
+                                    ))}
+                                    {selectedLocalFolders.map((folder) => (
+                                        <button
+                                            key={folder.id}
+                                            type="button"
+                                            onClick={() => setSelectedLocalFolders((current) => current.filter((item) => item.id !== folder.id))}
+                                            disabled={sending}
+                                            className="inline-flex max-w-72 items-center gap-1 rounded-lg border border-violet-500/30 bg-violet-500/5 px-2 py-1 text-[11px] hover:bg-violet-500/10 disabled:opacity-60"
+                                            title={`移除本機資料夾來源：${folder.path}`}
+                                        >
+                                            <FolderUp className="h-3 w-3 shrink-0 text-violet-500" />
+                                            <span className="truncate">{folder.path}</span>
+                                            <span className="shrink-0 text-muted-foreground">按需讀取</span>
                                             <X className="h-3 w-3 shrink-0 text-muted-foreground" />
                                         </button>
                                     ))}
@@ -1351,8 +1405,8 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                                             <button type="button" onClick={() => { fileInputRef.current?.click(); setComposerMenuOpen(false); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs hover:bg-accent">
                                                 <FileUp className="h-4 w-4 text-cyan-500" />新增檔案
                                             </button>
-                                            <button type="button" onClick={() => { folderInputRef.current?.click(); setComposerMenuOpen(false); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs hover:bg-accent">
-                                                <FolderUp className="h-4 w-4 text-cyan-500" />新增資料夾
+                                            <button type="button" disabled={pickingLocalFolder || sending} onClick={() => { setComposerMenuOpen(false); void pickLocalFolder(); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs hover:bg-accent disabled:opacity-60">
+                                                {pickingLocalFolder ? <Loader2 className="h-4 w-4 animate-spin text-violet-500" /> : <FolderUp className="h-4 w-4 text-violet-500" />}選擇本機資料夾
                                             </button>
                                             <button type="button" onClick={() => { setComposerPicker("files"); setComposerMenuOpen(false); }} className="flex w-full items-center gap-2 rounded-lg px-3 py-2 text-left text-xs hover:bg-accent">
                                                 <FileText className="h-4 w-4 text-primary" />選擇知識來源
@@ -1402,7 +1456,7 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                                 <div className="ml-auto">
                                     <button
                                         type="submit"
-                                        disabled={(!input.trim() && pendingAttachments.length === 0) || sending || conversation.bindingState === "reconcile_required"}
+                                        disabled={(!input.trim() && pendingAttachments.length === 0 && selectedLocalFolders.length === 0) || sending || conversation.bindingState === "reconcile_required"}
                                         className="flex h-8 w-8 items-center justify-center rounded-lg bg-primary text-primary-foreground transition hover:bg-primary/90 disabled:cursor-not-allowed disabled:bg-muted disabled:text-muted-foreground/40"
                                         aria-label="傳送"
                                     >
@@ -1419,7 +1473,7 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                         )}
                         {composerResourceError && <p className="mt-1.5 text-center text-[11px] text-amber-700 dark:text-amber-300">{composerResourceError}</p>}
                         <p className="mt-2 text-center text-[11px] text-muted-foreground">
-                            可見 M365 網頁傳輸 · 附件會上傳到目前的 M365 對話 · {AUTOMATION_MODE_NOTICE[automationMode]} · 不使用 Copilot Chat API
+                            可見 M365 網頁傳輸 · 檔案附件會上傳；本機資料夾只提供路徑並按需讀取 · {AUTOMATION_MODE_NOTICE[automationMode]} · 不使用 Copilot Chat API
                         </p>
                     </div>
                 </form>

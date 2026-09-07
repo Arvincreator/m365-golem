@@ -1,5 +1,7 @@
 'use strict';
 
+const path = require('path');
+
 function invalid(message) {
     return Object.assign(new Error(message), { code: 'M365_DRAFT_INVALID', statusCode: 400 });
 }
@@ -16,13 +18,29 @@ function normalizeDraft(input = {}) {
     const attachments = input.attachmentDescriptors ?? [];
     if (!Array.isArray(attachments) || attachments.length > 10 || attachments.some(a => !a || typeof a.id !== 'string' || a.id.length > 200 || typeof a.fileName !== 'string' || a.fileName.length > 500 || !Number.isSafeInteger(a.size) || a.size < 0 || a.size > 25 * 1024 * 1024 || !Number.isFinite(a.lastModified))) throw invalid('Invalid attachment descriptors.');
     if (attachments.reduce((n, a) => n + a.size, 0) > 50 * 1024 * 1024) throw invalid('Attachments exceed the limit.');
+    const localFolders = input.localFolders ?? [];
+    if (!Array.isArray(localFolders) || localFolders.length > 3 || localFolders.some(folder => (
+        !folder || typeof folder !== 'object'
+        || typeof folder.id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/.test(folder.id)
+        || typeof folder.path !== 'string' || folder.path.length > 2048 || !path.isAbsolute(folder.path)
+        || /[\u0000\r\n]/.test(folder.path)
+    ))) throw invalid('Invalid local folder references.');
+    if (new Set(localFolders.map(folder => folder.id)).size !== localFolders.length
+        || new Set(localFolders.map(folder => path.resolve(folder.path).toLowerCase())).size !== localFolders.length) {
+        throw invalid('Duplicate local folder references.');
+    }
     const quote = input.quote ?? null;
     if (quote && (typeof quote.messageId !== 'string' || quote.messageId.length > 200 || typeof quote.excerpt !== 'string' || quote.excerpt.length > 12000)) throw invalid('Invalid quote.');
     const responseMode = input.responseMode ?? 'auto';
     if (!['auto', 'quick', 'thoughtful'].includes(responseMode)) throw invalid('Invalid response mode.');
     return { schemaVersion: 1, text, responseMode, referenceFileIds: list('referenceFileIds'), mcpServerNames: list('mcpServerNames'), skillIds: list('skillIds'),
         quote: quote ? { messageId: quote.messageId, excerpt: quote.excerpt } : null,
-        attachmentDescriptors: attachments.map(a => ({ id: a.id, fileName: a.fileName, size: a.size, lastModified: a.lastModified, state: 'needs_reselect' })) };
+        attachmentDescriptors: attachments.map(a => ({ id: a.id, fileName: a.fileName, size: a.size, lastModified: a.lastModified, state: 'needs_reselect' })),
+        localFolders: localFolders.map(folder => ({
+            id: folder.id,
+            name: path.basename(path.resolve(folder.path)) || path.resolve(folder.path),
+            path: path.resolve(folder.path),
+        })) };
 }
 
 // These endpoints never trust forwarded addresses or a caller-supplied Host alone.
