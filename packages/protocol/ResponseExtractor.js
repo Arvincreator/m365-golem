@@ -100,7 +100,7 @@ class ResponseExtractor {
      * may have appeared after the normal wait expired.
      */
     static async inspectExistingResponse(page, selector, startTag, endTag, options = {}) {
-        const result = await page.evaluate(({ sel, sTag, eTag, responseContainers, stopSelectors }) => {
+        const result = await page.evaluate(({ sel, sTag, eTag, responseContainers, stopSelectors, allowUnwrapped, baselineText }) => {
             const visible = (node) => {
                 if (!node || !(node instanceof HTMLElement)) return false;
                 const style = window.getComputedStyle(node);
@@ -132,12 +132,7 @@ class ResponseExtractor {
             const isGenerating = (stopSelectors || []).some((candidate) => {
                 try { return Array.from(document.querySelectorAll(candidate)).some(visible); } catch (_) { return false; }
             });
-            for (let index = containers.length - 1; index >= 0; index -= 1) {
-                const container = containers[index];
-                const rawText = String(container.innerText || container.textContent || '');
-                const startIndex = rawText.indexOf(sTag);
-                const endIndex = rawText.indexOf(eTag, startIndex + sTag.length);
-                if (startIndex < 0 || endIndex <= startIndex) continue;
+            const collectArtifacts = (container) => {
                 const links = Array.from(container.querySelectorAll('a[href]')).map((anchor) => {
                     const href = String(anchor.href || '');
                     if (!/^https:\/\//i.test(href)) return null;
@@ -182,13 +177,43 @@ class ResponseExtractor {
                         elementType: 'image',
                     };
                 }).filter(Boolean);
-                return {
-                    found: true,
-                    busy: isGenerating,
-                    status: 'ENVELOPE_COMPLETE',
-                    text: rawText.substring(startIndex + sTag.length, endIndex).trim(),
-                    attachments: [...links, ...images],
-                };
+                const previewFiles = Array.from(document.querySelectorAll('button[id^="https://"], [role="button"][id^="https://"]'))
+                    .filter(visible)
+                    .map((button) => ({
+                        url: String(button.id || ''),
+                        name: String(button.innerText || button.textContent || button.getAttribute('aria-label') || 'M365 文件')
+                            .replace(/\s+/g, ' ').trim().slice(0, 240),
+                        hasDownload: true,
+                        elementType: 'link',
+                    }));
+                return [...links, ...images, ...previewFiles];
+            };
+            for (let index = containers.length - 1; index >= 0; index -= 1) {
+                const container = containers[index];
+                const rawText = String(container.innerText || container.textContent || '');
+                const startIndex = rawText.indexOf(sTag);
+                const endIndex = rawText.indexOf(eTag, startIndex + sTag.length);
+                if (startIndex >= 0 && endIndex > startIndex) {
+                    return {
+                        found: true,
+                        busy: isGenerating,
+                        status: 'ENVELOPE_COMPLETE',
+                        text: rawText.substring(startIndex + sTag.length, endIndex).trim(),
+                        attachments: collectArtifacts(container),
+                    };
+                }
+                if (allowUnwrapped && !isGenerating) {
+                    const trimmedText = rawText.trim();
+                    if (trimmedText && trimmedText !== String(baselineText || '').trim()) {
+                        return {
+                            found: true,
+                            busy: false,
+                            status: 'FALLBACK_RECOVERED',
+                            text: trimmedText,
+                            attachments: collectArtifacts(container),
+                        };
+                    }
+                }
             }
             return { found: false, busy: isGenerating, status: isGenerating ? 'GENERATING' : 'NOT_FOUND', text: '', attachments: [] };
         }, {
@@ -201,6 +226,8 @@ class ResponseExtractor {
             stopSelectors: Array.isArray(options.stopSelectors) && options.stopSelectors.length > 0
                 ? options.stopSelectors
                 : ['button[aria-label*="Stop" i]', 'button[aria-label*="停止" i]', '[data-testid*="stop" i]'],
+            allowUnwrapped: options.allowUnwrapped === true,
+            baselineText: String(options.baselineText || ''),
         });
         result.attachments = ResponseExtractor.normalizeVisibleArtifacts(result.attachments, {
             includeSources: options.extractSourceLinks === true,
@@ -388,8 +415,14 @@ class ResponseExtractor {
                                 if (!href || !href.startsWith('http')) return;
                                 const isDownload = a.hasAttribute('download');
                                 const linkText = String(a.innerText || a.textContent || a.getAttribute('aria-label') || a.getAttribute('title') || '').trim();
+                                let queryFileName = '';
+                                try {
+                                    const parsedHref = new URL(href, window.location.href);
+                                    queryFileName = decodeURIComponent(parsedHref.searchParams.get('file') || '').trim();
+                                } catch (_) { }
                                 const hasFileExt = /\.(pdf|docx|xlsx|pptx|csv|txt|zip|md|js|py)(?:$|[?#])/i.test(href)
-                                    || /\.(pdf|docx|xlsx|pptx|csv|txt|zip|md|js|py)$/i.test(linkText);
+                                    || /\.(pdf|docx|xlsx|pptx|csv|txt|zip|md|js|py)$/i.test(linkText)
+                                    || /\.(pdf|docx|xlsx|pptx|csv|txt|zip|md|js|py)$/i.test(queryFileName);
                                 const isGoogleContent = href.includes('googleusercontent.com') || href.includes('blob:');
                                 const looksLikeDownload = /download|attachment/i.test(href);
                                 if (_extractSourceLinks || isDownload || hasFileExt || isGoogleContent || looksLikeDownload) {
@@ -400,7 +433,7 @@ class ResponseExtractor {
                                     attachments.push({
                                         url: href,
                                         mimeType: mime,
-                                        name: linkText || a.getAttribute('download') || '',
+                                        name: queryFileName || linkText || a.getAttribute('download') || '',
                                         linkText,
                                         downloadName: String(a.getAttribute('download') || ''),
                                         ariaLabel: String(a.getAttribute('aria-label') || ''),

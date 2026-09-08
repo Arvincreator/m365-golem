@@ -83,6 +83,25 @@ describe('ResponseParser M365 reply-only envelope', () => {
         ]);
     });
 
+    test('parses an action when Copilot leaves the protocol closing tags inside an unclosed JSON fence', () => {
+        const parsed = ResponseParser.parse(
+            '[[BEGIN:unclosed]]\n' +
+            '[GOLEM_PLAN]{"schema_version":"golem_plan/1","plan_id":null,"revision":1,"goal":"建立報告","completion_criteria":"檔案存在","status":"running","current_step_id":"step_1","steps":[{"id":"step_1","title":"建立報告","status":"in_progress","done_when":"檔案存在"}],"question":"","approval_request":"","completion_summary":""}[/GOLEM_PLAN] [GOLEM_ACTION]\n' +
+            '```json\n' +
+            '1\n[\n2\n  {\n3\n    "action":"command",\n4\n    "parameter":"powershell -NoProfile -Command \\\"[IO.File]::WriteAllBytes(\'weekly_report.py\',[Convert]::FromBase64String(\'YWJj\'))\\\"",\n5\n    "progress":"改用編碼命令建立並驗證報告"\n6\n  }\n7\n]\n' +
+            '8\n[/GOLEM_ACTION]\n' +
+            '9\n[[END:unclosed]]'
+        );
+
+        expect(parsed.actions).toEqual([
+            {
+                action: 'command',
+                parameter: 'powershell -NoProfile -Command "[IO.File]::WriteAllBytes(\'weekly_report.py\',[Convert]::FromBase64String(\'YWJj\'))"',
+                progress: '改用編碼命令建立並驗證報告',
+            },
+        ]);
+    });
+
     test('does not remove standalone numbers unless they form an M365 gutter sequence', () => {
         const candidate = '1\n[\n3\n{"action":"command","parameter":"echo 7"}\n]';
 

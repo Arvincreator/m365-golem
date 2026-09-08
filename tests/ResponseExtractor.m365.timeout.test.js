@@ -2,14 +2,20 @@ const { ResponseExtractor } = require('../packages/protocol');
 
 describe('ResponseExtractor bounded M365 waits', () => {
     let originalDocument;
+    let originalWindow;
+    let originalHTMLElement;
 
     beforeEach(() => {
         originalDocument = global.document;
+        originalWindow = global.window;
+        originalHTMLElement = global.HTMLElement;
         jest.useFakeTimers();
     });
 
     afterEach(() => {
         global.document = originalDocument;
+        global.window = originalWindow;
+        global.HTMLElement = originalHTMLElement;
         jest.useRealTimers();
         jest.restoreAllMocks();
     });
@@ -131,6 +137,118 @@ describe('ResponseExtractor bounded M365 waits', () => {
             text: 'POC-M365-READY',
             matchedSelector: selector,
         }));
+    });
+
+    test('recheck recovers the newest stable unwrapped response and visible Word preview file', async () => {
+        class FakeHTMLElement {}
+        const selector = '[role="article"].fai-CopilotMessage';
+        const fileButton = new FakeHTMLElement();
+        Object.assign(fileButton, {
+            id: 'https://contoso.sharepoint.com/report.docx?web=1',
+            innerText: '第006期_數位轉型週報摘要.docx',
+            textContent: '第006期_數位轉型週報摘要.docx',
+            disabled: false,
+            getBoundingClientRect: () => ({ width: 240, height: 32 }),
+            getAttribute: jest.fn(() => null),
+        });
+        const candidate = new FakeHTMLElement();
+        Object.assign(candidate, {
+            innerText: 'Word 檔已生成，可直接下載。',
+            textContent: 'Word 檔已生成，可直接下載。',
+            parentElement: null,
+            closest: jest.fn((value) => value === selector ? candidate : null),
+            querySelectorAll: jest.fn(() => []),
+        });
+        global.HTMLElement = FakeHTMLElement;
+        global.window = {
+            location: { href: 'https://m365.cloud.microsoft/chat/conversation/test' },
+            getComputedStyle: () => ({ display: 'block', visibility: 'visible' }),
+        };
+        global.document = {
+            querySelectorAll: jest.fn((value) => {
+                if (value === selector) return [candidate];
+                if (value === 'button[id^="https://"], [role="button"][id^="https://"]') return [fileButton];
+                return [];
+            }),
+        };
+        const page = { evaluate: jest.fn((callback, args) => callback(args)) };
+
+        const result = await ResponseExtractor.inspectExistingResponse(
+            page,
+            selector,
+            '[[BEGIN:test]]',
+            '[[END:test]]',
+            {
+                responseContainerSelectors: [selector],
+                stopSelectors: ['.never-busy'],
+                allowUnwrapped: true,
+                baselineText: '舊回覆',
+            }
+        );
+
+        expect(result).toEqual(expect.objectContaining({
+            found: true,
+            busy: false,
+            status: 'FALLBACK_RECOVERED',
+            text: 'Word 檔已生成，可直接下載。',
+        }));
+        expect(result.attachments).toEqual([
+            expect.objectContaining({
+                kind: 'download',
+                name: '第006期_數位轉型週報摘要.docx',
+            }),
+        ]);
+    });
+
+    test('captures an M365 Word link whose file extension is stored in the SharePoint file query parameter', async () => {
+        const selector = '[role="article"].fai-CopilotMessage';
+        const anchor = {
+            href: 'https://contoso.sharepoint.com/_layouts/15/Doc.aspx?sourcedoc=%7B123%7D&file=%E7%AC%AC006%E6%9C%9F_%E6%95%B8%E4%BD%8D%E8%BD%89%E5%9E%8B%E9%80%B1%E5%A0%B1%E6%91%98%E8%A6%81.docx&action=default',
+            innerText: '第006期_數位轉型週報摘要',
+            textContent: '第006期_數位轉型週報摘要',
+            hasAttribute: jest.fn(() => false),
+            getAttribute: jest.fn(() => ''),
+            matches: jest.fn(() => false),
+            closest: jest.fn(() => null),
+        };
+        const candidate = {
+            tagName: 'DIV',
+            innerText: '[[BEGIN:test]][GOLEM_REPLY]完成[/GOLEM_REPLY][[END:test]]',
+            textContent: '[[BEGIN:test]][GOLEM_REPLY]完成[/GOLEM_REPLY][[END:test]]',
+            isContentEditable: false,
+            parentElement: null,
+            getAttribute: jest.fn(() => ''),
+            matches: jest.fn((value) => value === selector),
+            closest: jest.fn((value) => value === selector ? candidate : null),
+            querySelectorAll: jest.fn((value) => value === 'a' ? [anchor] : []),
+        };
+        global.window = { location: { href: 'https://m365.cloud.microsoft/chat/conversation/test' } };
+        global.document = {
+            querySelectorAll: jest.fn((value) => value === selector ? [candidate] : []),
+        };
+        const page = { evaluate: jest.fn((callback, args) => callback(args)) };
+
+        const result = await ResponseExtractor.waitForResponse(
+            page,
+            selector,
+            '[[BEGIN:test]]',
+            '[[END:test]]',
+            '',
+            {
+                timeoutMs: 1000,
+                responseContainerSelectors: [selector],
+                stopSelectors: ['.never-busy'],
+            }
+        );
+
+        expect(result.status).toBe('ENVELOPE_COMPLETE');
+        expect(result.attachments).toEqual([
+            expect.objectContaining({
+                kind: 'download',
+                name: '第006期_數位轉型週報摘要.docx',
+                url: expect.stringContaining('Doc.aspx'),
+            }),
+        ]);
     });
 
     test('separates M365 citations from downloads and drops citation favicons', () => {

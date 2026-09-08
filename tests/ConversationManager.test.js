@@ -356,7 +356,7 @@ describe('ConversationManager', () => {
                 nextLimit: 3,
             });
             expect(mockCtx.reply).toHaveBeenCalledWith(
-                expect.stringContaining('上限會由 2 增加為 3'),
+                expect.stringContaining('新的 3 回合自動執行額度'),
                 expect.any(Object)
             );
 
@@ -367,7 +367,7 @@ describe('ConversationManager', () => {
                 options: {
                     isSystemFeedback: true,
                     workspaceRunId: 'run-soft-cap',
-                    autoTurnBudget: { used: 2, limit: 3 },
+                    autoTurnBudget: { used: 0, limit: 3, reset: true },
                 },
             });
             await cm._processQueue();
@@ -379,6 +379,7 @@ describe('ConversationManager', () => {
                 expect.objectContaining({ isSystemFeedback: true })
             );
             expect(onAutoTurnLimit).toHaveBeenCalledTimes(1);
+            expect(cm.autoTurnStateByRun.get('run-soft-cap')).toEqual({ used: 1, limit: 3 });
         } finally {
             ConfigManager.CONFIG.MAX_AUTO_TURNS = originalLimit;
         }

@@ -93,7 +93,10 @@ class PageInteractor {
             }
 
             // 1. 捕獲基準文字
-            const baseline = await this._captureBaseline(selectors.response);
+            const baseline = await this._captureBaseline(
+                selectors.response,
+                this.backendDefinition.responseContainerSelectors
+            );
 
             // 1.5 M365 附件使用可見頁面的原生 file input；舊後端保留原本貼上流程。
             if (attachment && this.backendDefinition.id === 'm365-web') {
@@ -184,6 +187,7 @@ class PageInteractor {
                         ? 'Microsoft 365 Copilot Chat 已接受送出，但在有限等待內找不到可信的回覆節點。'
                         : '等待回應超時');
                     if (this.backendDefinition.id === 'm365-web') responseError.code = 'M365_RESPONSE_NOT_FOUND';
+                    responseError.recoveryBaseline = baseline;
                     throw responseError;
                 }
                 finalResponse.status = 'ENVELOPE_TIMEOUT_PARTIAL';
@@ -268,6 +272,13 @@ class PageInteractor {
                 spec.patterns.some((pattern) => pattern.test(text))
             ))?.[0] || null;
         };
+        const readLocatorLabel = async (locator) => normalizeText([
+            await locator.innerText().catch(() => ''),
+            typeof locator.textContent === 'function'
+                ? await locator.textContent().catch(() => '')
+                : '',
+            await locator.getAttribute('aria-label').catch(() => ''),
+        ].filter(Boolean).join(' '));
         const selectorContract = this.backendDefinition.responseModeSelectors || {};
         const triggerSelectors = (Array.isArray(selectorContract.trigger)
             ? selectorContract.trigger
@@ -290,17 +301,28 @@ class PageInteractor {
         // not as a permanent UI change, while still failing before any text is typed.
         const triggerStartedAt = Date.now();
         let trigger = null;
+        let triggerVisible = false;
         let triggerCount = 0;
         do {
             const triggers = this.page.locator(triggerSelector);
             triggerCount = await triggers.count().catch(() => 0);
+            let hiddenSelectedTrigger = null;
             for (let index = triggerCount - 1; index >= 0; index -= 1) {
                 const candidate = triggers.nth(index);
                 if (await candidate.isVisible().catch(() => false)) {
                     trigger = candidate;
+                    triggerVisible = true;
                     break;
                 }
+                // M365 collapses this control to 0x0 when a Word preview makes
+                // the chat rail narrow. Its selected value remains readable in
+                // the DOM, so an already-matching mode needs no click.
+                const hiddenLabel = await readLocatorLabel(candidate);
+                if (!hiddenSelectedTrigger && identifyMode(hiddenLabel) === mode) {
+                    hiddenSelectedTrigger = candidate;
+                }
             }
+            if (!trigger && hiddenSelectedTrigger) trigger = hiddenSelectedTrigger;
             if (trigger || Date.now() - triggerStartedAt >= triggerWaitMs) break;
             await sleep();
         } while (true);
@@ -315,10 +337,7 @@ class PageInteractor {
             throw error;
         }
 
-        const readTrigger = async () => normalizeText([
-            await trigger.innerText().catch(() => ''),
-            await trigger.getAttribute('aria-label').catch(() => ''),
-        ].filter(Boolean).join(' '));
+        const readTrigger = async () => readLocatorLabel(trigger);
         let triggerText = await readTrigger();
         let observedMode = identifyMode(triggerText);
         const readVisibleOptions = async () => {
@@ -358,7 +377,7 @@ class PageInteractor {
         if (observedMode === mode) {
             // A previous interrupted attempt may have left the menu open. Close
             // it before the composer receives text so the overlay cannot steal input.
-            if (await isMenuOpen()) {
+            if (triggerVisible && await isMenuOpen()) {
                 await clickTrigger();
                 const closeDeadline = Date.now() + 2000;
                 let menuOpen = true;
@@ -429,22 +448,31 @@ class PageInteractor {
         throw error;
     }
 
-    async _captureBaseline(responseSelector) {
+    async _captureBaseline(responseSelector, responseContainerSelectors = []) {
         if (!responseSelector || responseSelector.trim() === "") {
             console.log("⚠️ Response Selector 為空，等待觸發修復。");
             throw new Error("空的 Response Selector");
         }
 
-        return this.page.evaluate((s) => {
-            const bubbles = document.querySelectorAll(s);
+        return this.page.evaluate(({ selector, containers }) => {
+            const bubbles = document.querySelectorAll(selector);
             if (bubbles.length === 0) return "";
-            let target = bubbles[bubbles.length - 1];
-            let container = target.closest('model-response') ||
-                target.closest('.markdown') ||
-                target.closest('.model-response-text') ||
+            const target = bubbles[bubbles.length - 1];
+            let container = null;
+            for (const candidate of containers || []) {
+                try {
+                    container = target.closest(candidate);
+                    if (container) break;
+                } catch (_) { }
+            }
+            container = container || target.closest('model-response') ||
+                target.closest('.markdown') || target.closest('.model-response-text') ||
                 target.parentElement || target;
             return container.innerText || "";
-        }, responseSelector).catch(() => "");
+        }, {
+            selector: responseSelector,
+            containers: Array.isArray(responseContainerSelectors) ? responseContainerSelectors : [],
+        }).catch(() => "");
     }
 
     /**

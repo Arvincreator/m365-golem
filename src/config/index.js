@@ -107,7 +107,7 @@ const CONFIG = {
     M365_LOCAL_MEMORY_ENABLED: parseBooleanEnv(process.env.M365_LOCAL_MEMORY_ENABLED, false),
     M365_ACTIONS_ENABLED: parseBooleanEnv(process.env.M365_ACTIONS_ENABLED, false),
     M365_AUTO_BOOT_PROMPT: parseBooleanEnv(process.env.M365_AUTO_BOOT_PROMPT, false),
-    M365_RESPONSE_TIMEOUT_MS: Number(cleanEnv(process.env.M365_RESPONSE_TIMEOUT_MS)) || 60000,
+    M365_RESPONSE_TIMEOUT_MS: Number(cleanEnv(process.env.M365_RESPONSE_TIMEOUT_MS)) || 180000,
     MAX_AUTO_TURNS: Number(cleanEnv(process.env.GOLEM_MAX_AUTO_TURNS)) || 5,
     MAX_RESPONSE_WORDS: Number(cleanEnv(process.env.GOLEM_MAX_RESPONSE_WORDS)) || 0,
 };
@@ -241,7 +241,7 @@ const reloadConfig = () => {
     CONFIG.M365_LOCAL_MEMORY_ENABLED = parseBooleanEnv(process.env.M365_LOCAL_MEMORY_ENABLED, false);
     CONFIG.M365_ACTIONS_ENABLED = parseBooleanEnv(process.env.M365_ACTIONS_ENABLED, false);
     CONFIG.M365_AUTO_BOOT_PROMPT = parseBooleanEnv(process.env.M365_AUTO_BOOT_PROMPT, false);
-    CONFIG.M365_RESPONSE_TIMEOUT_MS = Number(cleanEnv(process.env.M365_RESPONSE_TIMEOUT_MS)) || 60000;
+    CONFIG.M365_RESPONSE_TIMEOUT_MS = Number(cleanEnv(process.env.M365_RESPONSE_TIMEOUT_MS)) || 180000;
 
     if (CONFIG.GOLEM_BACKEND === 'm365-web' && CONFIG.M365_POC_SAFE_MODE) {
         CONFIG.AUTONOMY_ENABLED = false;

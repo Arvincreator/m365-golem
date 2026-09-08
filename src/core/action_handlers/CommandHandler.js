@@ -196,7 +196,7 @@ class CommandHandler {
                     ? `[System Observation]\n` +
                     `上一輪指令執行失敗，請你立即修正並重新輸出 [GOLEM_ACTION]。\n\n` +
                     `修正規則：\n` +
-                    `- 只輸出一個最小必要的修正 action。\n` +
+                    `- 輸出完成目前步驟所需的最小修正 action 陣列；可包含多個依序執行的動作。\n` +
                     `- 優先修正 action 名稱、server/tool、必要參數。\n` +
                     `- 若使用 command，避免高風險串接語法。\n` +
                     `- 失敗重點：\n${failedSteps.join('\n\n---\n\n')}\n\n` +

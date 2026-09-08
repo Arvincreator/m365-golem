@@ -1204,8 +1204,8 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                                     <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                                     <p>
                                         {item.status === "manual_check_required"
-                                            ? "這一輪重送後仍超過 60 秒；請到 Copilot 檢查是否有權限、下載或特殊提示。"
-                                            : "M365 回覆已超過 60 秒。按「再次確認」後，系統會先找這一輪信封；只有頁面已空閒且確實找不到時，才會重送一次。"}
+                                            ? "這一輪重送後仍超過等待時間；請到 Copilot 檢查是否有權限、下載或特殊提示。"
+                                            : "M365 回覆已超過等待時間。按「再次確認」後，系統會先找這一輪的新回覆；只有頁面已空閒且確實找不到時，才會重送一次。"}
                                     </p>
                                 </div>
                                 {item.status === "manual_check_required" ? (

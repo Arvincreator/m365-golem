@@ -66,7 +66,7 @@ M365_LOCAL_MEMORY_ENABLED=false
 M365_ACTIONS_ENABLED=false
 M365_AUTO_BOOT_PROMPT=false
 M365_PAGE_READY_TIMEOUT_MS=20000
-M365_RESPONSE_TIMEOUT_MS=60000
+M365_RESPONSE_TIMEOUT_MS=180000
 
 PLAYWRIGHT_M365_BROWSER_CHANNEL=msedge
 PLAYWRIGHT_M365_STEALTH_ENABLED=false
@@ -104,12 +104,12 @@ PLAYWRIGHT_M365_BLOCK_HEAVY_RESOURCES=false
 | `M365_ATTACHMENT_LEGACY_REJECTED` | 收到未綁定專案／對話的舊式附件 | 由目前 M365 對話框重新選取、貼上或拖曳附件 |
 | `M365_LOCAL_FOLDER_*` | 本輪資料夾參照失效、超出範圍或要求讀取受保護內容 | 重新選取特定資料夾，或改為指定安全的相對檔案路徑；不要放寬資料邊界 |
 | `M365_SEND_UNCONFIRMED` | 已嘗試一次送出，但無法確認是否成功 | 不自動重送；先查看 Edge 頁面，避免重複訊息 |
-| `M365_RESPONSE_NOT_FOUND` | 送出成功，但 60 秒內沒有命中可信的 Copilot 回覆節點 | 查看主控台的 selector 計數；診斷只含節點屬性與文字長度，不含提示或回覆內容 |
+| `M365_RESPONSE_NOT_FOUND` | 送出成功，但在設定的等待時間內沒有命中可信的 Copilot 回覆節點 | 查看主控台的 selector 計數；診斷只含節點屬性與文字長度，不含提示或回覆內容 |
 
 ## 尚未通過的項目
 
 - 尚未驗證租戶的服務端聊天歷史、稽核與資料保留設定；這些不由 GOLEM 安全模式控制。
-- 尚未證明目前 selector 能涵蓋其他租戶、語言或未來 Microsoft 365 UI 版本；找不到可信節點時仍會在 60 秒內停止且不自動重送。
+- 尚未證明目前 selector 能涵蓋其他租戶、語言或未來 Microsoft 365 UI 版本；找不到可信節點時仍會在設定的等待時間內停止且不自動重送。
 - M365 網頁附件與回覆中的可見下載連結已納入傳輸；語音、Agent 與其他 Microsoft 365 工作負載自動操作仍不在範圍。內建 Session Bridge 與其他 Skill/MCP 只能在其既有權限、本機政策與核准範圍內執行，不能視為租戶管理員已授權或正式上線。
 - `M365_POC_SAFE_MODE=false`、`M365_LOCAL_MEMORY_ENABLED=true` 或 `M365_ACTIONS_ENABLED=true` 即使存在，也不代表已核准；啟用前需要另外做資料邊界、權限與人工審查。工具總開關即使開啟，也只代表可以「提出並人工核准」本機工具動作，不是自動核准。
 

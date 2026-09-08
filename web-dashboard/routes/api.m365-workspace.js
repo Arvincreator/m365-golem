@@ -549,7 +549,7 @@ module.exports = function registerM365WorkspaceRoutes(server) {
         try {
             const coordinator = await getM365RunCoordinator(server);
             const run = await coordinator.resumeRun(req.params.runId, req.body.input || '', {
-                grantAutoTurns: req.body.grantAutoTurns,
+                continueAutoRun: req.body.continueAutoRun,
             });
             return res.json({ success: true, run });
         } catch (error) {

@@ -537,6 +537,7 @@ module.exports = function(server) {
                 ? {
                     used: Math.max(0, Math.floor(Number(requestedAutoTurnBudget.used) || 0)),
                     limit: Math.max(1, Math.floor(Number(requestedAutoTurnBudget.limit) || 1)),
+                    reset: requestedAutoTurnBudget.reset === true,
                 }
                 : undefined;
             const hasSelectedLocalFolders = Array.isArray(selectedLocalFolderIds) && selectedLocalFolderIds.length > 0;
@@ -885,6 +886,7 @@ module.exports = function(server) {
                             projectId: workspaceConversation.projectId,
                             conversationId,
                             timedOutAt: Date.now(),
+                            baselineText: String(error && error.recoveryBaseline || ''),
                             retryCount: Number(mockContext.workspaceRetryAttempt || 0),
                             ctx: mockContext,
                             conversation: workspaceConversation,
@@ -994,7 +996,7 @@ module.exports = function(server) {
                     });
                     return result;
                 } : undefined,
-                onGolemProtocolResponse: workspaceEnabled ? async ({ rawResponse, parsed, actionCount, isSystemFeedback, toolRoute }) => {
+                onGolemProtocolResponse: workspaceEnabled ? async ({ rawResponse, parsed, actionCount, downloadAttachmentCount, isSystemFeedback, toolRoute, responseStatus }) => {
                     const coordinator = await getM365RunCoordinator(server);
                     const activeBrain = resolveM365Brain(golemId);
                     const route = toolRoute || activeBrain?.toolRouter?.lastRoute || null;
@@ -1049,9 +1051,16 @@ module.exports = function(server) {
                         return null;
                     }
                     if (mockContext.workspaceRunId) {
+                        const unwrappedVisibleResponse = /^FALLBACK_(?:DIFF|RECOVERED)$/i.test(String(responseStatus || ''));
+                        const visibleArtifactResponse = Number(downloadAttachmentCount || 0) > 0
+                            && Boolean(String(parsed && parsed.reply || '').trim());
                         const repair = await coordinator.requestProtocolRepair({
                             runId: mockContext.workspaceRunId,
-                            kind: Number(actionCount || 0) > 0 ? 'plan_missing_for_action' : 'plan_and_action_missing',
+                            kind: visibleArtifactResponse
+                                ? 'visible_result_recovered'
+                                : unwrappedVisibleResponse
+                                ? 'unwrapped_visible_response'
+                                : (Number(actionCount || 0) > 0 ? 'plan_missing_for_action' : 'plan_and_action_missing'),
                         });
                         if (repair) {
                             if (repair.runId) mockContext.workspaceRunId = repair.runId;
@@ -1351,6 +1360,8 @@ module.exports = function(server) {
                     responseContainerSelectors: brain.webBackend && brain.webBackend.responseContainerSelectors,
                     stopSelectors: brain.webBackend && brain.webBackend.stopSelectors,
                     extractSourceLinks: true,
+                    allowUnwrapped: true,
+                    baselineText: item.baselineText || '',
                 }
             );
             if (inspection.found) {

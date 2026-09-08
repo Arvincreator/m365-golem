@@ -638,6 +638,55 @@ describe('workspace-aware M365 chat route', () => {
         }));
     });
 
+    test('routes a visible M365 file result without a plan into same-run control repair', async () => {
+        const requestProtocolRepair = jest.fn().mockResolvedValue({
+            accepted: false,
+            planMode: true,
+            runId: 'run-reconcile-1',
+            planId: 'run-reconcile-1',
+            planRevision: 8,
+            protocolRepair: {
+                status: 'retry',
+                prompt: 'restore plan only',
+                preserveVisibleResult: true,
+            },
+        });
+        serverContext.m365RunCoordinator = {
+            init: jest.fn().mockResolvedValue(),
+            requestProtocolRepair,
+            handleAutonomousPlan: jest.fn(),
+            startExecutionContract: jest.fn(),
+            getRunLocalFolders: jest.fn(() => []),
+        };
+        mockHandleDashboardMessage.mockImplementation(async (ctx) => {
+            const result = await ctx.onGolemProtocolResponse({
+                rawResponse: '[GOLEM_REPLY]Word 已完成[/GOLEM_REPLY]',
+                parsed: { reply: 'Word 已完成', actions: [] },
+                actionCount: 0,
+                downloadAttachmentCount: 1,
+                responseStatus: 'ENVELOPE_COMPLETE',
+                isSystemFeedback: false,
+            });
+            expect(result).toEqual(expect.objectContaining({ runId: 'run-reconcile-1' }));
+            await ctx.reply('Word 已完成', {
+                attachments: [{ name: 'report.docx', url: 'https://contoso.sharepoint.com/Doc.aspx?file=report.docx' }],
+            });
+        });
+
+        const result = await postChat({
+            golemId: 'golem_A', projectId: 'project-1', conversationId: 'conversation-1',
+            runId: 'run-reconcile-1',
+            message: '請補回剛才產生的 Word 結果',
+        });
+
+        expect(result.response.status).toBe(200);
+        await waitFor(() => serverContext.m365DispatchLease === null);
+        expect(requestProtocolRepair).toHaveBeenCalledWith({
+            runId: 'run-reconcile-1',
+            kind: 'visible_result_recovered',
+        });
+    });
+
     test('adds only explicitly selected file text, MCP servers, Skills, and response mode to the Golem workspace envelope', async () => {
         mockReferenceFileService.list.mockReturnValue([{
             id: 'ref-1',
@@ -785,6 +834,30 @@ describe('workspace-aware M365 chat route', () => {
         expect(serverContext.m365RunCoordinator.getRunLocalFolders).toHaveBeenCalledWith('run-folder-1');
         expect(mockLocalFolderService.validateReferences).toHaveBeenCalledWith([selectedFolder]);
         expect(mockStore.getDraft).not.toHaveBeenCalled();
+    });
+
+    test('preserves a fresh automatic-turn allowance reset during internal continuation', async () => {
+        mockHandleDashboardMessage.mockImplementation(async (ctx) => {
+            expect(ctx.m365InternalControl).toBe(true);
+            expect(ctx.workspaceAutoTurnBudget).toEqual({ used: 0, limit: 6, reset: true });
+            await ctx.onTransportStart({ isSystemFeedback: true });
+            await ctx.onTransportAccepted({ isSystemFeedback: true });
+            await ctx.onTransportComplete({ text: 'continued' }, { isSystemFeedback: true });
+            await ctx.reply('continued');
+        });
+
+        const result = await serverContext.dispatchM365WorkspaceMessage({
+            golemId: 'golem_A',
+            projectId: 'project-1',
+            conversationId: 'conversation-1',
+            message: 'Continue the saved automatic work.',
+            runId: 'run-auto-1',
+            internalControl: true,
+            autoTurnBudget: { used: 0, limit: 6, reset: true },
+        });
+
+        expect(result).toEqual(expect.objectContaining({ success: true }));
+        await waitFor(() => serverContext.m365DispatchLease === null);
     });
 
     test('marks a native response-mode failure as unsent without requiring reconciliation', async () => {

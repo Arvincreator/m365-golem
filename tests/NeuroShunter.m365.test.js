@@ -183,6 +183,56 @@ describe('NeuroShunter M365 safety gates', () => {
         expect(ctx.reply).not.toHaveBeenCalledWith(expect.stringContaining('準備整份專案報告'));
     });
 
+    test('dispatches a multi-command plan step as one ordered command sequence', async () => {
+        Object.assign(process.env, getAutomationModePreset('autopilot'));
+        const actions = [
+            { action: 'command', parameter: 'echo first > weekly_report.py', progress: '寫入程式第一段內容' },
+            { action: 'command', parameter: 'echo second >> weekly_report.py', progress: '接續寫入程式內容' },
+            { action: 'command', parameter: 'python weekly_report.py', progress: '執行程式並核對結果' },
+        ];
+        const ctx = {
+            reply: jest.fn().mockResolvedValue(),
+            shouldMentionSender: false,
+            platform: 'web',
+            workspaceConversationId: 'conversation-batch-1',
+            onGolemProtocolResponse: jest.fn().mockResolvedValue({
+                accepted: true,
+                allowActions: true,
+                planMode: true,
+                runId: 'run-batch-1',
+                stepId: 'host-step-batch-1',
+                actionId: 'action-batch-1',
+                planId: 'run-batch-1',
+                planRevision: 1,
+                planStepId: 'step_1',
+                maxActionDepth: 12,
+            }),
+        };
+        const brain = {
+            webBackend: { id: 'm365-web', safeMode: true },
+            memorize: jest.fn().mockResolvedValue(),
+            _appendChatLog: jest.fn(),
+            areActionsEnabled: jest.fn(() => true),
+            isLocalContextEnabled: jest.fn(() => false),
+        };
+        const controller = { pendingTasks: new Map() };
+        ResponseParser.parse.mockReturnValue({
+            memory: null,
+            reply: '',
+            plan: { steps: [{ id: 'step_1', title: '重建並驗證程式', status: 'in_progress' }] },
+            actions,
+        });
+
+        await NeuroShunter.dispatch(ctx, 'raw', brain, controller);
+
+        expect(ctx.onGolemProtocolResponse).toHaveBeenCalledWith(expect.objectContaining({
+            actionCount: 3,
+        }));
+        expect(CommandHandler.execute).toHaveBeenCalledTimes(1);
+        expect(CommandHandler.execute.mock.calls[0][1]).toEqual(actions);
+        expect(ctx.reply).toHaveBeenCalledWith('執行本步驟的 3 個動作，正在執行並確認中…');
+    });
+
     test('balanced mode still asks before MCP or Skill execution', async () => {
         Object.assign(process.env, getAutomationModePreset('balanced'));
         const ctx = {
@@ -854,5 +904,279 @@ describe('NeuroShunter M365 safety gates', () => {
                 toolRoutingQuery: '在工作區建立 Word 報告',
             })
         );
+    });
+
+    test('shows a stable unwrapped M365 reply and repairs only its missing control envelope', async () => {
+        const enqueue = jest.fn().mockResolvedValue();
+        const attachment = {
+            kind: 'download',
+            name: '第006期_數位轉型週報摘要.docx',
+            url: 'https://contoso.sharepoint.com/report.docx',
+        };
+        const ctx = {
+            reply: jest.fn().mockResolvedValue(),
+            shouldMentionSender: false,
+            platform: 'web',
+            workspaceConversationId: 'conversation-unwrapped-1',
+            onGolemProtocolResponse: jest.fn().mockResolvedValue({
+                accepted: false,
+                allowActions: false,
+                planMode: true,
+                runId: 'run-unwrapped-1',
+                planId: 'run-unwrapped-1',
+                planRevision: 8,
+                protocolRepair: {
+                    status: 'retry',
+                    prompt: '[GOLEM_EXECUTION_REPAIR]restore envelope only[/GOLEM_EXECUTION_REPAIR]',
+                    toolRoutingQuery: '建立 Word 報告',
+                    message: '',
+                },
+            }),
+        };
+        const brain = {
+            webBackend: { id: 'm365-web', safeMode: true },
+            memorize: jest.fn().mockResolvedValue(),
+            _appendChatLog: jest.fn(),
+            areActionsEnabled: jest.fn(() => true),
+            isLocalContextEnabled: jest.fn(() => false),
+        };
+        const controller = { pendingTasks: new Map(), convoManager: { enqueue } };
+        ResponseParser.parse.mockReturnValue({
+            memory: null,
+            reply: 'Word 檔已生成，可直接下載。',
+            actions: [],
+        });
+
+        await NeuroShunter.dispatch(ctx, {
+            text: 'Word 檔已生成，可直接下載。',
+            attachments: [attachment],
+            status: 'FALLBACK_RECOVERED',
+        }, brain, controller);
+
+        expect(ctx.onGolemProtocolResponse).toHaveBeenCalledWith(expect.objectContaining({
+            responseStatus: 'FALLBACK_RECOVERED',
+            downloadAttachmentCount: 1,
+        }));
+        expect(ctx.reply).toHaveBeenCalledWith(
+            'Word 檔已生成，可直接下載。',
+            expect.objectContaining({ attachments: [attachment] })
+        );
+        expect(enqueue).toHaveBeenCalledWith(
+            ctx,
+            expect.stringContaining('restore envelope only'),
+            expect.objectContaining({ isSystemFeedback: true, workspaceRunId: 'run-unwrapped-1' })
+        );
+    });
+
+    test('keeps a normal enveloped file result visible while Copilot repairs its missing active plan state', async () => {
+        const enqueue = jest.fn().mockResolvedValue();
+        const attachment = {
+            kind: 'download',
+            name: '第006期_數位轉型週報摘要.docx',
+            url: 'https://contoso.sharepoint.com/Doc.aspx?file=report.docx',
+        };
+        const ctx = {
+            reply: jest.fn().mockResolvedValue(),
+            shouldMentionSender: false,
+            platform: 'web',
+            workspaceConversationId: 'conversation-visible-result-1',
+            onGolemProtocolResponse: jest.fn().mockResolvedValue({
+                accepted: false,
+                allowActions: false,
+                planMode: true,
+                runId: 'run-visible-result-1',
+                planId: 'run-visible-result-1',
+                planRevision: 8,
+                protocolRepair: {
+                    status: 'retry',
+                    prompt: '[GOLEM_EXECUTION_REPAIR]restore plan only[/GOLEM_EXECUTION_REPAIR]',
+                    toolRoutingQuery: '建立 Word 報告',
+                    preserveVisibleResult: true,
+                    message: '',
+                },
+            }),
+        };
+        const brain = {
+            webBackend: { id: 'm365-web', safeMode: true },
+            memorize: jest.fn().mockResolvedValue(),
+            _appendChatLog: jest.fn(),
+            areActionsEnabled: jest.fn(() => true),
+            isLocalContextEnabled: jest.fn(() => false),
+        };
+        const controller = { pendingTasks: new Map(), convoManager: { enqueue } };
+        ResponseParser.parse.mockReturnValue({
+            memory: null,
+            reply: 'Word 檔已完成，可直接開啟。',
+            actions: [],
+        });
+
+        await NeuroShunter.dispatch(ctx, {
+            text: '[GOLEM_REPLY]Word 檔已完成，可直接開啟。[/GOLEM_REPLY]',
+            attachments: [
+                { kind: 'source', name: '參考資料', url: 'https://contoso.sharepoint.com/source' },
+                attachment,
+            ],
+            status: 'ENVELOPE_COMPLETE',
+        }, brain, controller);
+
+        expect(ctx.onGolemProtocolResponse).toHaveBeenCalledWith(expect.objectContaining({
+            responseStatus: 'ENVELOPE_COMPLETE',
+            downloadAttachmentCount: 1,
+        }));
+        expect(ctx.reply).toHaveBeenCalledWith(
+            'Word 檔已完成，可直接開啟。',
+            expect.objectContaining({ attachments: expect.arrayContaining([attachment]) })
+        );
+        expect(enqueue).toHaveBeenCalledWith(
+            ctx,
+            expect.stringContaining('restore plan only'),
+            expect.objectContaining({ isSystemFeedback: true, workspaceRunId: 'run-visible-result-1' })
+        );
+    });
+
+    test('feeds a host plan rejection back to Copilot instead of showing the constraint to the user', async () => {
+        const enqueue = jest.fn().mockResolvedValue();
+        const ctx = {
+            reply: jest.fn().mockResolvedValue(),
+            shouldMentionSender: false,
+            platform: 'web',
+            workspaceConversationId: 'conversation-constraint-1',
+            toolRoutingQuery: '建立並驗證 Word 報告',
+            onGolemProtocolResponse: jest.fn().mockResolvedValue({
+                accepted: false,
+                allowActions: false,
+                planMode: true,
+                code: 'M365_PLAN_ACTION_CARDINALITY_INVALID',
+                warning: '⚠️ 自主計畫已暫停：執行中的計畫每輪至少需要提出一個工具動作。',
+                runId: 'run-constraint-1',
+                planId: 'run-constraint-1',
+                planRevision: 2,
+                maxActionDepth: 12,
+            }),
+        };
+        const brain = {
+            webBackend: { id: 'm365-web', safeMode: true },
+            memorize: jest.fn().mockResolvedValue(),
+            _appendChatLog: jest.fn(),
+            areActionsEnabled: jest.fn(() => true),
+            isLocalContextEnabled: jest.fn(() => false),
+        };
+        const controller = { pendingTasks: new Map(), convoManager: { enqueue } };
+        ResponseParser.parse.mockReturnValue({
+            memory: null,
+            reply: '改用新的方式繼續處理。',
+            plan: { status: 'running' },
+            actions: [],
+        });
+
+        await NeuroShunter.dispatch(ctx, 'raw rejected plan', brain, controller);
+
+        expect(ctx.reply).not.toHaveBeenCalledWith(expect.stringContaining('自主計畫已暫停'));
+        expect(ctx.reply).not.toHaveBeenCalledWith(expect.stringContaining('改用新的方式'));
+        expect(enqueue).toHaveBeenCalledWith(
+            ctx,
+            expect.stringContaining('[GOLEM_HOST_CONSTRAINT]'),
+            expect.objectContaining({
+                isSystemFeedback: true,
+                allowActions: true,
+                planMode: true,
+                workspaceRunId: 'run-constraint-1',
+                workspacePlanId: 'run-constraint-1',
+                toolRoutingQuery: '建立並驗證 Word 報告',
+            })
+        );
+        const repairPrompt = enqueue.mock.calls[0][1];
+        expect(repairPrompt).toContain('M365_PLAN_ACTION_CARDINALITY_INVALID');
+        expect(repairPrompt).toContain('執行中的計畫每輪至少需要提出一個工具動作');
+        expect(repairPrompt).toContain('No new tool action was dispatched');
+    });
+
+    test('asks Copilot to restore the matching plan revision instead of pausing the user', async () => {
+        const enqueue = jest.fn().mockResolvedValue();
+        const ctx = {
+            reply: jest.fn().mockResolvedValue(),
+            shouldMentionSender: false,
+            platform: 'web',
+            workspaceConversationId: 'conversation-plan-revision-1',
+            toolRoutingQuery: '建立並驗證 Word 報告',
+        };
+        const brain = {
+            webBackend: { id: 'm365-web', safeMode: true },
+            memorize: jest.fn().mockResolvedValue(),
+            _appendChatLog: jest.fn(),
+            areActionsEnabled: jest.fn(() => true),
+            isLocalContextEnabled: jest.fn(() => false),
+        };
+        const controller = { pendingTasks: new Map(), convoManager: { enqueue } };
+        ResponseParser.parse.mockReturnValue({
+            memory: null,
+            reply: '繼續執行。',
+            plan: null,
+            actions: [{ action: 'command', parameter: 'Write-Output test' }],
+        });
+
+        await NeuroShunter.dispatch(ctx, 'raw action without plan', brain, controller, {
+            planMode: true,
+            allowActions: true,
+            workspaceRunId: 'run-plan-revision-1',
+            workspacePlanId: 'plan-revision-1',
+            workspacePlanRevision: 3,
+        });
+
+        expect(ctx.reply).not.toHaveBeenCalledWith(expect.stringContaining('自主計畫已暫停'));
+        expect(enqueue).toHaveBeenCalledWith(
+            ctx,
+            expect.stringContaining('M365_SAME_REVISION_PLAN_REQUIRED'),
+            expect.objectContaining({
+                isSystemFeedback: true,
+                allowActions: true,
+                planMode: true,
+                workspaceRunId: 'run-plan-revision-1',
+                workspacePlanId: 'plan-revision-1',
+                workspacePlanRevision: 3,
+                toolRoutingQuery: '建立並驗證 Word 報告',
+            })
+        );
+    });
+
+    test('silently discards delayed Copilot output after its host plan is terminal', async () => {
+        const enqueue = jest.fn().mockResolvedValue();
+        const ctx = {
+            reply: jest.fn().mockResolvedValue(),
+            shouldMentionSender: false,
+            platform: 'web',
+            workspaceConversationId: 'conversation-terminal-1',
+            toolRoutingQuery: '建立並驗證 Word 報告',
+            onGolemProtocolResponse: jest.fn().mockResolvedValue({
+                accepted: false,
+                allowActions: false,
+                planMode: true,
+                code: 'M365_PLAN_TERMINAL',
+                warning: '⚠️ 自主計畫已終止，不能繼續執行。',
+                runId: 'run-terminal-1',
+                planId: 'run-terminal-1',
+                planRevision: 3,
+                stopRepair: true,
+            }),
+        };
+        const brain = {
+            webBackend: { id: 'm365-web', safeMode: true },
+            memorize: jest.fn().mockResolvedValue(),
+            _appendChatLog: jest.fn(),
+            areActionsEnabled: jest.fn(() => true),
+            isLocalContextEnabled: jest.fn(() => false),
+        };
+        const controller = { pendingTasks: new Map(), convoManager: { enqueue } };
+        ResponseParser.parse.mockReturnValue({
+            memory: null,
+            reply: '舊計畫不能繼續。',
+            plan: { status: 'blocked' },
+            actions: [],
+        });
+
+        await NeuroShunter.dispatch(ctx, 'delayed terminal response', brain, controller);
+
+        expect(ctx.reply).not.toHaveBeenCalled();
+        expect(enqueue).not.toHaveBeenCalled();
     });
 });

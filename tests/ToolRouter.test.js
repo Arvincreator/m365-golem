@@ -231,6 +231,8 @@ describe('ToolRouter', () => {
         expect(result.diagnostics.commandSource).toBe('semantic');
         expect(result.diagnostics.mode).toBe('hybrid');
         expect(JSON.stringify(result.diagnostics)).not.toContain(query);
+        const hint = await router.buildRoutingHintAsync(query);
+        expect(hint).toContain('never reconstruct a multi-line Python or JavaScript source file with repeated echo');
     });
 
     test.each(['請解釋文件製作的原理', '請在 SharePoint 建立報告', '使用本機資料在 SharePoint 建立 Word 報告'])(

@@ -144,13 +144,13 @@ describe('M365 workspace UI regressions', () => {
         expect(source).toContain('需要授權或補充時仍會停下');
     });
 
-    test('turns the automatic-turn ceiling into a one-turn continuation gate', () => {
+    test('continues with a fresh N+1 automatic-turn allowance', () => {
         const source = read('web-dashboard/src/features/m365-workspace/components/RunAttention.tsx');
         expect(source).toContain('run.errorCode === "M365_AUTO_TURN_LIMIT"');
         expect(source).toContain('下一回合尚未送出');
-        expect(source).toContain('{ grantAutoTurns: 1 }');
-        expect(source).toContain('再執行 1 回合');
-        expect(source).toContain('再次到達上限時會重新詢問');
+        expect(source).toContain('{ continueAutoRun: true }');
+        expect(source).toContain('繼續自動執行');
+        expect(source).toContain('以 N+1 回合為新的自動執行額度');
     });
 
     test('suppresses browser cancellation text instead of showing it as a workspace failure', () => {

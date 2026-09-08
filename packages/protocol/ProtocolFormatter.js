@@ -139,7 +139,7 @@ function buildM365ActionRules(actionsEnabled, automationMode = 'guided') {
         ? 'the local approval gate handles confirmation'
         : 'the local safety gate enforces the configured mode';
 
-    return `- Put proposed local tool use in exactly one [GOLEM_ACTION]...[/GOLEM_ACTION] block. Its Markdown JSON code block must contain either a JSON array of actions or null.
+    return `- Put proposed local tool use in exactly one [GOLEM_ACTION]...[/GOLEM_ACTION] block. Its Markdown JSON code block must contain either a JSON array of one or more ordered actions or null. Close the Markdown code fence before [/GOLEM_ACTION]. One plan turn is one plan step, and that step may contain multiple actions. The host executes them in array order and returns their combined execution result as one Observation.
 - Exact read-only current-directory command for this Windows harness:
 [GOLEM_ACTION]
 \`\`\`json
@@ -191,7 +191,7 @@ ${activePlan}
 \`\`\`
 [/GOLEM_PLAN]
 - Plan status is running|wait_user|wait_approval|complete|blocked. Step status is pending|in_progress|completed|blocked|skipped. Use 1-12 unique steps.
-- A running plan has exactly one in_progress step matching current_step_id and must include exactly one bounded [GOLEM_ACTION] block containing exactly one action object in the same response.
+- A running plan has exactly one in_progress step matching current_step_id and must include exactly one bounded [GOLEM_ACTION] block containing one or more ordered action objects for that same step. Multiple commands are allowed, including staged file reconstruction. The host returns the total execution result as one Observation before the next plan turn.
 - If the current step uses a local command, listed Skill, or MCP tool, emit that real action. If you completed the current step using only native Microsoft 365 Copilot reasoning or generation in this response, emit {"action":"plan_checkpoint","summary":"what this native step completed","evidence":["visible output or link"]}. The host performs no external effect for plan_checkpoint; it records a bound Observation and wakes your next plan turn.
 - Use plan_checkpoint only after the native step's useful output is present in [GOLEM_REPLY]. It proves only what is visibly present in this Copilot response; never use it to claim that a local file or external system changed.
 - wait_user requires question; wait_approval requires approval_request; complete requires completion_summary, current_step_id="", and every step completed or skipped. Non-running plans cannot include an in_progress step or a GOLEM_ACTION. A final complete plan is the required signal that closes the local multi-step run; do not end with prose alone.

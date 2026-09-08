@@ -55,7 +55,7 @@ describe('M365 durable run coordinator', () => {
         fs.rmSync(tempDir, { recursive: true, force: true });
     });
 
-    test.each(['running', 'blocked'])('repairs a %s plan without action or blocker at most twice', async status => {
+    test.each(['running', 'blocked'])('keeps repairing a %s plan that has no action or concrete blocker', async status => {
         const plan = {
             schemaVersion: 'golem_plan/1', planId: null, revision: 1,
             goal: 'List workspace files', status, currentStepId: 'step_1',
@@ -83,8 +83,10 @@ describe('M365 durable run coordinator', () => {
                 plan: { ...plan, planId: first.runId, revision }, actions: [], actionCount: 0 });
             coordinator._clearDispatchTimer(first.runId);
         }
-        expect((await store.getRun(first.runId)).status).toBe('BLOCKED');
+        expect((await store.getRun(first.runId)).status).toBe('QUEUED');
         expect(await store.listRunSteps(first.runId)).toHaveLength(0);
+        expect((await store.listRunEvents(first.runId))
+            .filter((event) => event.eventType === 'autonomous_plan_action_repair')).toHaveLength(3);
     });
 
     test('does not replace scoped folder references when a run belongs to another conversation', async () => {
@@ -119,6 +121,109 @@ describe('M365 durable run coordinator', () => {
             code: 'M365_PLAN_CONVERSATION_MISMATCH',
         }));
         expect(coordinator.getRunLocalFolders(accepted.runId)).toEqual(originalFolders);
+    });
+
+    test('accepts multiple ordered actions as one plan step and one bound Observation', async () => {
+        const plan = {
+            schemaVersion: 'golem_plan/1', planId: null, revision: 1,
+            goal: 'Rebuild and verify a Python script.', status: 'running', currentStepId: 'step_1',
+            completionCriteria: 'The combined host Observation confirms the script was rebuilt and checked.',
+            steps: [{ id: 'step_1', title: 'Rebuild and verify script', status: 'in_progress', doneWhen: 'Combined execution result is observed.' }],
+            question: '', approvalRequest: '', completionSummary: '',
+        };
+        const actions = [
+            { action: 'command', parameter: 'echo first > weekly_report.py' },
+            { action: 'command', parameter: 'echo second >> weekly_report.py' },
+            { action: 'command', parameter: 'python weekly_report.py' },
+        ];
+
+        const accepted = await coordinator.handleAutonomousPlan({
+            conversationId: conversation.id,
+            plan,
+            actions,
+            actionCount: actions.length,
+        });
+
+        expect(accepted).toEqual(expect.objectContaining({ accepted: true, allowActions: true }));
+        const [step] = await store.listRunSteps(accepted.runId);
+        expect(step).toEqual(expect.objectContaining({ stepNumber: 1, status: 'running' }));
+        const planned = (await store.listRunEvents(accepted.runId))
+            .find((event) => event.eventType === 'autonomous_action_planned');
+        expect(planned.payload).toEqual(expect.objectContaining({
+            actionCount: 3,
+            actionDescriptors: expect.arrayContaining([
+                expect.objectContaining({ kind: 'command' }),
+            ]),
+        }));
+
+        await coordinator.recordAutonomousObservation({
+            runId: accepted.runId,
+            stepId: step.id,
+            actionId: accepted.actionId,
+            planStepId: 'step_1',
+            lane: 'command',
+            status: 'succeeded',
+            result: '[Step 1 Success]\nfirst\n---\n[Step 2 Success]\nsecond\n---\n[Step 3 Success]\nverified',
+        });
+
+        expect((await store.listRunEvents(accepted.runId))
+            .filter((event) => event.eventType === 'autonomous_observation_recorded')).toHaveLength(1);
+        expect((await store.listRunSteps(accepted.runId))[0].status).toBe('completed');
+    });
+
+    test('automatically repairs a missing action after a failed multi-action Observation', async () => {
+        const plan = {
+            schemaVersion: 'golem_plan/1', planId: null, revision: 1,
+            goal: 'Rebuild and verify a Python report.', status: 'running', currentStepId: 'step_1',
+            completionCriteria: 'A valid report is observed.',
+            steps: [{ id: 'step_1', title: 'Build report', status: 'in_progress', doneWhen: 'The combined result verifies the report.' }],
+            question: '', approvalRequest: '', completionSummary: '',
+        };
+        const first = await coordinator.handleAutonomousPlan({
+            conversationId: conversation.id,
+            plan,
+            actions: [
+                { action: 'command', parameter: 'echo first > weekly_report.py' },
+                { action: 'command', parameter: 'python weekly_report.py' },
+            ],
+            actionCount: 2,
+        });
+        const [step] = await store.listRunSteps(first.runId);
+        await coordinator.recordAutonomousObservation({
+            runId: first.runId,
+            stepId: step.id,
+            actionId: first.actionId,
+            planStepId: 'step_1',
+            lane: 'command',
+            status: 'failed',
+            result: '[Step 1 Failed] quoting error\n[Step 2 Failed] script missing',
+        });
+        expect((await store.listRunSteps(first.runId))[0].status).toBe('failed');
+
+        const schedule = jest.spyOn(coordinator, '_scheduleAutonomousContinuation').mockImplementation(() => {});
+        const repaired = await coordinator.handleAutonomousPlan({
+            conversationId: conversation.id,
+            existingRunId: first.runId,
+            plan: { ...plan, planId: first.runId, revision: 2 },
+            actions: [],
+            actionCount: 0,
+            isSystemFeedback: true,
+        });
+
+        expect(repaired).toEqual(expect.objectContaining({
+            accepted: true,
+            allowActions: false,
+            planRevision: 2,
+        }));
+        expect(repaired.warning).toBeUndefined();
+        expect((await store.getRun(first.runId)).status).toBe('QUEUED');
+        expect(schedule).toHaveBeenCalledWith(
+            first.runId,
+            expect.objectContaining({ revision: 2 }),
+            '',
+            'MISSING_ACTION_REPAIR'
+        );
+        schedule.mockRestore();
     });
 
     test('does not automatically repair an explicit blocker', async () => {
@@ -165,9 +270,54 @@ describe('M365 durable run coordinator', () => {
 
         const second = await coordinator.requestProtocolRepair({ runId: repair.runId, kind: 'missing_initial_execution' });
         expect(second.protocolRepair).toEqual(expect.objectContaining({ status: 'retry', attempt: 2 }));
-        const exhausted = await coordinator.requestProtocolRepair({ runId: repair.runId, kind: 'missing_initial_execution' });
-        expect(exhausted.protocolRepair.status).toBe('blocked');
-        expect((await store.getRun(repair.runId)).status).toBe('BLOCKED');
+        const third = await coordinator.requestProtocolRepair({ runId: repair.runId, kind: 'missing_initial_execution' });
+        expect(third.protocolRepair).toEqual(expect.objectContaining({ status: 'retry', attempt: 3 }));
+        expect((await store.getRun(repair.runId)).status).toBe('RUNNING');
+
+        const envelopeRepair = await coordinator.requestProtocolRepair({
+            runId: repair.runId,
+            kind: 'unwrapped_visible_response',
+        });
+        expect(envelopeRepair.protocolRepair.prompt).toContain('visible user-facing result has already been delivered');
+        expect(envelopeRepair.protocolRepair.prompt).toContain('Do not recreate the document');
+        expect(envelopeRepair.protocolRepair.prompt).toContain('plan_checkpoint');
+    });
+
+    test('recovers a visible file result from reconciliation and repairs only the missing plan state', async () => {
+        const repair = await coordinator.startExecutionContract({
+            conversationId: conversation.id,
+            requestId: 'visible-result-request',
+            objective: '建立並驗證 Word 報告',
+            verification: 'A valid Word file is visible and linked.',
+        });
+        await store.appendRunEvent(repair.runId, 'autonomous_plan_received', {
+            plan: {
+                schemaVersion: 'golem_plan/1', planId: repair.runId, revision: 1,
+                goal: '建立並驗證 Word 報告', completionCriteria: 'A valid Word file is visible and linked.',
+                status: 'running', currentStepId: 'step_1',
+                steps: [{ id: 'step_1', title: '建立報告', status: 'in_progress', doneWhen: 'Word file linked' }],
+                question: '', approvalRequest: '', completionSummary: '',
+            },
+        });
+        await store.transitionRun(repair.runId, 'RECONCILE_REQUIRED', {
+            reason: 'AMBIGUOUS_BROWSER_DISPATCH',
+            errorCode: 'M365_RESPONSE_NOT_FOUND',
+        });
+
+        const recovered = await coordinator.requestProtocolRepair({
+            runId: repair.runId,
+            kind: 'visible_result_recovered',
+        });
+
+        expect((await store.getRun(repair.runId)).status).toBe('QUEUED');
+        expect(recovered.protocolRepair).toEqual(expect.objectContaining({
+            status: 'retry',
+            preserveVisibleResult: true,
+        }));
+        expect(recovered.protocolRepair.prompt).toContain('usable result and file link');
+        expect(recovered.protocolRepair.prompt).toContain('Do not recreate the document');
+        expect(recovered.protocolRepair.prompt).toContain('plan_checkpoint');
+        expect(recovered.protocolRepair.prompt).toContain(`plan_id=${repair.runId}`);
     });
 
     test('rejects a completed plan step that has no matching host Observation', async () => {
@@ -483,7 +633,7 @@ describe('M365 durable run coordinator', () => {
         }));
     });
 
-    test('saves the deferred turn at the soft cap and dispatches it after one-turn approval', async () => {
+    test('saves the deferred turn at the soft cap and starts a fresh N+1 automatic-turn allowance', async () => {
         const active = await store.createRun(conversation.id, {
             objective: 'Prepare a project inventory.',
             verification: 'The inventory is verified.',
@@ -514,21 +664,134 @@ describe('M365 durable run coordinator', () => {
         }));
 
         const schedule = jest.spyOn(coordinator, '_scheduleDeferredAutoTurn').mockImplementation(() => {});
-        const resumed = await coordinator.resumeRun(active.id, '', { grantAutoTurns: 1 });
+        const resumed = await coordinator.resumeRun(active.id, '', { continueAutoRun: true });
         expect(resumed.status).toBe('QUEUED');
-        expect(schedule).toHaveBeenCalledWith(active.id, pendingPrompt, { used: 5, limit: 6 });
+        expect(schedule).toHaveBeenCalledWith(active.id, pendingPrompt, { used: 0, limit: 6, reset: true });
 
         schedule.mockRestore();
-        await coordinator._beginDeferredAutoTurn(active.id, pendingPrompt, { used: 5, limit: 6 });
+        await coordinator._beginDeferredAutoTurn(active.id, pendingPrompt, { used: 0, limit: 6, reset: true });
         expect(server.dispatchM365WorkspaceMessage).toHaveBeenCalledWith(expect.objectContaining({
             conversationId: conversation.id,
             message: pendingPrompt,
             runId: active.id,
             planId: active.id,
             internalControl: true,
-            autoTurnBudget: { used: 5, limit: 6 },
+            autoTurnBudget: { used: 0, limit: 6, reset: true },
         }));
         expect((await store.getRun(active.id)).status).toBe('RUNNING');
+    });
+
+    test('returns a resumed auto turn to user attention when response mode fails before dispatch', async () => {
+        const active = await store.createRun(conversation.id, {
+            objective: 'Continue a document workflow.',
+            verification: 'The document is verified.',
+            maxSteps: 4,
+            startImmediately: true,
+            origin: 'copilot',
+        });
+        const pendingPrompt = '[GOLEM_OBSERVATION]\nContinue.\n[/GOLEM_OBSERVATION]';
+        await coordinator.pauseForAutoTurnLimit({
+            runId: active.id,
+            pendingPrompt,
+            used: 5,
+            limit: 5,
+        });
+        const schedule = jest.spyOn(coordinator, '_scheduleDeferredAutoTurn').mockImplementation(() => {});
+        await coordinator.resumeRun(active.id, '', { continueAutoRun: true });
+        schedule.mockRestore();
+        server.dispatchM365WorkspaceMessage.mockRejectedValueOnce(Object.assign(
+            new Error('mode hidden'),
+            { code: 'M365_RESPONSE_MODE_UNAVAILABLE' }
+        ));
+
+        await coordinator._beginDeferredAutoTurn(active.id, pendingPrompt, {
+            used: 0,
+            limit: 6,
+            reset: true,
+        });
+
+        expect(await store.getRun(active.id)).toEqual(expect.objectContaining({
+            status: 'WAITING_USER',
+            errorCode: 'M365_RESPONSE_MODE_UNAVAILABLE',
+        }));
+    });
+
+    test('starts a fresh plan when a new user request repeats a terminal plan id', async () => {
+        const plan = {
+            schemaVersion: 'golem_plan/1', planId: null, revision: 1,
+            goal: 'Create and verify a report.', status: 'running', currentStepId: 'step_1',
+            completionCriteria: 'The report is visibly verified.',
+            steps: [{ id: 'step_1', title: 'Create report', status: 'in_progress', doneWhen: 'Report exists' }],
+            question: '', approvalRequest: '', completionSummary: '',
+        };
+        const first = await coordinator.handleAutonomousPlan({
+            conversationId: conversation.id,
+            requestId: 'request-terminal-first',
+            plan,
+            actions: [{ action: 'command', parameter: 'Write-Output create' }],
+            actionCount: 1,
+        });
+        await coordinator.cancelRun(first.runId);
+
+        const restart = await coordinator.handleAutonomousPlan({
+            conversationId: conversation.id,
+            existingRunId: first.runId,
+            requestId: 'request-terminal-restart',
+            plan: { ...plan, planId: first.runId, revision: 2 },
+            actions: [{ action: 'command', parameter: 'Write-Output retry' }],
+            actionCount: 1,
+        });
+
+        expect(restart).toEqual(expect.objectContaining({
+            accepted: false,
+            allowActions: false,
+            code: 'M365_PLAN_RESTART_REQUIRED',
+            runId: null,
+            planId: null,
+            planRevision: 0,
+            resetAutoTurnBudget: true,
+            protocolRepair: expect.objectContaining({ status: 'retry' }),
+        }));
+        expect(restart.protocolRepair.prompt).toContain('plan_id=null and revision=1');
+        expect(restart.protocolRepair.prompt).toContain('Do not repeat, revise, or describe the terminal plan');
+        expect(await store.listRuns(conversation.id)).toHaveLength(1);
+    });
+
+    test('silently stops delayed system feedback for a terminal plan', async () => {
+        const plan = {
+            schemaVersion: 'golem_plan/1', planId: null, revision: 1,
+            goal: 'Create and verify a report.', status: 'running', currentStepId: 'step_1',
+            completionCriteria: 'The report is visibly verified.',
+            steps: [{ id: 'step_1', title: 'Create report', status: 'in_progress', doneWhen: 'Report exists' }],
+            question: '', approvalRequest: '', completionSummary: '',
+        };
+        const first = await coordinator.handleAutonomousPlan({
+            conversationId: conversation.id,
+            requestId: 'request-terminal-system-first',
+            plan,
+            actions: [{ action: 'command', parameter: 'Write-Output create' }],
+            actionCount: 1,
+        });
+        await coordinator.cancelRun(first.runId);
+
+        const delayed = await coordinator.handleAutonomousPlan({
+            conversationId: conversation.id,
+            existingRunId: first.runId,
+            requestId: 'request-terminal-system-delayed',
+            isSystemFeedback: true,
+            plan: { ...plan, planId: first.runId, revision: 1 },
+            actions: [{ action: 'command', parameter: 'Write-Output delayed' }],
+            actionCount: 1,
+        });
+
+        expect(delayed).toEqual(expect.objectContaining({
+            accepted: false,
+            allowActions: false,
+            code: 'M365_PLAN_TERMINAL',
+            runId: first.runId,
+            planId: first.runId,
+            stopRepair: true,
+        }));
     });
 
     test('pauses Goal mode after three consecutive failed tool observations', async () => {

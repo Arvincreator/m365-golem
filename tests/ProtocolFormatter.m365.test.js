@@ -83,6 +83,7 @@ describe('ProtocolFormatter M365 Web safe mode', () => {
         });
 
         expect(envelope).toContain('[GOLEM_ACTION]');
+        expect(envelope).toContain('Close the Markdown code fence before [/GOLEM_ACTION]');
         expect(envelope).toContain('visible user approval');
         expect(envelope).toContain('{"action":"command","parameter":"echo %CD%","progress":"讀取工作區位置並確認實際路徑"}');
         expect(envelope).toContain('Do not merely say that you can propose an action');
@@ -271,7 +272,8 @@ describe('ProtocolFormatter M365 Web safe mode', () => {
         expect(initial).toContain('製作一個有互動能力的網頁');
         expect(initial).toContain('not merely displaying a long code draft');
         expect(initial).toContain('For a new plan, set plan_id to null and revision to 1');
-        expect(initial).toContain('exactly one bounded [GOLEM_ACTION]');
+        expect(initial).toContain('one or more ordered action objects for that same step');
+        expect(initial).toContain('total execution result as one Observation');
         expect(initial).toContain('Only a host-generated [GOLEM_OBSERVATION] proves external work');
         expect(initial).toContain('Do not wait for another user message merely to continue a safe running plan');
         expect(initial).toContain('A final complete plan is the required signal that closes the local multi-step run');

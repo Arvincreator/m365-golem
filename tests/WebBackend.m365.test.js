@@ -54,7 +54,7 @@ describe('m365-web backend definition', () => {
             '.b_sydConvCont',
             'cib-message-group',
         ]));
-        expect(definition.responseTimeoutMs).toBe(60000);
+        expect(definition.responseTimeoutMs).toBe(180000);
         expect(definition.unwrappedResponseStableThreshold).toBe(10);
         expect(definition.stopSelectors).toEqual(expect.arrayContaining([
             '[data-is-typing="true"]',

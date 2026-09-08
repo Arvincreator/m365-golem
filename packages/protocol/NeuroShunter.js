@@ -308,11 +308,13 @@ class NeuroShunter {
         let textToParse = rawResponse;
         let attachments = options.attachments || [];
         let responseReplyOptions = null;
+        let responseStatus = '';
 
         // 📥 [v9.1.10] 支援結構化回應物件 { text, attachments }
         if (rawResponse && typeof rawResponse === 'object' && !Array.isArray(rawResponse)) {
             textToParse = rawResponse.text || "";
             attachments = [...attachments, ...(rawResponse.attachments || [])];
+            responseStatus = String(rawResponse.status || '');
             if (rawResponse.replyOptions && typeof rawResponse.replyOptions === 'object') {
                 responseReplyOptions = rawResponse.replyOptions;
             }
@@ -347,8 +349,10 @@ class NeuroShunter {
                     rawResponse: textToParse,
                     parsed,
                     actionCount: parsed.actions.length,
+                    downloadAttachmentCount: attachments.filter((item) => item && item.kind === 'download').length,
                     isSystemFeedback: options.isSystemFeedback === true,
                     toolRoute: options.m365ToolRoute || null,
+                    responseStatus,
                 });
                 if (protocolResult && protocolResult.planMode) {
                     options = {
@@ -366,18 +370,51 @@ class NeuroShunter {
                     };
                     if (protocolResult.accepted === false) parsed.actions = [];
                     if (protocolResult.warning) {
-                        parsed.reply = `${parsed.reply || ''}\n\n${protocolResult.warning}`.trim();
+                        if (protocolResult.accepted === false && protocolResult.stopRepair === true) {
+                            parsed.reply = '';
+                        } else if (protocolResult.accepted === false && !protocolResult.protocolRepair) {
+                            protocolRepair = {
+                                status: 'retry',
+                                prompt: [
+                                    '[GOLEM_HOST_CONSTRAINT]',
+                                    'The host rejected the previous plan or action. No new tool action was dispatched by this rejection.',
+                                    `Constraint code: ${String(protocolResult.code || 'M365_PLAN_REJECTED')}.`,
+                                    `Host feedback: ${String(protocolResult.warning || '').replace(/^⚠️\s*/, '')}`,
+                                    'Adjust your posture and return the next valid GOLEM_PLAN revision for the same plan_id.',
+                                    'If work can continue, include the corrected GOLEM_ACTION block with the ordered actions needed for the current step.',
+                                    'If human authorization or essential information is genuinely required, use wait_approval or wait_user with a concise question. Do not repeat the rejected response.',
+                                    '[/GOLEM_HOST_CONSTRAINT]',
+                                ].join('\n'),
+                                toolRoutingQuery: String(ctx?.toolRoutingQuery || ''),
+                                message: '',
+                            };
+                            parsed.reply = '';
+                        } else {
+                            parsed.reply = `${parsed.reply || ''}\n\n${protocolResult.warning}`.trim();
+                        }
                     }
                 }
                 if (protocolResult?.protocolRepair) {
+                    const preserveVisibleResult = protocolResult.protocolRepair.preserveVisibleResult === true
+                        || /^FALLBACK_(?:DIFF|RECOVERED)$/i.test(responseStatus);
+                    const visibleReply = parsed.reply;
+                    const visibleAttachments = attachments;
                     protocolRepair = protocolResult.protocolRepair;
                     parsed.actions = [];
-                    parsed.reply = String(protocolRepair.message || '').trim();
-                    // A rejected response may still carry M365-generated downloads or
-                    // citations. They are part of the unaccepted claim, so presenting
-                    // them beside the host repair message would make a fake completion
-                    // look trustworthy to the user.
-                    attachments = [];
+                    if (preserveVisibleResult) {
+                        // The visible M365 answer is still useful even when Copilot
+                        // omitted the protocol envelope. Show it now, then repair only
+                        // the missing control metadata in the background.
+                        parsed.reply = visibleReply;
+                        attachments = visibleAttachments;
+                    } else {
+                        parsed.reply = String(protocolRepair.message || '').trim();
+                        // A rejected response may still carry M365-generated downloads or
+                        // citations. They are part of the unaccepted claim, so presenting
+                        // them beside the host repair message would make a fake completion
+                        // look trustworthy to the user.
+                        attachments = [];
+                    }
                 }
             } catch (error) {
                 console.error('[NeuroShunter] GOLEM_PLAN host callback failed:', error);
@@ -426,7 +463,21 @@ class NeuroShunter {
 
         if (options.planMode === true && parsed.actions.length > 0 && !parsed.plan && options.m365ActionApproved !== true) {
             parsed.actions = [];
-            parsed.reply = `${parsed.reply || ''}\n\n⚠️ 自主計畫已暫停：後續工具動作缺少同版本 GOLEM_PLAN。`.trim();
+            protocolRepair = {
+                status: 'retry',
+                prompt: [
+                    '[GOLEM_HOST_CONSTRAINT]',
+                    'The host rejected the previous tool actions. No tool action was dispatched.',
+                    'Constraint code: M365_SAME_REVISION_PLAN_REQUIRED.',
+                    'Host feedback: Follow-up tool actions must include the matching GOLEM_PLAN revision.',
+                    'Return the current GOLEM_PLAN with the same plan_id and a revised revision, plus the corrected GOLEM_ACTION block for the current step.',
+                    'If human authorization or essential information is genuinely required, use wait_approval or wait_user with a concise question.',
+                    '[/GOLEM_HOST_CONSTRAINT]',
+                ].join('\n'),
+                toolRoutingQuery: String(ctx?.toolRoutingQuery || ''),
+                message: '',
+            };
+            parsed.reply = '';
         }
 
         const isSystemFeedback = options.isSystemFeedback === true;
@@ -618,7 +669,9 @@ class NeuroShunter {
         // 核准協議仍保留在宿主內部與專用狀態卡，不讓模型以操作細節打斷對話。
         // plan_checkpoint 的回覆本身就是原生 M365 產出，不能被狀態文字蓋掉。
         if (useM365ActionProgressReply && !needsM365Approval) {
-            parsed.reply = buildExecutionProgressText(parsed.actions[0]);
+            parsed.reply = parsed.actions.length > 1
+                ? `執行本步驟的 ${parsed.actions.length} 個動作，正在執行並確認中…`
+                : buildExecutionProgressText(parsed.actions[0]);
         } else if (needsM365Approval) {
             // The approval card above is the complete user-facing status. Avoid
             // following it with a second message that incorrectly says execution
@@ -734,7 +787,7 @@ class NeuroShunter {
                         `[PREVIOUS_INVALID_ACTIONS]\n` +
                         `${compactActions}\n\n` +
                         `修正規則：\n` +
-                        `- 只輸出一個最小必要 action。\n` +
+                        `- 輸出完成目前步驟所需的最小 action 陣列；可包含多個依序執行的動作。\n` +
                         `- 若是行事曆，請用：{"action":"collab-calendar","args":{"action":"add","title":"...","start":"...","end":"..."}}\n` +
                         `- mcp_call 必須包含 server + tool + parameters。\n` +
                         `- command 必須放在 parameter 欄位。\n`;

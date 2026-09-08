@@ -13,6 +13,18 @@ const {
     validatePlanCompletion,
 } = require('./M365ExecutionContract');
 const TERMINAL_STATUSES = new Set(['FAILED', 'CANCELED', 'COMPLETED']);
+const PRE_DISPATCH_ERROR_CODES = new Set([
+    'M365_HUMAN_LOGIN_REQUIRED',
+    'M365_TENANT_BLOCKED',
+    'M365_UI_NOT_READY',
+    'M365_UI_BUSY',
+    'M365_UNEXPECTED_HOST',
+    'M365_INSECURE_URL',
+    'M365_RESPONSE_MODE_INVALID',
+    'M365_RESPONSE_MODE_UNAVAILABLE',
+    'M365_RESPONSE_MODE_SWITCH_FAILED',
+    'BROWSER_PROFILE_IN_USE',
+]);
 
 function planForStorage(plan, planId) {
     return {
@@ -205,12 +217,12 @@ class M365RunCoordinator {
                 throw serviceError('M365_RUN_RESUME_INVALID', 'This run cannot be resumed from its current state.', 409);
             }
             const input = String(userInput || '').trim();
-            const grantAutoTurns = Math.max(0, Math.floor(Number(options.grantAutoTurns) || 0));
+            const continueAutoRun = options.continueAutoRun === true;
             if (run.status === 'WAITING_USER' && run.errorCode === 'M365_AUTO_TURN_LIMIT') {
-                if (grantAutoTurns !== 1) {
+                if (!continueAutoRun) {
                     throw serviceError(
-                        'M365_AUTO_TURN_GRANT_REQUIRED',
-                        'Choose “Run 1 more turn” to continue this saved work.',
+                        'M365_AUTO_RUN_CONTINUE_REQUIRED',
+                        'Choose “Continue automatic execution” to start the next automatic-execution allowance.',
                         400
                     );
                 }
@@ -230,12 +242,16 @@ class M365RunCoordinator {
                 await this.store.appendRunEvent(runId, 'auto_turn_limit_extended', {
                     from: previousLimit,
                     to: nextLimit,
-                    grantedTurns: 1,
+                    allowanceTurns: nextLimit,
                 });
                 const queuedRun = await this.store.transitionRun(runId, 'QUEUED', {
-                    reason: 'USER_GRANTED_ONE_AUTO_TURN',
+                    reason: 'USER_CONTINUED_AUTO_RUN',
                 });
-                this._scheduleDeferredAutoTurn(queuedRun.id, pendingPrompt, { used, limit: nextLimit });
+                this._scheduleDeferredAutoTurn(queuedRun.id, pendingPrompt, {
+                    used: 0,
+                    limit: nextLimit,
+                    reset: true,
+                });
                 return this.store.getRun(runId);
             }
             if (['WAITING_USER', 'BLOCKED'].includes(run.status) && !input) {
@@ -555,10 +571,7 @@ class M365RunCoordinator {
             await this._withRunLock(runId, async () => {
                 const run = await this.store.getRun(runId);
                 if (run.status !== 'RUNNING') return;
-                const preDispatch = new Set([
-                    'M365_HUMAN_LOGIN_REQUIRED', 'M365_TENANT_BLOCKED', 'M365_UI_NOT_READY',
-                    'M365_UI_BUSY', 'M365_UNEXPECTED_HOST', 'M365_INSECURE_URL', 'BROWSER_PROFILE_IN_USE',
-                ]).has(String(error?.code || ''));
+                const preDispatch = PRE_DISPATCH_ERROR_CODES.has(String(error?.code || ''));
                 await this.store.transitionRun(runId, preDispatch ? 'WAITING_USER' : 'RECONCILE_REQUIRED', {
                     reason: preDispatch ? 'AUTO_TURN_GRANT_PRE_DISPATCH_FAILED' : 'AUTO_TURN_GRANT_AMBIGUOUS',
                     errorCode: String(error?.code || 'M365_RUN_DISPATCH_FAILED'),
@@ -580,7 +593,7 @@ class M365RunCoordinator {
                 `The Golem host has resumed plan ${runId}.`,
                 `Last accepted revision: ${Number(plan?.revision || 0)}. Return revision ${Number(plan?.revision || 0) + 1} using the exact same plan_id.`,
                 `Resume reason: ${reason}.`,
-                'Re-evaluate the saved plan. If status=running, emit exactly one GOLEM_ACTION for the current step. Otherwise return a valid non-running plan status.',
+                'Re-evaluate the saved plan. If status=running, emit one GOLEM_ACTION block with one or more ordered actions for the current step. Otherwise return a valid non-running plan status.',
             ];
             if (run.goalMode) lines.push(
                 'Goal mode remains active: keep working until the objective is verified, unless human authorization, essential user input, a safety boundary, or repeated no-progress requires a pause.',
@@ -614,10 +627,7 @@ class M365RunCoordinator {
             await this._withRunLock(runId, async () => {
                 const run = await this.store.getRun(runId);
                 if (run.status !== 'RUNNING') return;
-                const preDispatch = new Set([
-                    'M365_HUMAN_LOGIN_REQUIRED', 'M365_TENANT_BLOCKED', 'M365_UI_NOT_READY',
-                    'M365_UI_BUSY', 'M365_UNEXPECTED_HOST', 'M365_INSECURE_URL', 'BROWSER_PROFILE_IN_USE',
-                ]).has(String(error?.code || ''));
+                const preDispatch = PRE_DISPATCH_ERROR_CODES.has(String(error?.code || ''));
                 await this.store.transitionRun(runId, preDispatch ? 'WAITING_USER' : 'RECONCILE_REQUIRED', {
                     reason: preDispatch ? 'AUTONOMOUS_RESUME_PRE_DISPATCH_FAILED' : 'AUTONOMOUS_RESUME_AMBIGUOUS',
                     errorCode: String(error?.code || 'M365_RUN_DISPATCH_FAILED'),
@@ -692,15 +702,7 @@ class M365RunCoordinator {
         const step = steps.find((item) => item.id === stepId);
         if (!step || !['running', 'queued'].includes(step.status)) return run;
         const code = String(error?.code || 'M365_RUN_DISPATCH_FAILED');
-        const preDispatch = new Set([
-            'M365_HUMAN_LOGIN_REQUIRED',
-            'M365_TENANT_BLOCKED',
-            'M365_UI_NOT_READY',
-            'M365_UI_BUSY',
-            'M365_UNEXPECTED_HOST',
-            'M365_INSECURE_URL',
-            'BROWSER_PROFILE_IN_USE',
-        ]).has(code) && !ambiguous;
+        const preDispatch = PRE_DISPATCH_ERROR_CODES.has(code) && !ambiguous;
         await this.store.updateRunStep(step.id, {
             status: preDispatch ? 'waiting' : 'reconcile_required',
             summary: preDispatch
@@ -802,33 +804,24 @@ class M365RunCoordinator {
 
     async _requestProtocolRepairLocked({ runId, kind = 'missing_plan_or_action', issues = [] }) {
         let run = await this.store.getRun(runId);
-        if (TERMINAL_STATUSES.has(run.status) || ['WAITING_USER', 'WAITING_APPROVAL', 'PAUSED', 'RECONCILE_REQUIRED'].includes(run.status)) {
+        const visibleResultRecovered = kind === 'visible_result_recovered';
+        const unwrappedVisibleResponse = kind === 'unwrapped_visible_response';
+        const recoverableVisibleResponse = visibleResultRecovered || unwrappedVisibleResponse;
+        if (TERMINAL_STATUSES.has(run.status) || ['WAITING_USER', 'WAITING_APPROVAL', 'PAUSED'].includes(run.status)
+            || (run.status === 'RECONCILE_REQUIRED' && !recoverableVisibleResponse)) {
             return null;
+        }
+        if (run.status === 'RECONCILE_REQUIRED' && recoverableVisibleResponse) {
+            run = await this.store.transitionRun(run.id, 'QUEUED', {
+                reason: 'VISIBLE_RESULT_RECOVERED_AFTER_AMBIGUOUS_RESPONSE',
+            });
+            await this.store.appendRunEvent(run.id, 'ambiguous_response_recovered', {
+                kind,
+            });
         }
         const events = await this.store.listRunEvents(runId);
         const sameKindRepairs = events.filter((event) => event.eventType === 'autonomous_protocol_repair'
             && event.payload?.kind === kind).length;
-        const repairLimit = run.goalMode ? 3 : 2;
-        if (sameKindRepairs >= repairLimit) {
-            if (run.status === 'QUEUED') run = await this.store.transitionRun(run.id, 'RUNNING', { reason: 'PROTOCOL_REPAIR_LIMIT' });
-            if (run.status === 'RUNNING') {
-                run = await this.store.transitionRun(run.id, 'BLOCKED', {
-                    reason: '模型連續未提出可執行的下一步，自動補正已達上限。',
-                    errorCode: 'M365_PROTOCOL_REPAIR_LIMIT',
-                });
-            }
-            return {
-                accepted: false,
-                allowActions: false,
-                planMode: true,
-                runId: run.id,
-                planId: run.id,
-                protocolRepair: {
-                    status: 'blocked',
-                    message: `我已嘗試修正 ${repairLimit} 次，但仍沒有產生可執行的下一步。工作已暫停；請在右側查看受阻原因後重新執行。`,
-                },
-            };
-        }
 
         const latest = [...events].reverse().find((event) => event.eventType === 'autonomous_plan_received');
         const hasExecutionContract = events.some((event) => event.eventType === 'execution_contract_created');
@@ -840,9 +833,14 @@ class M365RunCoordinator {
         if (!latest && !hasExecutionContract && !rejectedFirstPlan) return null;
         const nextRevision = Number(latest?.payload?.plan?.revision || 0) + 1;
         const hasPlan = Boolean(latest);
+        const preserveVisibleResult = recoverableVisibleResponse;
         const prompt = [
             '[GOLEM_EXECUTION_REPAIR]',
-            'The prior response did not satisfy the active execution contract. It was not a successful tool attempt.',
+            preserveVisibleResult
+                ? (unwrappedVisibleResponse
+                    ? 'The prior visible Microsoft 365 response omitted the required Golem envelope. Its visible user-facing result has already been delivered by the host.'
+                    : 'The prior visible Microsoft 365 response included a usable result and file link, but omitted the active plan control state. The host recovered and displayed that result.')
+                : 'The prior response did not satisfy the active execution contract. It was not a successful tool attempt.',
             `Repair reason: ${kind}.`,
             issues.length > 0 ? `Unmet host checks: ${issues.slice(0, 12).join(', ')}.` : '',
             '[RUN_OBJECTIVE]', run.objective, '[/RUN_OBJECTIVE]',
@@ -850,7 +848,10 @@ class M365RunCoordinator {
             hasPlan
                 ? `Return GOLEM_PLAN revision ${nextRevision} with plan_id=${run.id}. Preserve completed steps that have host evidence.`
                 : 'Create GOLEM_PLAN revision 1 with plan_id=null. The host has reserved the run but has not accepted a plan yet.',
-            'If work remains and the inputs are sufficient, set status=running and include exactly one real GOLEM_ACTION for the current step in this same response.',
+            preserveVisibleResult
+                ? 'Do not recreate the document, repeat the prior action, or produce a second copy. Restore only the missing envelope and plan control state. If the visible native result advances the current step, bind it with one plan_checkpoint action and concise visible evidence.'
+                : '',
+            'If work remains and the inputs are sufficient, set status=running and include one GOLEM_ACTION block with one or more ordered actions for the current step in this same response.',
             'Use the available tool-routing guide. If runtime availability is uncertain, the first action may be a bounded read-only capability check. Do not ask the user to repeat permission already present in the objective.',
             'Use blocked or wait_user only for a concrete obstacle or missing input, and state that specific fact in question. Do not mark complete until every completed step has a successful host Observation and the completion check is satisfied.',
             '[/GOLEM_EXECUTION_REPAIR]',
@@ -873,6 +874,7 @@ class M365RunCoordinator {
                 attempt: sameKindRepairs + 1,
                 prompt,
                 toolRoutingQuery: run.objective,
+                preserveVisibleResult,
                 message: sameKindRepairs === 0 && kind === 'missing_initial_execution'
                     ? '正在確認可用資源並準備執行…'
                     : '',
@@ -892,6 +894,34 @@ class M365RunCoordinator {
             code,
             warning: `⚠️ 自主計畫已暫停：${message}`,
             ...extra,
+        };
+    }
+
+    _terminalPlanRestartResult(run, plan) {
+        return {
+            accepted: false,
+            allowActions: false,
+            planMode: true,
+            code: 'M365_PLAN_RESTART_REQUIRED',
+            runId: null,
+            planId: null,
+            planRevision: 0,
+            maxActionDepth: run.maxSteps,
+            resetAutoTurnBudget: true,
+            protocolRepair: {
+                status: 'retry',
+                prompt: [
+                    '[GOLEM_PLAN_RESTART]',
+                    `The previous plan ${run.id} is terminal and cannot be revised or resumed.`,
+                    'The current user message is a new execution request. Do not repeat, revise, or describe the terminal plan.',
+                    'Create a fresh GOLEM_PLAN with plan_id=null and revision=1.',
+                    'If work can proceed, use status=running and include the GOLEM_ACTION block for its first current step in the same response.',
+                    'Preserve only verified results from prior host Observations; do not treat the prior failure as completion evidence.',
+                    '[/GOLEM_PLAN_RESTART]',
+                ].join('\n'),
+                toolRoutingQuery: plan.goal,
+                message: '正在建立新的執行計畫並重新開始…',
+            },
         };
     }
 
@@ -951,6 +981,18 @@ class M365RunCoordinator {
             return this._planRejection('M365_PLAN_CONVERSATION_REQUIRED', '找不到目前的專案對話。');
         }
 
+        if (!existingRunId && plan.planId && isSystemFeedback !== true) {
+            let referencedRun = null;
+            try {
+                referencedRun = await this.store.getRun(plan.planId);
+            } catch (_) { }
+            if (referencedRun
+                && referencedRun.conversationId === conversationId
+                && TERMINAL_STATUSES.has(referencedRun.status)) {
+                return this._terminalPlanRestartResult(referencedRun, plan);
+            }
+        }
+
         let resolvedRunId = existingRunId || plan.planId || null;
         if (!resolvedRunId) {
             if (plan.revision !== 1 || plan.planId !== null) {
@@ -991,6 +1033,17 @@ class M365RunCoordinator {
             }
             const latestEvent = await this._latestAutonomousPlan(run.id);
             const latestRevision = Number(latestEvent?.payload?.plan?.revision || 0);
+            if (TERMINAL_STATUSES.has(run.status)) {
+                if (isSystemFeedback !== true) {
+                    return this._terminalPlanRestartResult(run, plan);
+                }
+                return this._planRejection('M365_PLAN_TERMINAL', '這個計畫已經結束，不能再執行動作。', {
+                    runId: run.id,
+                    planId: run.id,
+                    planRevision: latestRevision,
+                    stopRepair: true,
+                });
+            }
             if (latestRevision > 0) {
                 if (plan.planId !== run.id) {
                     return this._planRejection('M365_PLAN_ID_MISMATCH', '後續版本必須沿用宿主指定的 plan_id。', { runId: run.id });
@@ -1006,13 +1059,6 @@ class M365RunCoordinator {
                 return this._planRejection('M365_PLAN_FIRST_REVISION_INVALID', '第一版計畫必須使用 plan_id=null、revision=1。', { runId: run.id });
             }
 
-            if (TERMINAL_STATUSES.has(run.status)) {
-                return this._planRejection('M365_PLAN_TERMINAL', '這個計畫已經結束，不能再執行動作。', {
-                    runId: run.id,
-                    planId: run.id,
-                    planRevision: latestRevision,
-                });
-            }
             if (run.status === 'PAUSED') {
                 return this._planRejection('M365_PLAN_PAUSED', '計畫已由使用者暫停。請先按「繼續」。', {
                     runId: run.id,
@@ -1059,12 +1105,12 @@ class M365RunCoordinator {
             if (missingAction && ['RUNNING', 'QUEUED'].includes(run.status)) {
                 const previousSteps = await this.store.listRunSteps(run.id);
                 const lastStep = previousSteps[previousSteps.length - 1];
-                // Only repair a missing proposal, never retry an in-flight or failed operation.
-                if (!lastStep || lastStep.status === 'completed') {
+                // A missing proposal is safe to repair after a terminal Observation:
+                // the host has not received or dispatched any new action to duplicate.
+                if (!lastStep || ['completed', 'failed', 'canceled'].includes(lastStep.status)) {
                     const events = await this.store.listRunEvents(run.id);
                     const repairs = events.filter(event => event.eventType === 'autonomous_plan_action_repair').length;
-                    const repairLimit = run.goalMode ? 3 : 2;
-                    if (repairs < repairLimit && run.currentStep < run.maxSteps) {
+                    if (run.currentStep < run.maxSteps) {
                         const storedPlan = planForStorage(plan, run.id);
                         await this.store.appendRunEvent(run.id, 'autonomous_plan_received', { requestId, plan: storedPlan });
                         await this.store.appendRunEvent(run.id, 'autonomous_plan_action_repair', { revision: plan.revision, attempt: repairs + 1 });
@@ -1072,20 +1118,17 @@ class M365RunCoordinator {
                         this._scheduleAutonomousContinuation(run.id, storedPlan, '', 'MISSING_ACTION_REPAIR');
                         return { accepted: true, allowActions: false, planMode: true, runId: run.id, planId: run.id, planRevision: plan.revision, maxActionDepth: run.maxSteps };
                     }
-                    if (run.status === 'QUEUED') await this.store.transitionRun(run.id, 'RUNNING', { reason: 'MISSING_ACTION_REPAIR_LIMIT' });
-                    await this.store.transitionRun(run.id, 'BLOCKED', { reason: '模型連續未提出下一步動作，自動補正已達上限；請重試或調整任務。' });
-                    return this._planRejection('M365_PLAN_ACTION_REPAIR_LIMIT', '模型連續未提出下一步動作，自動補正已達上限。', { runId: run.id, planId: run.id, planRevision: latestRevision });
                 }
             }
             const nonRunning = plan.status !== 'running';
-            if ((nonRunning && actionCount !== 0) || (!nonRunning && actionCount !== 1)) {
+            if ((nonRunning && actionCount !== 0) || (!nonRunning && actionCount < 1)) {
                 return this._planRejection(
                     'M365_PLAN_ACTION_CARDINALITY_INVALID',
-                    nonRunning ? '非執行狀態不能同時提出工具動作。' : '執行中的計畫每輪必須且只能提出一個工具動作。',
+                    nonRunning ? '非執行狀態不能同時提出工具動作。' : '執行中的計畫每輪至少需要提出一個工具動作。',
                     { runId: run.id, planId: run.id, planRevision: latestRevision }
                 );
             }
-            if (plan.status === 'running' && String(actions?.[0]?.action || '').toLowerCase() === 'multi_agent') {
+            if (plan.status === 'running' && actions.some((action) => String(action?.action || '').toLowerCase() === 'multi_agent')) {
                 return this._planRejection('M365_PLAN_MULTI_AGENT_UNSUPPORTED', '目前自主計畫尚未支援多代理動作的完成回傳，請改用 command、Skill 或 MCP。', {
                     runId: run.id,
                     planId: run.id,
@@ -1241,6 +1284,7 @@ class M365RunCoordinator {
                 actionCount,
                 revision: plan.revision,
                 actionDescriptor: describeAction(actions[0]),
+                actionDescriptors: actions.map((action) => describeAction(action)),
             });
             return {
                 accepted: true,

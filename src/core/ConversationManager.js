@@ -84,7 +84,7 @@ class ConversationManager {
         const explicitLimit = Math.max(0, Math.floor(Number(explicit?.limit) || 0));
         let state;
         if (runId) {
-            state = options.resetAutoTurnBudget === true
+            state = options.resetAutoTurnBudget === true || explicit?.reset === true
                 ? null
                 : this.autoTurnStateByRun.get(runId);
             if (!state) {
@@ -333,7 +333,7 @@ class ConversationManager {
                     }
                     await deferredTask.ctx.reply(
                         saved
-                            ? `⏸️ **自動執行已暫停**\n目前工作與下一回合已保存。按「再執行 1 回合」後，上限會由 ${budget.limit} 增加為 ${budget.limit + 1}。`
+                            ? `⏸️ **自動執行已暫停**\n目前工作與下一回合已保存。按「繼續自動執行」後，會開啟新的 ${budget.limit + 1} 回合自動執行額度並立即接續工作。`
                             : `⏸️ **自動執行已暫停**\n已使用 ${budget.limit} 個自動回合；請由使用者確認後再繼續。`,
                         { parse_mode: 'Markdown' }
                     );

@@ -14,6 +14,26 @@ M365 Golem — Windows 安裝前請先閱讀
 
 正常啟動不會顯示命令列黑視窗；工作台會以獨立的 Edge 應用程式視窗開啟。
 
+重要：M365 Session Bridge 還有一個手動 Edge 安裝步驟
+
+Install-M365-Golem.bat 會安裝並註冊 Windows 端元件，但 Edge 不允許安裝器
+自動載入本機擴充功能。擴充功能是依 Edge 使用者設定檔分開安裝，因此請裝在
+Golem 開啟、用來登入 Microsoft 365／Copilot 的「分頁式 Edge 視窗」，不要只裝在
+平常日常使用的原生 Edge，或只開啟 Golem 工作台的 Edge 應用程式視窗。
+
+1. 在 Golem 開啟的 M365 Edge 視窗網址列輸入 edge://extensions。
+2. 開啟左下角的「開發人員模式」。
+3. 點選「載入解壓縮」。
+4. 選擇安裝資料夾內的：
+
+   integrations\m365-session-bridge\apps\edge-extension\dist
+
+5. 確認清單中出現並啟用「M365 Session Bridge 0.1.0」。
+6. 在同一個 Edge 視窗登入 Microsoft 365；需要 MFA 時請由使用者親自完成。
+
+若 Bridge 仍顯示離線，請先確認上述擴充功能仍為啟用狀態，再關閉並重新開啟
+Golem 的 M365 Edge 視窗。只在其他 Edge 設定檔安裝，Bridge 仍可能無法連線。
+
 如果已經解壓縮：
 
 1. 在 m365-golem-main 資料夾空白處按滑鼠右鍵，選擇「在終端中開啟」。

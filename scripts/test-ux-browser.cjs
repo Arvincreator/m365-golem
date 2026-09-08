@@ -39,7 +39,7 @@ async function main() {
             if (/\/api\/runs\/[^/]+\/(resume|cancel|reconcile)$/.test(pathname)) {
                 const requestBody = route.request().postDataJSON();
                 runRequests.push({ path: pathname, body: requestBody });
-                if (pathname.endsWith('/resume') && rejectResume && requestBody.grantAutoTurns !== 1) return route.fulfill({ status: 400, json: { error: 'Synthetic resume failure' } });
+                if (pathname.endsWith('/resume') && rejectResume && requestBody.continueAutoRun !== true) return route.fulfill({ status: 400, json: { error: 'Synthetic resume failure' } });
                 run.status = pathname.endsWith('/cancel') ? 'CANCELED' : 'RUNNING';
                 run.errorCode = null;
             } else if (pathname.endsWith('/draft')) {
@@ -184,9 +184,9 @@ async function main() {
         await page.getByRole('button', { name: '知道了', exact: true }).click();
         await page.waitForTimeout(100);
         assert.equal(await page.getByRole('status', { name: '工作提醒' }).count(), 0);
-        await attention.getByRole('button', { name: '再執行 1 回合', exact: true }).click();
+        await attention.getByRole('button', { name: '繼續自動執行', exact: true }).click();
         await attention.waitFor({ state: 'hidden' });
-        assert.equal(runRequests.at(-1).body.grantAutoTurns, 1);
+        assert.equal(runRequests.at(-1).body.continueAutoRun, true);
         run.status = 'WAITING_USER';
         run.errorCode = null;
         await attention.waitFor({ timeout: 10000 });

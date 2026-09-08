@@ -184,6 +184,56 @@ describe('CommandHandler', () => {
         );
     });
 
+    test('plan mode sends multiple command actions as one sequence and one combined Observation', async () => {
+        const actions = [
+            { action: 'command', parameter: 'echo first > weekly_report.py' },
+            { action: 'command', parameter: 'echo second >> weekly_report.py' },
+            { action: 'command', parameter: 'python weekly_report.py' },
+        ];
+        const combined = '[Step 1 Success]\nfirst\n\n----------------\n\n[Step 2 Success]\nsecond\n\n----------------\n\n[Step 3 Success]\nverified';
+        mockController.runSequence.mockResolvedValue(combined);
+        mockBrain.webBackend = { id: 'm365-web' };
+        mockCtx.workspaceConversationId = 'conversation-1';
+        mockCtx.onGolemObservation = jest.fn().mockResolvedValue({
+            planId: 'run-1',
+            planRevision: 1,
+            run: { status: 'RUNNING' },
+        });
+
+        await CommandHandler.execute(
+            mockCtx,
+            actions,
+            mockController,
+            mockBrain,
+            mockDispatchFn,
+            {
+                planMode: true,
+                workspaceRunId: 'run-1',
+                workspaceStepId: 'host-step-1',
+                workspacePlanId: 'run-1',
+                workspacePlanRevision: 1,
+                workspacePlanStepId: 'step_1',
+                workspaceActionId: 'action-1',
+                actionDepth: 0,
+                maxActionDepth: 6,
+            }
+        );
+
+        expect(mockController.runSequence).toHaveBeenCalledWith(
+            mockCtx,
+            actions,
+            0,
+            mockBrain,
+            expect.any(Object)
+        );
+        expect(mockCtx.onGolemObservation).toHaveBeenCalledTimes(1);
+        expect(mockCtx.onGolemObservation).toHaveBeenCalledWith(expect.objectContaining({
+            status: 'succeeded',
+            result: combined,
+        }));
+        expect(mockConvoManager.enqueue).toHaveBeenCalledTimes(1);
+    });
+
     test('plan mode fails closed when the command executor returns no Observation', async () => {
         mockController.runSequence.mockResolvedValue('');
         mockCtx.onGolemObservation = jest.fn().mockResolvedValue({
