@@ -19,7 +19,7 @@
 
 維持可見 Edge、既有 Playwright 控制流程、M365 信封／Action／Observation、對話綁定、dispatch lease、序列化隊列、附件上傳檢查、核准與人工核對語意。
 
-不得換成 API provider；不得新增 Microsoft OAuth／App Registration；不得讀取或匯出 Cookie／Token；不得把 M365 內嵌到 WebView；不得修改 Bridge 的站台／路徑白名單與寫入政策；不得提高自動核准權限、偷偷重送或直接操作真實客戶資料。
+不得換成 API provider；不得新增 Microsoft OAuth／App Registration；不得讀取或匯出 Cookie／Token；不得把 M365 內嵌到 WebView；不得修改 Bridge 的黑名單與寫入政策；不得提高自動核准權限、偷偷重送或直接操作真實客戶資料。
 
 凍結檔案依藍圖第 3 節，並搜尋本機現有 M365 provider／selector／Edge 啟動設定加入保護清單。只有 UI、UX service、scope 驗證、加密資料的新增欄位與測試可依藍圖修改。無法在此邊界內完成的個別需求，記錄阻礙並保留原行為，不繞路實作。
 

@@ -1,16 +1,33 @@
 const ToolUsePolicy = require('../src/managers/ToolUsePolicy');
 
 describe('ToolUsePolicy', () => {
-    test('blocks passive explanation requests from routing', () => {
+    test('allows a strongly relevant read tool to support an explanation', () => {
         const policy = new ToolUsePolicy();
         const decision = policy.evaluateCandidate('請解釋 git commit 是什麼', {
             id: 'git',
             name: 'git',
+            description: 'read repository history',
             score: 20,
         });
 
+        expect(decision.include).toBe(true);
+        expect(decision.risk).toBe('read');
+        expect(decision.strength).toBe('consider');
+        expect(decision.requiresConfirmation).toBe(false);
+        expect(decision.reason).toBe('relevant_optional_read');
+    });
+
+    test('does not surface a weak tool merely because tools are allowed autonomously', () => {
+        const policy = new ToolUsePolicy();
+        const decision = policy.evaluateCandidate('聊聊你喜歡的顏色', {
+            id: 'log-reader',
+            name: 'log-reader',
+            description: 'read application logs',
+            score: 4,
+        });
+
         expect(decision.include).toBe(false);
-        expect(decision.reason).toBe('passive_request');
+        expect(decision.reason).toBe('low_score');
     });
 
     test('allows read tools for explicit inspection requests', () => {
@@ -59,6 +76,32 @@ describe('ToolUsePolicy', () => {
         }));
     });
 
+    test.each(['測試看看', '你是不是應該要用 action 測試看看？', 'verify it'])(
+        'treats verification wording as an executable request: %s', query => {
+            expect(policyFor(query)).toEqual(expect.objectContaining({
+                explicitAction: true,
+                verificationIntent: true,
+                shouldRoute: true,
+                passive: false,
+            }));
+        }
+    );
+
+    test('does not surface an unrequested external mutation as an executable route', () => {
+        const policy = new ToolUsePolicy();
+        const decision = policy.evaluateCandidate('這份內容有什麼改善建議？', {
+            id: 'wiki-update',
+            name: 'update page',
+            description: 'write and update an external page',
+            score: 12,
+        });
+
+        expect(decision.include).toBe(false);
+        expect(decision.risk).toBe('action');
+        expect(decision.requiresConfirmation).toBe(true);
+        expect(decision.reason).toBe('mutation_not_requested');
+    });
+
     test('allows an accepted GOLEM_PLAN to continue from its bound host Observation', () => {
         const rules = new ToolUsePolicy().buildRules().join('\n');
 
@@ -67,3 +110,7 @@ describe('ToolUsePolicy', () => {
         expect(rules).toContain('不必等待使用者再說「繼續」');
     });
 });
+
+function policyFor(query) {
+    return new ToolUsePolicy().classifyRequest(query);
+}

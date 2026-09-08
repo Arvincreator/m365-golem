@@ -1269,7 +1269,7 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                             const isWarning = ["ambiguous", "failed"].includes(message.deliveryState) || message.role === "system";
                             return (
                                 <article key={message.id} className={cn(
-                                    "flex max-w-[86%] flex-col",
+                                    "flex w-full min-w-0 max-w-[86%] flex-col",
                                     isUser ? "ml-auto items-end" : "mr-auto items-start"
                                 )}>
                                     <div className={cn("mb-1 flex items-center gap-2", isUser && "flex-row-reverse")}>
@@ -1284,9 +1284,9 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                                         </span>
                                         <span className="text-[10px] text-muted-foreground">{formatLocalDate(message.createdAt)}</span>
                                     </div>
-                                    <div className="min-w-0">
+                                    <div className="min-w-0 max-w-full">
                                         <div className={cn(
-                                            "inline-block max-w-full rounded-2xl border p-3 text-left text-base leading-7",
+                                            "inline-block max-w-full overflow-hidden rounded-2xl border p-3 text-left text-base leading-7",
                                             isUser
                                                 ? "rounded-tr-none border-blue-500/20 bg-blue-600/10 text-blue-900 dark:text-blue-100"
                                                 : "border-transparent bg-transparent text-foreground/90",
@@ -1295,7 +1295,7 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                                             {message.role === "assistant" ? (
                                                 <M365MessageContent content={message.content} />
                                             ) : (
-                                                <div className="prose prose-sm max-w-none break-words text-foreground dark:prose-invert prose-p:my-2 prose-pre:overflow-x-auto">
+                                                <div className="prose prose-sm max-w-none break-words [overflow-wrap:anywhere] text-foreground dark:prose-invert prose-p:my-2 prose-pre:overflow-x-auto">
                                                     <ReactMarkdown remarkPlugins={[remarkGfm]} components={externalConversationLinkComponents}>{message.content}</ReactMarkdown>
                                                 </div>
                                             )}
@@ -1760,12 +1760,30 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                                         <FileText className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
                                         <span className="min-w-0">
                                             <span className="block font-medium">AGENTS.md</span>
-                                            <span className="block text-[10px] text-muted-foreground">Golem 自主管理 · {projectWorkspace.memoryCount} 則專案記憶</span>
+                                            <span className="block text-[10px] text-muted-foreground">Golem 自主管理的專案指示與記憶</span>
                                         </span>
                                     </button>
                                 )}
                             </div>
                         </section>
+
+                        {projectWorkspace && (
+                            <section className="rounded-2xl border border-emerald-500/25 bg-emerald-500/5 p-4">
+                                <div className="flex items-center justify-between gap-3">
+                                    <div>
+                                        <h4 className="text-sm font-semibold">專案狀態紀錄</h4>
+                                        <p className="mt-1 text-xs text-muted-foreground">目前累積 {projectWorkspace.memoryCount} 則紀錄</p>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowAgentsEditor(true)}
+                                        className="shrink-0 rounded-lg border border-emerald-500/25 bg-background px-3 py-1.5 text-xs font-medium hover:bg-accent"
+                                    >
+                                        查看
+                                    </button>
+                                </div>
+                            </section>
+                        )}
 
                         <section className="rounded-2xl border border-border bg-card p-4">
                             <h4 className="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">工具</h4>
@@ -1806,7 +1824,7 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                                     </span>
                                     <span className="text-right text-muted-foreground">
                                         {run.id === currentRun?.id && runDetail?.plan
-                                            ? `計畫 ${runDetail.plan.steps.filter((step) => step.status === "completed").length}/${runDetail.plan.steps.length} · 宿主執行 ${run.currentStep}${run.goalMode ? " · 無固定上限" : `/${run.maxSteps}`}`
+                                            ? `計畫 ${run.status === "COMPLETED" ? runDetail.plan.steps.length : runDetail.plan.steps.filter((step) => step.status === "completed").length}/${runDetail.plan.steps.length} · 宿主執行 ${run.currentStep}${run.goalMode ? " · 無固定上限" : `/${run.maxSteps}`}`
                                             : `宿主執行 ${run.currentStep}${run.goalMode ? " · 無固定上限" : `/${run.maxSteps}`}`}
                                     </span>
                                 </div>
@@ -1814,7 +1832,7 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                                     <details open className="mt-3 rounded-xl border border-border bg-secondary/35 p-3">
                                         <summary className="cursor-pointer select-none text-xs font-semibold text-primary">
                                             <span className="ml-1 inline-flex max-w-[calc(100%-1rem)] flex-col align-middle">
-                                                <span>Copilot 自主計畫 · v{runDetail.plan.revision} · {runDetail.plan.steps.filter((step) => step.status === "completed").length}/{runDetail.plan.steps.length}</span>
+                                                <span>Copilot 自主計畫 · v{runDetail.plan.revision} · {run.status === "COMPLETED" ? runDetail.plan.steps.length : runDetail.plan.steps.filter((step) => step.status === "completed").length}/{runDetail.plan.steps.length}</span>
                                                 <span className="mt-0.5 truncate text-[11px] font-normal text-foreground">
                                                     目前：{run.status === "COMPLETED" ? (runDetail.plan.status === "complete" ? "計畫已完成" : "已完成（使用者核對）") : runDetail.plan.status === "complete" ? "計畫已完成" : runDetail.plan.steps.find((step) => step.id === runDetail.plan?.currentStepId)?.title || (runDetail.plan.status === "wait_user" ? "等待你的補充" : runDetail.plan.status === "wait_approval" ? "等待核准" : runDetail.plan.status === "blocked" ? "計畫受阻" : "正在更新計畫")}
                                                     {run.status === "COMPLETED" ? "" : pendingLocalActions.length > 0 ? " · 等待工具核准" : actionExecutionQueue.length > 0 ? " · 工具執行中" : run.status === "PAUSED" ? " · 已暫停" : runDetail.plan.status === "running" ? " · 等待 Observation" : ""}
@@ -1824,13 +1842,13 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                                         <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-background">
                                             <div
                                                 className="h-full rounded-full bg-primary transition-all"
-                                                style={{ width: `${Math.round((runDetail.plan.steps.filter((step) => step.status === "completed").length / runDetail.plan.steps.length) * 100)}%` }}
+                                                style={{ width: `${run.status === "COMPLETED" ? 100 : Math.round((runDetail.plan.steps.filter((step) => step.status === "completed").length / runDetail.plan.steps.length) * 100)}%` }}
                                             />
                                         </div>
                                         <p className="mt-2 text-xs leading-5 text-muted-foreground">完成條件：{runDetail.plan.completionCriteria}</p>
                                         <ol className="mt-3 space-y-2">
                                             {runDetail.plan.steps.map((step, index) => {
-                                                const displayedStatus = step.status;
+                                                const displayedStatus = run.status === "COMPLETED" && step.status !== "skipped" ? "completed" : step.status;
                                                 return (
                                                     <li key={step.id} className="flex gap-2 text-xs leading-5">
                                                         <span className={cn(

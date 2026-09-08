@@ -40,9 +40,9 @@ describe('built-in M365 Session Bridge distribution', () => {
         expect(policy.allowPermissionChange).toBe(false);
         expect(policy.allowBulkDelete).toBe(false);
         expect(policy.allowArbitraryHttp).toBe(false);
-        expect(policy.allowedHosts).toEqual([]);
-        expect(policy.allowedSites).toEqual([]);
-        expect(policy.allowedLibraries).toEqual([]);
+        expect(policy.allowedHosts).toBeUndefined();
+        expect(policy.allowedSites).toBeUndefined();
+        expect(policy.allowedLibraries).toBeUndefined();
         expect(policy.allowedLocalPaths).toEqual(['%M365_GOLEM_ROOT%']);
     });
 
@@ -51,7 +51,7 @@ describe('built-in M365 Session Bridge distribution', () => {
         expect(generator).toContain('policy.default.json');
         expect(generator).toContain('existsSync(localPolicyPath)');
         expect(generator).not.toContain('allowedHosts is empty');
-        expect(generator).toContain('non-SharePoint hostname');
+        expect(generator).toContain('non-SharePoint host pattern');
     });
 
     test('installs local state outside Git and registers only the current user', () => {

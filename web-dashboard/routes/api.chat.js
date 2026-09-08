@@ -23,6 +23,7 @@ const { stripM365RunControl } = require('../../src/services/M365RunControlParser
 const { getM365AttachmentService } = require('../../src/services/M365AttachmentService');
 const { getM365LocalFolderService } = require('../../src/services/M365LocalFolderService');
 const { isPlaceholderConversationTitle } = require('../../src/services/M365ConversationTitle');
+const { buildContextualToolRoutingQuery } = require('../../src/services/ToolRoutingContext');
 const ReferenceFileService = require('../../src/services/ReferenceFileService');
 const SkillPackageRegistry = require('../../src/managers/SkillPackageRegistry');
 const PromptShortcutManager = require('../../src/managers/PromptShortcutManager');
@@ -41,7 +42,7 @@ const {
 
 const M365_RESPONSE_MODES = Object.freeze({
     auto: 'Automatically match the depth and tool use to the request. Be concise for simple questions and deliberate for complex work.',
-    quick: 'Respond quickly and concisely. Use a tool only when it is necessary to answer correctly or the user explicitly requested an operation.',
+    quick: 'Respond quickly and concisely. Decide whether a relevant tool would materially improve correctness, freshness, verification, or completion. Read-only checks may be proactive; external changes still require authorization.',
     thoughtful: 'Think through the request carefully, check assumptions, and use the listed Golem tools when verification would materially improve the answer.',
 });
 const MAX_SELECTED_REFERENCE_FILES = 3;
@@ -629,6 +630,7 @@ module.exports = function(server) {
             let projectMemoryWriteRequired = false;
             let selectedLocalFolders = [];
             let localFolderService = null;
+            let contextualRoutingQuery = routedUserMessage;
 
             if (workspaceEnabled) {
                 if (!conversationId) {
@@ -746,6 +748,12 @@ module.exports = function(server) {
                         stepId: stepId || null,
                         deliveryState: 'local',
                     });
+                    const recentMessages = await workspaceStore.listMessages(conversationId, { limit: 8 });
+                    contextualRoutingQuery = buildContextualToolRoutingQuery(
+                        routedUserMessage,
+                        recentMessages,
+                        { currentMessageId: workspaceUserMessage.id }
+                    );
                 }
                 if (shortcutExpansion.changed && shortcutExpansion.matched) {
                     recordM365PromptPoolUse({
@@ -799,8 +807,8 @@ module.exports = function(server) {
                 workspaceMaxActionDepth: trustedMaxActionDepth,
                 workspaceAutoTurnBudget: trustedAutoTurnBudget,
                 toolRoutingQuery: selectedLocalFolders.length > 0
-                    ? `${routedUserMessage}\nInspect the explicitly selected local folder on demand with a bounded local command.`
-                    : routedUserMessage,
+                    ? `${contextualRoutingQuery}\nInspect the explicitly selected local folder on demand with a bounded local command.`
+                    : contextualRoutingQuery,
                 preferredMcpServers: composerContext ? composerContext.selectedMcpServers.map((item) => item.name) : [],
                 preferredSkillIds: composerContext ? composerContext.selectedSkills.map((item) => item.id) : [],
                 preferredSkillActions: composerContext ? composerContext.selectedSkills.map((item) => item.action).filter(Boolean) : [],

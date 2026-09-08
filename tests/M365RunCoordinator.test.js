@@ -1129,6 +1129,55 @@ describe('M365 durable run coordinator', () => {
         expect(await store.listRunSteps(first.runId)).toHaveLength(1);
     });
 
+    test('host completes an evidence-backed plan when Copilot incorrectly asks the user to continue', async () => {
+        const firstPlan = {
+            schemaVersion: 'golem_plan/1', planId: null, revision: 1,
+            goal: '列出指定 SharePoint 資料夾第一層內容',
+            completionCriteria: '取得實際 SharePoint 資料夾內容',
+            status: 'running', currentStepId: 'step_1',
+            steps: [{ id: 'step_1', title: '讀取資料夾', status: 'in_progress', doneWhen: 'Host Observation 回傳清單' }],
+            question: '', approvalRequest: '', completionSummary: '',
+        };
+        const accepted = await coordinator.handleAutonomousPlan({
+            conversationId: conversation.id,
+            requestId: 'sharepoint-plan-1',
+            plan: firstPlan,
+            actions: [{ action: 'mcp_call', server: 'm365-session-bridge', tool: 'm365_list_folder', parameters: {} }],
+            actionCount: 1,
+        });
+        await coordinator.recordAutonomousObservation({
+            runId: accepted.runId,
+            stepId: accepted.stepId,
+            actionId: accepted.actionId,
+            planStepId: 'step_1',
+            lane: 'mcp',
+            status: 'succeeded',
+            result: '11 files and 2 folders',
+        });
+
+        const closed = await coordinator.handleAutonomousPlan({
+            conversationId: conversation.id,
+            existingRunId: accepted.runId,
+            requestId: 'sharepoint-plan-2',
+            plan: {
+                ...firstPlan,
+                planId: accepted.runId,
+                revision: 2,
+                status: 'wait_user',
+                currentStepId: null,
+                steps: firstPlan.steps.map((step) => ({ ...step, status: 'completed' })),
+                question: '請按繼續以恢復已暫停的流程。',
+            },
+            actions: [],
+            actionCount: 0,
+            isSystemFeedback: true,
+        });
+
+        expect(closed).toEqual(expect.objectContaining({ accepted: true, allowActions: false }));
+        expect((await store.getRun(accepted.runId)).status).toBe('COMPLETED');
+        expect((await store.listRunEvents(accepted.runId)).some((event) => event.eventType === 'autonomous_plan_host_completed')).toBe(true);
+    });
+
     test('pauses an active autonomous run when the next plan revision cannot be parsed', async () => {
         const firstPlan = {
             schemaVersion: 'golem_plan/1', planId: null, revision: 1,

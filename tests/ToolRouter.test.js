@@ -168,8 +168,8 @@ describe('ToolRouter', () => {
         const hint = router.buildRoutingHint('你試看看查看我啟動 Golem 的根目錄');
         expect(hint).toContain('Relevant command lane');
         expect(hint).toContain('{"action":"command","parameter":"echo %CD%"}');
-        expect(hint).toContain('Emit the smallest read-only command action now');
-        expect(hint).toContain('do not merely say that you could propose it');
+        expect(hint).toContain('emit the smallest bounded read-only command action now');
+        expect(hint).toContain('local approval gate');
     });
 
     test('routes an autonomous interactive webpage build to the local artifact command lane', () => {
@@ -317,14 +317,17 @@ describe('ToolRouter', () => {
         expect(result.mcpTools.filter((tool) => tool.server === 'chrome-devtools').every((tool) => tool.preferred)).toBe(true);
     });
 
-    test('does not recommend tools for conceptual explanation requests', () => {
+    test('may recommend relevant read-only evidence for a conceptual explanation', () => {
         const router = new ToolRouter({
             activeScene: 'coding',
             activeTools: ['chrome-devtools', 'log-reader']
         });
 
         const hint = router.buildRoutingHint('請解釋 Chrome DevTools 是什麼，以及 console error 的概念');
-        expect(hint).toBe('');
+        expect(hint).toContain('Relevant skills');
+        expect(hint).toContain('log-reader');
+        expect(hint).toContain('list_console_messages');
+        expect(hint).not.toContain('tool="click"');
     });
 
     test('marks destructive or sending tools as confirm-first', () => {
@@ -372,7 +375,36 @@ describe('ToolRouter', () => {
         expect(result.skills).toEqual([]);
         expect(hint).toContain('mcp_call server="m365-session-bridge" tool="m365_list_folder"');
         expect(hint).toContain('"folderUrl"');
+        expect(hint).toContain('Put every tool argument inside "parameters"');
+        expect(hint).toContain('folderUrl: string; required');
+        expect(hint).toContain('wait for the host Observation');
         expect(hint).not.toContain('m365_checkin_file');
+    });
+
+    test('honors an explicit Bridge follow-up and carries the exact prior URL into the action', () => {
+        const router = new ToolRouter({
+            activeScene: 'assistant',
+            activeTools: [],
+            mcpServers: [makeM365BridgeServer()],
+        });
+        const query = [
+            '[Previous user context for tool routing only]',
+            '這是 SharePoint 資料夾：https://contoso.sharepoint.com/sites/Example/Shared%20Documents。這一輪只確認收到，不要操作。',
+            '[Current request]',
+            '那用 M365 Bridge 測試看看，能不能列出這個資料夾？',
+        ].join('\n');
+
+        const result = router.route(query);
+        const hint = router.buildRoutingHint(query);
+
+        expect(result.explicitM365BridgeRequest).toBe(true);
+        expect(result.exactM365Url).toBe('https://contoso.sharepoint.com/sites/Example/Shared%20Documents');
+        expect(result.mcpTools.map((tool) => tool.name)).toEqual(['m365_list_folder']);
+        expect(result.mcpTools[0].example.parameters.folderUrl).toBe(result.exactM365Url);
+        expect(hint).toContain('explicitly selected M365 Bridge');
+        expect(hint).toContain('do not substitute native Microsoft 365 grounding');
+        expect(hint).toContain(`"folderUrl": "${result.exactM365Url}"`);
+        expect(hint).toContain('Use it in the listed action now');
     });
 
     test('routes native-M365-to-bridge folder retrieval as an executable multi-stage handoff', () => {

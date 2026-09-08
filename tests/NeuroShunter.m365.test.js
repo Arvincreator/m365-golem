@@ -457,7 +457,7 @@ describe('NeuroShunter M365 safety gates', () => {
         expect(userProfile.applyM365MemoryBlock).toHaveBeenCalledTimes(1);
         expect(brain.memorize).not.toHaveBeenCalled();
         expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('我已保留跨對話仍需沿用的規則。'));
-        expect(ctx.reply).toHaveBeenCalledWith(expect.stringContaining('已更新此專案的狀態紀錄（1 則）'));
+        expect(ctx.reply).not.toHaveBeenCalledWith(expect.stringContaining('已更新此專案的狀態紀錄'));
     });
 
     test('repairs an explicit project-memory turn when Copilot only promises to remember it', async () => {

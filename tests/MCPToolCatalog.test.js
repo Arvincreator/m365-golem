@@ -46,4 +46,29 @@ describe('MCPToolCatalog', () => {
         expect(catalog.tools[0].id).toBe('demo/search');
         expect(catalog.tools[0].example.parameters.query).toBe('search query');
     });
+
+    test('builds a usable nested example for structured MCP parameters', () => {
+        const example = MCPToolCatalog.buildActionExample('documents', 'create_word', {
+            type: 'object',
+            required: ['outputPath', 'blocks'],
+            properties: {
+                outputPath: { type: 'string' },
+                blocks: {
+                    type: 'array',
+                    items: {
+                        anyOf: [{
+                            type: 'object',
+                            required: ['type', 'text'],
+                            properties: {
+                                type: { type: 'string', const: 'title' },
+                                text: { type: 'string' },
+                            },
+                        }],
+                    },
+                },
+            },
+        });
+
+        expect(example.parameters.blocks).toEqual([{ type: 'title', text: 'Text content' }]);
+    });
 });

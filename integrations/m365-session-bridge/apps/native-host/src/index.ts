@@ -147,6 +147,23 @@ async function handleRequest(req: PipeRequest): Promise<PipeResponse> {
         return okResponse(req.id, { extensionOnline: true, ...(reply.payload ?? {}) });
       }
 
+      case "resolveSharingUrl": {
+        const sharingUrl = req.payload.sharingUrl;
+        if (typeof sharingUrl !== "string") {
+          return errResponse(req.id, ErrorCode.INVALID_INPUT, "sharingUrl is required");
+        }
+        const reply = await link.request("resolve-sharing-url", { sharingUrl }, undefined, 45_000);
+        if (reply.type === "error") {
+          const { code, message } = errorFromReply(reply, ErrorCode.INVALID_INPUT, "Unable to resolve SharePoint sharing URL");
+          return errResponse(req.id, code, message);
+        }
+        const resolvedUrl = reply.payload?.resolvedUrl;
+        if (typeof resolvedUrl !== "string") {
+          return errResponse(req.id, ErrorCode.INVALID_INPUT, "SharePoint sharing URL did not resolve to a usable URL");
+        }
+        return okResponse(req.id, { resolvedUrl });
+      }
+
       case "download": {
         const payload = req.payload as { siteUrl: string; serverRelativeUrl: string; destinationPath: string };
         if (!looksLikeSafeAbsolutePath(payload.destinationPath)) {

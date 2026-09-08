@@ -113,6 +113,14 @@ export function normalizeServerRelativePath(url: URL): string {
     throw new BridgeError(ErrorCode.INVALID_INPUT, "SharePoint/OneDrive URL contains invalid percent-encoding");
   }
 
+  // Opaque SharePoint sharing routes contain a token, not the target's
+  // server-relative path. Treating that token as a folder path can produce a
+  // misleading successful empty result. Callers must resolve it through the
+  // authenticated Edge session before policy/path validation.
+  if (/^\/:[^/]+:\/(?:s|g)\//i.test(decodedPath)) {
+    throw new BridgeError(ErrorCode.INVALID_INPUT, "Opaque SharePoint sharing URL must be resolved before use");
+  }
+
   // Common SharePoint sharing links look like `/:x:/r/sites/...`. The `/r`
   // suffix is a sharing-route marker, not part of the server-relative file
   // path used by the REST endpoint.
@@ -186,17 +194,6 @@ function siteUrlFor(url: URL, serverRelativeUrl: string): string {
   return new URL(sitePath, url.origin).toString().replace(/\/$/, "");
 }
 
-export function assertAllowedLibrary(serverRelativeUrl: string, matchedSite: string, policy: Policy): void {
-  if (policy.allowedLibraries.length === 0) return;
-  const normalizedSite = normalizePolicySitePath(matchedSite);
-  const remainder = serverRelativeUrl.slice(normalizedSite.length).replace(/^\/+/, "");
-  const firstSegment = remainder.split("/")[0] ?? "";
-  const libraryAllowed = policy.allowedLibraries.some((lib) => lib.toLowerCase() === firstSegment.toLowerCase());
-  if (!libraryAllowed) {
-    throw new BridgeError(ErrorCode.SITE_NOT_ALLOWED, `Document library not in allowedLibraries: ${firstSegment}`);
-  }
-}
-
 function readHostPatterns(policy: Policy): string[] {
   return policy.readHostPatterns?.length ? policy.readHostPatterns : [...DEFAULT_READ_HOST_PATTERNS];
 }
@@ -204,10 +201,10 @@ function readHostPatterns(policy: Policy): string[] {
 /**
  * Validates a SharePoint/OneDrive URL for read-only operations.
  *
- * This intentionally does not consult allowedSites or allowedLibraries. The
- * actual authorization is still the existing signed-in Edge session and the
- * SharePoint REST response; the browser host scope is limited to Microsoft's
- * SharePoint Online host families above.
+ * The actual authorization is the existing signed-in Edge session and the
+ * SharePoint REST response. The local policy only limits the browser surface
+ * to Microsoft's SharePoint Online host families and applies deny-first
+ * host/site exclusions.
  */
 export function validateReadableHostAndSite(urlStr: string, policy: Policy): ValidatedSharePointUrl {
   const url = parseHttpsUrl(urlStr);
@@ -227,11 +224,7 @@ export function validateReadableHostAndSite(urlStr: string, policy: Policy): Val
   return { siteUrl: siteUrlFor(url, serverRelativeUrl), serverRelativeUrl };
 }
 
-/**
- * Computes the same target shape used by the relay after a human approves an
- * otherwise-unlisted SharePoint Online target. The caller is responsible for
- * checking the deny lists and supported-host boundary before using this.
- */
+/** Computes the relay target shape for a supported SharePoint Online URL. */
 export function computeApprovedTarget(urlStr: string): ValidatedSharePointUrl {
   const url = parseHttpsUrl(urlStr);
   if (!isSharePointOnlineHost(url.hostname)) {
@@ -245,38 +238,7 @@ export function validateHostAndSite(
   urlStr: string,
   policy: Policy
 ): ValidatedSharePointUrl {
-  const url = parseHttpsUrl(urlStr);
-  const decodedPath = normalizeServerRelativePath(url);
-
-  if (isTargetDenied(url.hostname, decodedPath, policy)) {
-    throw new BridgeError(ErrorCode.FORBIDDEN_BY_POLICY, `Target is denied by policy: ${url.hostname}${decodedPath}`);
-  }
-
-  const hostnameLower = normalizedHost(url.hostname);
-  const hostAllowed = policy.allowedHosts.some((h) => h.toLowerCase() === hostnameLower);
-  if (!hostAllowed) {
-    throw new BridgeError(ErrorCode.HOST_NOT_ALLOWED, `Host not in allowedHosts: ${url.hostname}`);
-  }
-
-  let matchedSite: string | null = null;
-  for (const site of policy.allowedSites) {
-    if (sitePathMatches(decodedPath, site)) {
-      matchedSite = site;
-      break;
-    }
-  }
-  if (!matchedSite) {
-    throw new BridgeError(
-      ErrorCode.SITE_NOT_ALLOWED,
-      policy.allowedSites.length === 0
-        ? "allowedSites is empty — no SharePoint site is authorized for any operation yet"
-        : `URL path is not under any allowedSites entry: ${decodedPath}`
-    );
-  }
-
-  assertAllowedLibrary(decodedPath, matchedSite, policy);
-
-  return { siteUrl: `${url.origin}${matchedSite}`, serverRelativeUrl: decodedPath };
+  return validateReadableHostAndSite(urlStr, policy);
 }
 
 export function checkWriteEnabled(policy: Policy): void {

@@ -117,7 +117,7 @@ PLAYWRIGHT_M365_BLOCK_HEAVY_RESOURCES=false
 
 - GitHub 只保存 `integrations/m365-session-bridge` 的可重建原始碼、鎖版依賴、manifest template 與 deny-first policy template。
 - 安裝時才在 `%LOCALAPPDATA%\M365-Golem\m365-session-bridge` 產生政策、IPC 秘密與稽核紀錄；`data/mcp-servers.json` 與 Native Messaging 實機 manifest 也只存在本機。
-- 初始 policy 允許非破壞性寫入工具，但不內建任何租戶、站台或文件庫白名單。支援但未列入的精確 SharePoint／OneDrive 目標會顯示原生核准視窗；覆寫、回收、永久刪除、外部分享與權限變更預設關閉，拒絕、逾時、401 或 403 都不得繞過。
+- Bridge 不再維護租戶、站台或文件庫白名單。支援的精確 SharePoint／OneDrive 目標預設可嘗試存取，實際範圍由 Edge 登入帳號與 Microsoft 365 權限決定；使用者可加入網域或站台路徑黑名單。非破壞性寫入仍受 `writeEnabled` 控制，覆寫、回收、永久刪除、外部分享與權限變更維持獨立安全開關，黑名單、401 或 403 都不得繞過。
 - Edge 擴充功能不能靜默安裝，必須由使用者在 `edge://extensions` 親自載入。這個人工步驟與 Microsoft 登入／MFA 都不是自動測試通過就能取代的正式驗收。
 
 ## 外部範例的採用邊界

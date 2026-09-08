@@ -9,7 +9,7 @@ import {
 } from "@m365-bridge/protocol";
 import { isSharePointOnlineHost } from "@m365-bridge/policy";
 
-export type EditablePolicyList = "allowedHosts" | "allowedSites" | "deniedHosts" | "deniedSites" | "allowedLocalPaths";
+export type EditablePolicyList = "deniedHosts" | "deniedSites" | "allowedLocalPaths";
 export type PolicyListAction = "add" | "remove";
 
 function readRawPolicy(): Policy {
@@ -121,19 +121,6 @@ function updatePolicyList(list: EditablePolicyList, action: PolicyListAction, ra
   }
 
   return writePolicy({ ...policy, [list]: entries });
-}
-
-export function persistApprovedTarget(hostname: string, sitePath: string): Policy {
-  const host = normalizeHostEntry(hostname);
-  const site = normalizeSiteEntry(sitePath);
-  const policy = readRawPolicy();
-  const allowedHosts = [...policy.allowedHosts];
-  const allowedSites = [...policy.allowedSites];
-
-  if (!allowedHosts.some((entry) => sameEntry("allowedHosts", entry, host))) allowedHosts.push(host);
-  if (!allowedSites.some((entry) => sitePrefixMatches(entry, site))) allowedSites.push(site);
-
-  return writePolicy({ ...policy, allowedHosts, allowedSites });
 }
 
 export function addPolicyEntry(list: EditablePolicyList, value: string): Policy {

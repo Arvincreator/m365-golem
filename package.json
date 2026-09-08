@@ -1,6 +1,6 @@
 {
   "name": "m365-golem",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Local Microsoft 365 Copilot Web harness with projects, tools, approvals, memory, and a built-in SharePoint/OneDrive session bridge",
   "main": "index.js",
   "scripts": {
@@ -13,7 +13,7 @@
     "// --- 核心啟動 ---": "",
     "start": "node --expose-gc apps/runtime/index.js",
     "dashboard": "node --expose-gc apps/runtime/index.js dashboard",
-    "dev": "nodemon --expose-gc apps/runtime/index.js dashboard",
+    "dev": "nodemon --ignore profiles/** --ignore data/** --ignore .tmp/** --ignore output/** --ignore web-dashboard/.next/** --expose-gc apps/runtime/index.js dashboard",
     "doctor": "node scripts/doctor.js",
     "doctor:runtime": "node scripts/runtime-check.js doctor",
     "repair:runtime": "node scripts/runtime-check.js repair",

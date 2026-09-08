@@ -22,6 +22,11 @@ const REPEATED_PERMISSION_RE = /(?:(?:是否|要不要|可不可以|同意|允�
 const EXECUTION_PROGRESS_SUFFIX = '，正在執行並確認中…';
 const UNSAFE_PROGRESS_RE = /(?:https?:\/\/|[a-z]:\\|GOLEM_|Observation|harness|tool-routing|MCP|Skill|PowerShell|cmd(?:\.exe)?|python(?:\.exe)?|node(?:\.exe)?|已完成|成功|失敗|無法)/i;
 
+function requiresLocalWorkspaceListing(text) {
+    const value = String(text || '');
+    return LOCAL_LIST_RE.test(value) && LOCAL_TARGET_RE.test(value);
+}
+
 function cleanProgressLabel(value) {
     const rawLabel = String(value || '');
     const cleanLabel = rawLabel
@@ -84,9 +89,18 @@ function buildExecutionProgressText(action, fallback = '執行目前操作並確
 
 function classifyExecutionExpectation(query, route, reply = '') {
     const request = new ToolUsePolicy().classifyRequest(query);
-    if (!request.explicitAction || request.passive) return { required: false, reason: 'not_explicit_execution' };
     const local = route?.commandLane?.recommended === true;
-    const routedTool = (route?.skills?.length || 0) + (route?.mcpTools?.length || 0) > 0;
+    const routedTools = [...(route?.skills || []), ...(route?.mcpTools || [])];
+    const routedTool = routedTools.length > 0;
+    const hasReadOnlyRoute = routedTools.some((tool) => tool?.policy?.risk === 'read');
+
+    // Explicit tests and capability checks must produce evidence when a safe
+    // read-only route was selected. General explanation/advice may still use
+    // tools autonomously, but remains optional rather than contract-enforced.
+    if ((request.verificationIntent || request.capabilityProbe) && hasReadOnlyRoute) {
+        return { required: true, reason: 'read_only_verification', local: false };
+    }
+    if (!request.explicitAction || request.passive) return { required: false, reason: 'optional_or_non_execution' };
     if (local) return { required: true, reason: route.commandLane.reason || 'local_execution', local: true };
     // Route metadata is advisory. Explicit local work must remain actionable
     // even if a concurrent catalog refresh replaced the active router.
@@ -105,7 +119,7 @@ function inferVerification(query, route) {
     if (artifact) {
         return `A host Observation and an independent workspace check prove that a newly created ${artifact.extension} file exists inside the assigned project workspace and has a valid real file format and requested content.`;
     }
-    if (LOCAL_LIST_RE.test(text)) {
+    if (requiresLocalWorkspaceListing(text)) {
         return 'A host Observation from a local directory-listing operation contains the actual workspace entries, or explicitly proves that the directory is empty.';
     }
     return route?.commandLane?.recommended
@@ -289,7 +303,7 @@ function validatePlanCompletion({ plan, run, events = [], workspaceRoot = '' }) 
 
     const objectiveText = String(run.objective || '');
     const goalText = `${objectiveText} ${plan.goal || ''} ${plan.completionCriteria || ''}`;
-    if (LOCAL_LIST_RE.test(goalText)) {
+    if (requiresLocalWorkspaceListing(goalText)) {
         const successfulIds = new Set(observations.map((event) => event.payload?.actionId));
         const hasLocalListing = planned.some((event) => successfulIds.has(event.payload?.actionId)
             && event.payload?.actionDescriptor?.kind === 'command'

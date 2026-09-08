@@ -10,8 +10,9 @@ const {
 
 describe('M365 Bridge dashboard control proxy', () => {
     test('accepts only the fixed editable policy surface', () => {
-        expect(sanitizeEntryPayload({ list: 'allowedHosts', value: 'tenant.sharepoint.com' }))
-            .toEqual({ list: 'allowedHosts', value: 'tenant.sharepoint.com' });
+        expect(sanitizeEntryPayload({ list: 'deniedHosts', value: 'blocked.sharepoint.com' }))
+            .toEqual({ list: 'deniedHosts', value: 'blocked.sharepoint.com' });
+        expect(() => sanitizeEntryPayload({ list: 'allowedHosts', value: 'tenant.sharepoint.com' })).toThrow('Invalid Bridge policy list');
         expect(() => sanitizeEntryPayload({ list: 'allowPermanentDelete', value: 'true' })).toThrow('Invalid Bridge policy list');
         expect(sanitizeSettingsPayload({ writeEnabled: true, allowOverwrite: false }))
             .toEqual({ writeEnabled: true, allowOverwrite: false });

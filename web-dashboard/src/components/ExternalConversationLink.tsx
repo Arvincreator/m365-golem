@@ -10,6 +10,7 @@ export const externalConversationLinkComponents: Components = {
         return (
             <a
                 {...props}
+                className={["break-all [overflow-wrap:anywhere]", props.className].filter(Boolean).join(" ")}
                 href={href}
                 target={external ? "_blank" : props.target}
                 rel={external ? "noopener noreferrer" : props.rel}

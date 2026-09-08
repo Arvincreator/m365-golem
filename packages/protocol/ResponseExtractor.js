@@ -101,6 +101,62 @@ class ResponseExtractor {
      */
     static async inspectExistingResponse(page, selector, startTag, endTag, options = {}) {
         const result = await page.evaluate(({ sel, sTag, eTag, responseContainers, stopSelectors, allowUnwrapped, baselineText }) => {
+            const readStructuredText = (container) => {
+                let output = String(container?.innerText || container?.textContent || '');
+                let cursor = 0;
+                let structuralNodes = [];
+                try {
+                    structuralNodes = Array.from(container.querySelectorAll('h1, h2, h3, h4, h5, h6, strong, b, li'));
+                } catch (_) { }
+
+                for (const node of structuralNodes) {
+                    const nodeText = String(node?.innerText || node?.textContent || '').trim();
+                    if (!nodeText) continue;
+                    const index = output.indexOf(nodeText, cursor);
+                    if (index < 0) continue;
+
+                    const tag = String(node.tagName || '').toLowerCase();
+                    let marker = '';
+                    let closingMarker = '';
+                    if (/^h[1-6]$/.test(tag)) {
+                        marker = `${'#'.repeat(Number(tag.slice(1)))} `;
+                    } else if (tag === 'strong' || tag === 'b') {
+                        marker = '**';
+                        closingMarker = '**';
+                    } else if (tag === 'li') {
+                        const parent = node.parentElement;
+                        if (String(parent?.tagName || '').toLowerCase() === 'ol') {
+                            const siblings = Array.from(parent?.children || []).filter((child) => String(child?.tagName || '').toLowerCase() === 'li');
+                            const start = Number(parent?.getAttribute?.('start')) || 1;
+                            marker = `${start + Math.max(0, siblings.indexOf(node))}. `;
+                        } else {
+                            marker = '- ';
+                        }
+                        const before = output.slice(0, index);
+                        if (siblingsFirst(parent, node) && before.endsWith('\n') && !before.endsWith('\n\n')) marker = `\n${marker}`;
+                    }
+
+                    const precedingLine = output.slice(Math.max(0, index - 16), index);
+                    const alreadyMarked = tag === 'li'
+                        ? /(?:^|\n)\s*(?:[-*+]\s+|\d+[.)]\s+)$/.test(precedingLine)
+                        : (tag === 'strong' || tag === 'b')
+                            ? /\*\*$/.test(precedingLine)
+                            : /(?:^|\n)#{1,6}\s+$/.test(precedingLine);
+                    if (marker && !alreadyMarked) {
+                        output = `${output.slice(0, index)}${marker}${nodeText}${closingMarker}${output.slice(index + nodeText.length)}`;
+                        cursor = index + marker.length + nodeText.length + closingMarker.length;
+                    } else {
+                        cursor = index + nodeText.length;
+                    }
+                }
+                return output;
+
+                function siblingsFirst(parent, node) {
+                    if (!parent) return true;
+                    const items = Array.from(parent.children || []).filter((child) => String(child?.tagName || '').toLowerCase() === 'li');
+                    return items[0] === node;
+                }
+            };
             const visible = (node) => {
                 if (!node || !(node instanceof HTMLElement)) return false;
                 const style = window.getComputedStyle(node);
@@ -190,7 +246,7 @@ class ResponseExtractor {
             };
             for (let index = containers.length - 1; index >= 0; index -= 1) {
                 const container = containers[index];
-                const rawText = String(container.innerText || container.textContent || '');
+                const rawText = readStructuredText(container);
                 const startIndex = rawText.indexOf(sTag);
                 const endIndex = rawText.indexOf(eTag, startIndex + sTag.length);
                 if (startIndex >= 0 && endIndex > startIndex) {
@@ -266,6 +322,62 @@ class ResponseExtractor {
         const result = await page.evaluate(
             async ({ sel, sTag, eTag, oldText, _stableComplete, _stableThinking, _stableFallback, _pollInterval, _timeout, _responseContainers, _diagnosticSelectors, _stopSelectors, _extractAttachments, _extractSourceLinks }) => {
                 return new Promise((resolve) => {
+                    const readStructuredText = (container) => {
+                        let output = String(container?.innerText || container?.textContent || '');
+                        let cursor = 0;
+                        let structuralNodes = [];
+                        try {
+                            structuralNodes = Array.from(container.querySelectorAll('h1, h2, h3, h4, h5, h6, strong, b, li'));
+                        } catch (_) { }
+
+                        for (const node of structuralNodes) {
+                            const nodeText = String(node?.innerText || node?.textContent || '').trim();
+                            if (!nodeText) continue;
+                            const index = output.indexOf(nodeText, cursor);
+                            if (index < 0) continue;
+
+                            const tag = String(node.tagName || '').toLowerCase();
+                            let marker = '';
+                            let closingMarker = '';
+                            if (/^h[1-6]$/.test(tag)) {
+                                marker = `${'#'.repeat(Number(tag.slice(1)))} `;
+                            } else if (tag === 'strong' || tag === 'b') {
+                                marker = '**';
+                                closingMarker = '**';
+                            } else if (tag === 'li') {
+                                const parent = node.parentElement;
+                                if (String(parent?.tagName || '').toLowerCase() === 'ol') {
+                                    const siblings = Array.from(parent?.children || []).filter((child) => String(child?.tagName || '').toLowerCase() === 'li');
+                                    const start = Number(parent?.getAttribute?.('start')) || 1;
+                                    marker = `${start + Math.max(0, siblings.indexOf(node))}. `;
+                                } else {
+                                    marker = '- ';
+                                }
+                                const before = output.slice(0, index);
+                                if (siblingsFirst(parent, node) && before.endsWith('\n') && !before.endsWith('\n\n')) marker = `\n${marker}`;
+                            }
+
+                            const precedingLine = output.slice(Math.max(0, index - 16), index);
+                            const alreadyMarked = tag === 'li'
+                                ? /(?:^|\n)\s*(?:[-*+]\s+|\d+[.)]\s+)$/.test(precedingLine)
+                                : (tag === 'strong' || tag === 'b')
+                                    ? /\*\*$/.test(precedingLine)
+                                    : /(?:^|\n)#{1,6}\s+$/.test(precedingLine);
+                            if (marker && !alreadyMarked) {
+                                output = `${output.slice(0, index)}${marker}${nodeText}${closingMarker}${output.slice(index + nodeText.length)}`;
+                                cursor = index + marker.length + nodeText.length + closingMarker.length;
+                            } else {
+                                cursor = index + nodeText.length;
+                            }
+                        }
+                        return output;
+
+                        function siblingsFirst(parent, node) {
+                            if (!parent) return true;
+                            const items = Array.from(parent.children || []).filter((child) => String(child?.tagName || '').toLowerCase() === 'li');
+                            return items[0] === node;
+                        }
+                    };
                     const startTime = Date.now();
                     let beganAt = 0;
                     let stableCount = 0;
@@ -364,7 +476,7 @@ class ResponseExtractor {
                             container = currentLastBubble;
                         }
 
-                        const rawText = container.innerText || "";
+                        const rawText = readStructuredText(container);
                         const matchedSelector = (_responseContainers || []).find((candidate) => {
                             try {
                                 return currentLastBubble.matches(candidate) || Boolean(currentLastBubble.closest(candidate));

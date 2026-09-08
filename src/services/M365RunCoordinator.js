@@ -1182,6 +1182,36 @@ class M365RunCoordinator {
                 });
             }
 
+            // Copilot occasionally reports every evidence-backed step as
+            // completed but leaves the plan in wait_user/blocked and asks the
+            // user to press Continue. The host already has the authoritative
+            // evidence in that case, so close the run instead of spending more
+            // turns repairing a purely contradictory status field.
+            const allPlanStepsFinished = plan.steps.every((step) => ['completed', 'skipped'].includes(step.status));
+            if (plan.status !== 'complete' && allPlanStepsFinished) {
+                const hostCompletedPlan = {
+                    ...plan,
+                    status: 'complete',
+                    currentStepId: null,
+                    question: '',
+                    approvalRequest: '',
+                    completionSummary: plan.completionSummary || `已完成：${plan.goal}`,
+                };
+                const hostCompletion = validatePlanCompletion({
+                    plan: hostCompletedPlan,
+                    run,
+                    events: evidenceEvents,
+                    workspaceRoot,
+                });
+                if (hostCompletion.ok) {
+                    await this.store.appendRunEvent(run.id, 'autonomous_plan_host_completed', {
+                        revision: plan.revision,
+                        reason: 'ALL_EVIDENCE_BACKED_STEPS_FINISHED',
+                    });
+                    plan = hostCompletedPlan;
+                }
+            }
+
             const remainingInSameWaitState = (run.status === 'WAITING_USER' && plan.status === 'wait_user')
                 || (run.status === 'BLOCKED' && plan.status === 'blocked');
             if (['WAITING_USER', 'BLOCKED'].includes(run.status) && !remainingInSameWaitState) {

@@ -1129,7 +1129,11 @@ class GolemBrain {
         // that was not used by the stage that just completed. Re-run routing
         // against the original user goal so a native M365 checkpoint can hand
         // off to an exact local/MCP action on the next turn.
-        if ((options.isSystemFeedback === true && options.planMode !== true) || options.allowActions === false) return text;
+        // allowActions controls whether a follow-up generated from a host
+        // Observation may continue automatically. A normal user turn carries
+        // allowActions=false as its initial depth state, but it still needs
+        // routing metadata so it can propose its first bounded action.
+        if (options.isSystemFeedback === true && options.planMode !== true) return text;
         if (!text || typeof text !== 'string') return text;
         if (text.startsWith('<tool-routing>')) return text;
         if (/^\s*(<memory-context>|【系統補充|【系統技能庫初始化】|\[System Observation\])/i.test(text)) return text;

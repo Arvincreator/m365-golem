@@ -678,10 +678,6 @@ class NeuroShunter {
             // has already started.
             parsed.reply = '';
         }
-        if (projectMemoryUpdateCount > 0 && !useM365ActionProgressReply && !needsM365Approval) {
-            parsed.reply = `${parsed.reply || ''}\n\n✓ 已更新此專案的狀態紀錄（${projectMemoryUpdateCount} 則）`.trim();
-        }
-
         // 1. 處理直接回覆 (讓 AI 的解說文字在行動之前出現)
         if (parsed.reply && !shouldSuppressReply) {
             let finalReply = parsed.reply;
@@ -850,6 +846,16 @@ class NeuroShunter {
                 ...(Array.isArray(options.preferredSkillIds) ? options.preferredSkillIds : []),
                 ...(Array.isArray(options.preferredSkillActions) ? options.preferredSkillActions : []),
             ];
+            // One plan step may contain several ordered MCP/Skill actions. Keep
+            // their individual results local until every action finishes, then
+            // send one combined host Observation back to Copilot. This avoids
+            // consuming one auto turn per action and prevents later results
+            // from overwriting or obscuring earlier results from the same step.
+            const observationCollector = options.planMode === true
+                && parsed.actions.length > 1
+                && parsed.actions.every((action) => !['command', 'sys-admin'].includes(String(action?.action || '').toLowerCase().replace(/_/g, '-')))
+                ? { entries: [] }
+                : null;
 
             for (const originalAct of parsed.actions) {
                 let act = originalAct;
@@ -897,6 +903,7 @@ class NeuroShunter {
                             workspacePlanRevision: Number(options.workspacePlanRevision || 0),
                             workspacePlanStepId: options.workspacePlanStepId || null,
                             workspaceActionId: options.workspaceActionId || null,
+                            observationCollector,
                         });
                         if (!isSkillHandled) {
                             rejectedActions.push({
@@ -1048,6 +1055,10 @@ class NeuroShunter {
                         );
                     }
                 }
+            }
+
+            if (observationCollector?.entries.length > 0) {
+                await SkillHandler.flushObservationCollector(ctx, brain, controller, options, observationCollector);
             }
 
             // 處理剩餘的終端指令序列並自動啟動回饋循環 (Feedback Loop)

@@ -251,6 +251,64 @@ describe('ResponseExtractor bounded M365 waits', () => {
         ]);
     });
 
+    test('restores headings and list markers omitted by M365 innerText', async () => {
+        const selector = '[role="article"].fai-CopilotMessage';
+        const orderedParent = {
+            tagName: 'OL',
+            children: [],
+            getAttribute: jest.fn(() => null),
+        };
+        const unorderedParent = {
+            tagName: 'UL',
+            children: [],
+            getAttribute: jest.fn(() => null),
+        };
+        const heading = { tagName: 'H3', innerText: '檔案（2 個）', textContent: '檔案（2 個）' };
+        const fileOne = { tagName: 'LI', innerText: 'one.docx', textContent: 'one.docx', parentElement: orderedParent };
+        const fileTwo = { tagName: 'LI', innerText: 'two.xlsx', textContent: 'two.xlsx', parentElement: orderedParent };
+        const folder = { tagName: 'LI', innerText: '測試資料夾', textContent: '測試資料夾', parentElement: unorderedParent };
+        const summaryLabel = { tagName: 'STRONG', innerText: '摘要', textContent: '摘要' };
+        orderedParent.children = [fileOne, fileTwo];
+        unorderedParent.children = [folder];
+        const candidate = {
+            tagName: 'DIV',
+            innerText: '[[BEGIN:test]]\n[GOLEM_REPLY]\n檔案（2 個）\none.docx\ntwo.xlsx\n子資料夾\n測試資料夾\n摘要\n[/GOLEM_REPLY]\n[[END:test]]',
+            textContent: '',
+            isContentEditable: false,
+            parentElement: null,
+            getAttribute: jest.fn(() => ''),
+            matches: jest.fn((value) => value === selector),
+            closest: jest.fn((value) => value === selector ? candidate : null),
+            querySelectorAll: jest.fn((value) => value === 'h1, h2, h3, h4, h5, h6, strong, b, li'
+                ? [heading, fileOne, fileTwo, folder, summaryLabel]
+                : []),
+        };
+        global.document = {
+            querySelectorAll: jest.fn((value) => value === selector ? [candidate] : []),
+        };
+        const page = { evaluate: jest.fn((callback, args) => callback(args)) };
+
+        const result = await ResponseExtractor.waitForResponse(
+            page,
+            selector,
+            '[[BEGIN:test]]',
+            '[[END:test]]',
+            '',
+            {
+                timeoutMs: 1000,
+                responseContainerSelectors: [selector],
+                stopSelectors: ['.never-busy'],
+                extractAttachments: false,
+            }
+        );
+
+        expect(result.status).toBe('ENVELOPE_COMPLETE');
+        expect(result.text).toContain('### 檔案（2 個）');
+        expect(result.text).toContain('1. one.docx\n2. two.xlsx');
+        expect(result.text).toContain('- 測試資料夾');
+        expect(result.text).toContain('**摘要**');
+    });
+
     test('separates M365 citations from downloads and drops citation favicons', () => {
         const longTeamsSource = 'https://teams.microsoft.com/l/message/19:example@thread.tacv2/1788489296895?tenantId=tenant&groupId=group&parentMessageId=1788489296895&teamName=' + 'digital-transformation-'.repeat(12) + '&channelName=weekly-report';
         const artifacts = ResponseExtractor.normalizeVisibleArtifacts([

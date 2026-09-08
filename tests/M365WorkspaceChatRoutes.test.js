@@ -7,6 +7,7 @@ const mockStore = {
     getDraft: jest.fn(),
     listProjectReferences: jest.fn(),
     getProject: jest.fn(),
+    listMessages: jest.fn(),
     addMessage: jest.fn(),
     updateMessageDeliveryState: jest.fn(),
     updateConversationTitleIfPlaceholder: jest.fn(),
@@ -173,6 +174,7 @@ describe('workspace-aware M365 chat route', () => {
             contextVersion: 1,
         });
         mockStore.getDraft.mockResolvedValue({ localFolders: [] });
+        mockStore.listMessages.mockResolvedValue([]);
         mockLocalFolderService.resolveSelectedReferences.mockReturnValue([]);
         mockLocalFolderService.validateReferences.mockReturnValue([]);
         mockStore.addMessage

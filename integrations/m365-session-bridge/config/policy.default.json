@@ -7,11 +7,8 @@
     "*.sharepoint.de",
     "*.sharepoint.cn"
   ],
-  "allowedHosts": [],
-  "allowedSites": [],
   "deniedHosts": [],
   "deniedSites": [],
-  "allowedLibraries": [],
   "allowedLocalPaths": [
     "%M365_GOLEM_ROOT%"
   ],

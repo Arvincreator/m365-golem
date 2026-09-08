@@ -104,9 +104,9 @@ describe('M365 workspace UI regressions', () => {
         expect(source).toContain('工具執行中');
         expect(source).toContain('等待 Observation');
         expect(source).toContain('進行中');
-        expect(source).toContain('`計畫 ${runDetail.plan.steps.filter');
+        expect(source).toContain('`計畫 ${run.status === "COMPLETED" ? runDetail.plan.steps.length');
         expect(source).toContain('run.goalMode ? " · 無固定上限" : `/${run.maxSteps}`');
-        expect(source).toContain('const displayedStatus = step.status;');
+        expect(source).toContain('const displayedStatus = run.status === "COMPLETED" && step.status !== "skipped" ? "completed" : step.status;');
         expect(source).toContain('runAction(run, "complete"');
         expect(source).toContain('確認已完成');
         expect(source).toContain('每輪都會先判斷');

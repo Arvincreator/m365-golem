@@ -138,6 +138,40 @@ async function findOrCreateTab(originUrl: string): Promise<number> {
   return tab.id;
 }
 
+async function resolveSharingUrl(sharingUrl: string): Promise<string> {
+  const tab = await chrome.tabs.create({ url: sharingUrl, active: false });
+  if (!tab.id) throw new Error("Failed to open SharePoint sharing link");
+  const tabId = tab.id;
+
+  try {
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      const finish = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        chrome.tabs.onUpdated.removeListener(listener);
+        clearTimeout(timer);
+        if (error) reject(error);
+        else resolve();
+      };
+      const listener = (updatedTabId: number, info: chrome.tabs.TabChangeInfo) => {
+        if (updatedTabId === tabId && info.status === "complete") finish();
+      };
+      const timer = setTimeout(() => finish(new Error("Timed out resolving SharePoint sharing link")), 30_000);
+      chrome.tabs.onUpdated.addListener(listener);
+      void chrome.tabs.get(tabId).then((current) => {
+        if (current.status === "complete") finish();
+      }).catch((error) => finish(error instanceof Error ? error : new Error(String(error))));
+    });
+
+    const resolved = await chrome.tabs.get(tabId);
+    if (!resolved.url) throw new Error("SharePoint sharing link did not resolve to a URL");
+    return resolved.url;
+  } finally {
+    await chrome.tabs.remove(tabId).catch(() => undefined);
+  }
+}
+
 async function relayToContentScript(
   originUrl: string,
   type: string,
@@ -154,6 +188,14 @@ function originFromSiteUrl(siteUrl: string): string {
 
 async function dispatch(msgId: string, type: string, payload: Record<string, unknown>, data?: Uint8Array) {
   try {
+    if (type === "resolve-sharing-url") {
+      const sharingUrl = payload.sharingUrl as string | undefined;
+      if (!sharingUrl) throw new Error("sharingUrl is required");
+      const resolvedUrl = await resolveSharingUrl(sharingUrl);
+      sendChunked(msgId, "ack", { resolvedUrl });
+      return;
+    }
+
     if (type === "bridge-status") {
       const siteUrl = payload.siteUrl as string | undefined;
       if (!siteUrl) {

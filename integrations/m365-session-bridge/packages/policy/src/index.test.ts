@@ -22,9 +22,6 @@ function basePolicy(overrides: Partial<Policy> = {}): Policy {
   return {
     writeEnabled: true,
     readHostPatterns: ["*.sharepoint.com", "*.sharepoint.us", "*.sharepoint-mil.us", "*.sharepoint.de", "*.sharepoint.cn"],
-    allowedHosts: ["tenant.sharepoint.com"],
-    allowedSites: ["/sites/TestSite"],
-    allowedLibraries: [],
     allowedLocalPaths: [path.join(os.tmpdir(), "m365-bridge-test-root")],
     allowOverwrite: false,
     allowRecycle: true,
@@ -46,14 +43,14 @@ test("parsePolicy: keeps recycle disabled when an older policy omits the field",
   assert.equal(parsed.allowRecycle, false);
 });
 
-test("validateHostAndSite: allows a host+site in the allowlist", () => {
+test("validateHostAndSite: allows a supported host and site by default", () => {
   const policy = basePolicy();
   const result = validateHostAndSite("https://tenant.sharepoint.com/sites/TestSite/Shared Documents/a.txt", policy);
   assert.equal(result.siteUrl, "https://tenant.sharepoint.com/sites/TestSite");
 });
 
-test("validateReadableHostAndSite: allows another SharePoint tenant without a write site allowlist", () => {
-  const policy = basePolicy({ allowedSites: [] });
+test("validateReadableHostAndSite: allows another supported SharePoint tenant", () => {
+  const policy = basePolicy();
   const result = validateReadableHostAndSite(
     "https://other.sharepoint.com/sites/Ops/Shared%20Documents/report.xlsx",
     policy
@@ -63,7 +60,7 @@ test("validateReadableHostAndSite: allows another SharePoint tenant without a wr
 });
 
 test("validateReadableHostAndSite: derives a OneDrive personal site root", () => {
-  const policy = basePolicy({ allowedSites: [] });
+  const policy = basePolicy();
   const result = validateReadableHostAndSite(
     "https://other-my.sharepoint.com/personal/user_example_com/Documents/report.docx",
     policy
@@ -73,7 +70,7 @@ test("validateReadableHostAndSite: derives a OneDrive personal site root", () =>
 });
 
 test("validateReadableHostAndSite: normalizes common SharePoint sharing routes", () => {
-  const policy = basePolicy({ allowedSites: [] });
+  const policy = basePolicy();
   const result = validateReadableHostAndSite(
     "https://other.sharepoint.com/:x:/r/sites/Ops/Shared%20Documents/report.xlsx?d=abc",
     policy
@@ -82,8 +79,16 @@ test("validateReadableHostAndSite: normalizes common SharePoint sharing routes",
   assert.equal(result.serverRelativeUrl, "/sites/Ops/Shared Documents/report.xlsx");
 });
 
+test("validateReadableHostAndSite: rejects opaque sharing tokens until Edge resolves them", () => {
+  const policy = basePolicy();
+  assert.throws(
+    () => validateReadableHostAndSite("https://other.sharepoint.com/:f:/s/Ops/opaque-token?e=abc", policy),
+    (err: unknown) => err instanceof BridgeError && err.code === ErrorCode.INVALID_INPUT
+  );
+});
+
 test("validateReadableHostAndSite: rejects a non-SharePoint host and a hostname-confusion suffix", () => {
-  const policy = basePolicy({ allowedSites: [] });
+  const policy = basePolicy();
   assert.throws(
     () => validateReadableHostAndSite("https://example.com/sites/Ops/report.xlsx", policy),
     (err: unknown) => err instanceof BridgeError && err.code === ErrorCode.HOST_NOT_ALLOWED
@@ -94,12 +99,10 @@ test("validateReadableHostAndSite: rejects a non-SharePoint host and a hostname-
   );
 });
 
-test("validateHostAndSite: rejects a host not in the allowlist", () => {
+test("validateHostAndSite: allows a different supported tenant without preconfiguration", () => {
   const policy = basePolicy();
-  assert.throws(
-    () => validateHostAndSite("https://other.sharepoint.com/sites/TestSite/a.txt", policy),
-    (err: unknown) => err instanceof BridgeError && err.code === ErrorCode.HOST_NOT_ALLOWED
-  );
+  const result = validateHostAndSite("https://other.sharepoint.com/sites/TestSite/a.txt", policy);
+  assert.equal(result.siteUrl, "https://other.sharepoint.com/sites/TestSite");
 });
 
 test("validateHostAndSite: rejects a subdomain-confusion attack hostname", () => {
@@ -114,15 +117,13 @@ test("validateHostAndSite: rejects a subdomain-confusion attack hostname", () =>
   );
 });
 
-test("validateHostAndSite: rejects a site path not in allowedSites", () => {
+test("validateHostAndSite: allows an unconfigured site path", () => {
   const policy = basePolicy();
-  assert.throws(
-    () => validateHostAndSite("https://tenant.sharepoint.com/sites/OtherSite/a.txt", policy),
-    (err: unknown) => err instanceof BridgeError && err.code === ErrorCode.SITE_NOT_ALLOWED
-  );
+  const result = validateHostAndSite("https://tenant.sharepoint.com/sites/OtherSite/a.txt", policy);
+  assert.equal(result.siteUrl, "https://tenant.sharepoint.com/sites/OtherSite");
 });
 
-test("deny lists win over an otherwise valid allowlist entry", () => {
+test("deny lists override default access", () => {
   const policy = basePolicy({ deniedHosts: ["tenant.sharepoint.com"] });
   assert.throws(
     () => validateHostAndSite("https://tenant.sharepoint.com/sites/TestSite/a.txt", policy),
@@ -141,14 +142,6 @@ test("computeApprovedTarget derives a safe target for an unlisted supported host
   assert.equal(result.siteUrl, "https://other.sharepoint.com/sites/Ops");
   assert.equal(result.serverRelativeUrl, "/sites/Ops/Shared Documents/report.xlsx");
   assert.equal(isTargetDenied("other.sharepoint.com", result.serverRelativeUrl, basePolicy()), false);
-});
-
-test("validateHostAndSite: empty allowedSites always rejects", () => {
-  const policy = basePolicy({ allowedSites: [] });
-  assert.throws(
-    () => validateHostAndSite("https://tenant.sharepoint.com/sites/TestSite/a.txt", policy),
-    (err: unknown) => err instanceof BridgeError && err.code === ErrorCode.SITE_NOT_ALLOWED
-  );
 });
 
 test("validateHostAndSite: rejects non-https", () => {
@@ -255,7 +248,7 @@ test("loadPolicy: loads a valid policy.json", () => {
   fs.writeFileSync(tmpFile, JSON.stringify(basePolicy()));
   try {
     const loaded = loadPolicy(tmpFile);
-    assert.equal(loaded.allowedHosts[0], "tenant.sharepoint.com");
+    assert.deepEqual(loaded.deniedHosts, []);
   } finally {
     fs.unlinkSync(tmpFile);
   }

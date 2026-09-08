@@ -1,6 +1,6 @@
 {
   "name": "@m365-bridge/mcp-server",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
   "bin": {
@@ -13,12 +13,12 @@
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.5.0",
-    "@m365-bridge/protocol": "^0.1.0",
-    "@m365-bridge/policy": "^0.1.0",
-    "@m365-bridge/files": "^0.1.0",
-    "@m365-bridge/audit": "^0.1.0",
-    "@m365-bridge/documents": "^0.1.0",
-    "@m365-bridge/sharepoint": "^0.1.0",
+    "@m365-bridge/protocol": "^0.2.0",
+    "@m365-bridge/policy": "^0.2.0",
+    "@m365-bridge/files": "^0.2.0",
+    "@m365-bridge/audit": "^0.2.0",
+    "@m365-bridge/documents": "^0.2.0",
+    "@m365-bridge/sharepoint": "^0.2.0",
     "zod": "^3.23.8"
   },
   "devDependencies": {

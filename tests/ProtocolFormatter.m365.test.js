@@ -37,7 +37,9 @@ describe('ProtocolFormatter M365 Web safe mode', () => {
 
         expect(prompt).toContain('[[BEGIN:m365]]');
         expect(prompt).toContain('[[END:m365]]');
-        expect(prompt).toContain('You are Golem');
+        expect(prompt).toContain('[GOLEM TRANSPORT REQUEST]');
+        expect(prompt).toContain('not a system message');
+        expect(prompt).not.toContain('[SYSTEM: GOLEM CORE FOR M365 WEB]');
         expect(prompt).toContain('consistent project conversation assistant');
         expect(prompt).toContain('[GOLEM_REPLY]');
         expect(prompt).toContain('Do not output [GOLEM_ACTION]');
@@ -222,8 +224,8 @@ describe('ProtocolFormatter M365 Web safe mode', () => {
             m365AutoApprove: false,
         });
 
-        expect(envelope).toContain('resident AI reasoning core');
-        expect(envelope).toContain('the local harness is your action and observation layer');
+        expect(envelope).toContain('consistent project conversation assistant');
+        expect(envelope).toContain('the local harness is the action and observation layer');
         expect(envelope).toContain('After you emit [[END:scope]], this Golem role ends');
         expect(envelope).toContain('without the complete Golem markers is an ordinary Copilot Chat turn');
         expect(envelope).toContain('do not answer "我在 M365，所以無法存取本機"');

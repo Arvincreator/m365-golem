@@ -23,6 +23,14 @@ describe('ResponseParser M365 reply-only envelope', () => {
         expect(parsed.reply).toBe('Copilot reply');
     });
 
+    test('strips an XML-style closing marker from a structured reply', () => {
+        const parsed = ResponseParser.parse(
+            '[GOLEM_REPLY]已取得實際資料夾清單。</GOLEM_REPLY>\n[[END:xml-close]]'
+        );
+
+        expect(parsed.reply).toBe('已取得實際資料夾清單。');
+    });
+
     test('parses an action tag that M365 places after the inline reply closing tag', () => {
         const parsed = ResponseParser.parse(
             '[[BEGIN:ptnn]]\n' +

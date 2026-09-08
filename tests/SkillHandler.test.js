@@ -124,6 +124,87 @@ describe('SkillHandler', () => {
         expect(summary).not.toContain('m365SessionAvailable');
     });
 
+    test('treats an online extension with no target probe as ready for an exact read', () => {
+        const summary = SkillHandler._buildM365StatusFeedback(JSON.stringify({
+            status: 'success',
+            extensionOnline: true,
+            m365SessionAvailable: false,
+            probedSiteUrl: null,
+        }));
+
+        expect(summary).toContain('Connection check: ready.');
+        expect(summary).not.toContain('reconnect Microsoft 365');
+    });
+
+    test('collects several plan MCP results and emits one combined Observation', async () => {
+        const MCPManager = require('../src/mcp/MCPManager');
+        const callTool = jest.fn()
+            .mockResolvedValueOnce({ content: [{ type: 'text', text: '{"status":"success","value":1}' }] })
+            .mockResolvedValueOnce({ content: [{ type: 'text', text: '{"status":"success","value":2}' }] });
+        MCPManager.getInstance.mockReturnValue({
+            load: jest.fn().mockResolvedValue(undefined),
+            getServers: jest.fn().mockReturnValue([{
+                name: 'test-server',
+                enabled: true,
+                connected: true,
+                cachedTools: [{
+                    name: 'read-value',
+                    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+                }],
+            }]),
+            callTool,
+        });
+        const collector = { entries: [] };
+        const enqueue = jest.fn().mockResolvedValue(undefined);
+        const onGolemObservation = jest.fn().mockResolvedValue({
+            planId: 'plan-1',
+            planRevision: 2,
+            run: { status: 'RUNNING' },
+        });
+        const ctx = {
+            ...mockCtx,
+            workspaceConversationId: 'conversation-1',
+            onGolemObservation,
+        };
+        const brain = { ...mockBrain, webBackend: { id: 'm365-web' } };
+        const controller = { convoManager: { enqueue } };
+        const dispatchOptions = {
+            planMode: true,
+            actionDepth: 1,
+            maxActionDepth: 6,
+            workspaceRunId: 'run-1',
+            workspaceStepId: 'run-step-1',
+            workspacePlanId: 'plan-1',
+            workspacePlanRevision: 1,
+            workspacePlanStepId: 'step-1',
+            workspaceActionId: 'action-1',
+            observationCollector: collector,
+        };
+
+        await SkillHandler.execute(ctx, {
+            action: 'mcp_call', server: 'test-server', tool: 'read-value', parameters: {},
+        }, brain, controller, dispatchOptions);
+        await SkillHandler.execute(ctx, {
+            action: 'mcp_call', server: 'test-server', tool: 'read-value', parameters: {},
+        }, brain, controller, dispatchOptions);
+
+        expect(collector.entries).toHaveLength(2);
+        expect(onGolemObservation).not.toHaveBeenCalled();
+        expect(enqueue).not.toHaveBeenCalled();
+
+        await SkillHandler.flushObservationCollector(ctx, brain, controller, dispatchOptions, collector);
+
+        expect(onGolemObservation).toHaveBeenCalledTimes(1);
+        expect(onGolemObservation.mock.calls[0][0]).toEqual(expect.objectContaining({
+            lane: 'action_batch',
+            status: 'succeeded',
+        }));
+        expect(onGolemObservation.mock.calls[0][0].result).toContain('[Action 1/2: test-server/read-value]');
+        expect(onGolemObservation.mock.calls[0][0].result).toContain('[Action 2/2: test-server/read-value]');
+        expect(enqueue).toHaveBeenCalledTimes(1);
+        expect(enqueue.mock.calls[0][1]).toContain('"lane": "action_batch"');
+    });
+
     test('execute should validate mcp_call before calling tool', async () => {
         const MCPManager = require('../src/mcp/MCPManager');
         const callTool = jest.fn();
