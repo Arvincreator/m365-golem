@@ -93,7 +93,10 @@ class PageInteractor {
             }
 
             // 1. 捕獲基準文字
-            const baseline = await this._captureBaseline(selectors.response);
+            const baseline = await this._captureBaseline(
+                selectors.response,
+                this.backendDefinition.responseContainerSelectors
+            );
 
             // 1.5 M365 附件使用可見頁面的原生 file input；舊後端保留原本貼上流程。
             if (attachment && this.backendDefinition.id === 'm365-web') {
@@ -184,6 +187,7 @@ class PageInteractor {
                         ? 'Microsoft 365 Copilot Chat 已接受送出，但在有限等待內找不到可信的回覆節點。'
                         : '等待回應超時');
                     if (this.backendDefinition.id === 'm365-web') responseError.code = 'M365_RESPONSE_NOT_FOUND';
+                    responseError.recoveryBaseline = baseline;
                     throw responseError;
                 }
                 finalResponse.status = 'ENVELOPE_TIMEOUT_PARTIAL';
@@ -268,6 +272,13 @@ class PageInteractor {
                 spec.patterns.some((pattern) => pattern.test(text))
             ))?.[0] || null;
         };
+        const readLocatorLabel = async (locator) => normalizeText([
+            await locator.innerText().catch(() => ''),
+            typeof locator.textContent === 'function'
+                ? await locator.textContent().catch(() => '')
+                : '',
+            await locator.getAttribute('aria-label').catch(() => ''),
+        ].filter(Boolean).join(' '));
         const selectorContract = this.backendDefinition.responseModeSelectors || {};
         const triggerSelectors = (Array.isArray(selectorContract.trigger)
             ? selectorContract.trigger
@@ -290,17 +301,28 @@ class PageInteractor {
         // not as a permanent UI change, while still failing before any text is typed.
         const triggerStartedAt = Date.now();
         let trigger = null;
+        let triggerVisible = false;
         let triggerCount = 0;
         do {
             const triggers = this.page.locator(triggerSelector);
             triggerCount = await triggers.count().catch(() => 0);
+            let hiddenSelectedTrigger = null;
             for (let index = triggerCount - 1; index >= 0; index -= 1) {
                 const candidate = triggers.nth(index);
                 if (await candidate.isVisible().catch(() => false)) {
                     trigger = candidate;
+                    triggerVisible = true;
                     break;
                 }
+                // M365 collapses this control to 0x0 when a Word preview makes
+                // the chat rail narrow. Its selected value remains readable in
+                // the DOM, so an already-matching mode needs no click.
+                const hiddenLabel = await readLocatorLabel(candidate);
+                if (!hiddenSelectedTrigger && identifyMode(hiddenLabel) === mode) {
+                    hiddenSelectedTrigger = candidate;
+                }
             }
+            if (!trigger && hiddenSelectedTrigger) trigger = hiddenSelectedTrigger;
             if (trigger || Date.now() - triggerStartedAt >= triggerWaitMs) break;
             await sleep();
         } while (true);
@@ -315,10 +337,7 @@ class PageInteractor {
             throw error;
         }
 
-        const readTrigger = async () => normalizeText([
-            await trigger.innerText().catch(() => ''),
-            await trigger.getAttribute('aria-label').catch(() => ''),
-        ].filter(Boolean).join(' '));
+        const readTrigger = async () => readLocatorLabel(trigger);
         let triggerText = await readTrigger();
         let observedMode = identifyMode(triggerText);
         const readVisibleOptions = async () => {
@@ -358,7 +377,7 @@ class PageInteractor {
         if (observedMode === mode) {
             // A previous interrupted attempt may have left the menu open. Close
             // it before the composer receives text so the overlay cannot steal input.
-            if (await isMenuOpen()) {
+            if (triggerVisible && await isMenuOpen()) {
                 await clickTrigger();
                 const closeDeadline = Date.now() + 2000;
                 let menuOpen = true;
@@ -429,22 +448,31 @@ class PageInteractor {
         throw error;
     }
 
-    async _captureBaseline(responseSelector) {
+    async _captureBaseline(responseSelector, responseContainerSelectors = []) {
         if (!responseSelector || responseSelector.trim() === "") {
             console.log("⚠️ Response Selector 為空，等待觸發修復。");
             throw new Error("空的 Response Selector");
         }
 
-        return this.page.evaluate((s) => {
-            const bubbles = document.querySelectorAll(s);
+        return this.page.evaluate(({ selector, containers }) => {
+            const bubbles = document.querySelectorAll(selector);
             if (bubbles.length === 0) return "";
-            let target = bubbles[bubbles.length - 1];
-            let container = target.closest('model-response') ||
-                target.closest('.markdown') ||
-                target.closest('.model-response-text') ||
+            const target = bubbles[bubbles.length - 1];
+            let container = null;
+            for (const candidate of containers || []) {
+                try {
+                    container = target.closest(candidate);
+                    if (container) break;
+                } catch (_) { }
+            }
+            container = container || target.closest('model-response') ||
+                target.closest('.markdown') || target.closest('.model-response-text') ||
                 target.parentElement || target;
             return container.innerText || "";
-        }, responseSelector).catch(() => "");
+        }, {
+            selector: responseSelector,
+            containers: Array.isArray(responseContainerSelectors) ? responseContainerSelectors : [],
+        }).catch(() => "");
     }
 
     /**
@@ -999,6 +1027,8 @@ class PageInteractor {
             : 350;
         const startedAt = Date.now();
         let consecutiveReadySamples = 0;
+        let lastSendTarget = null;
+        let lastUploadState = null;
         while (Date.now() - startedAt < timeoutMs) {
             const uploadState = await this.page.evaluate(({ editorSelector, names }) => {
                 const visible = (node) => {
@@ -1053,30 +1083,42 @@ class PageInteractor {
                 editorSelector: this._getComposerSelectors().join(', '),
                 names: (attachment.files || []).map((file) => String(file.name || '')),
             }).catch(() => ({ errorText: '', pending: true, everyNameVisible: false }));
+            lastUploadState = uploadState;
 
             if (uploadState.errorText) {
                 const error = new Error(`Microsoft 365 Copilot 回報附件上傳失敗：${uploadState.errorText}`);
                 error.code = 'M365_ATTACHMENT_UPLOAD_FAILED';
                 throw error;
             }
-            if (!uploadState.pending && uploadState.everyNameVisible) {
-                const sendTarget = await this._tryClickSendButton(sendSelector);
-                if (sendTarget && sendTarget.clicked) {
-                    consecutiveReadySamples += 1;
-                    const waitedLongEnough = Date.now() - startedAt >= minimumWaitMs;
-                    if (waitedLongEnough && consecutiveReadySamples >= stableSamplesRequired) {
-                        console.log('✅ [PageInteractor] M365 附件已完成 OneDrive 上傳，送出按鈕已連續穩定啟用。');
-                        return;
-                    }
-                } else {
-                    consecutiveReadySamples = 0;
+            // The enabled, composer-adjacent Send control is the authoritative
+            // signal that M365 has accepted the attachments. Some M365 builds
+            // keep a broad aria-busy/progress marker on the composer after the
+            // individual files are ready, so treating that marker as a veto
+            // leaves a perfectly sendable draft stuck until timeout.
+            // The trusted manifest was already matched to visible attachment
+            // cards by _attachM365Files.  Do not require the filenames to stay
+            // discoverable through body text here: the current M365 build can
+            // move those cards into an accessibility-only toolbar while the
+            // composer remains open.  An enabled, composer-adjacent Send
+            // control is the final readiness signal.
+            const sendTarget = await this._tryClickSendButton(sendSelector);
+            lastSendTarget = sendTarget;
+            if (sendTarget && sendTarget.clicked) {
+                consecutiveReadySamples += 1;
+                const waitedLongEnough = Date.now() - startedAt >= minimumWaitMs;
+                if (waitedLongEnough && consecutiveReadySamples >= stableSamplesRequired) {
+                    console.log('✅ [PageInteractor] M365 附件已完成 OneDrive 上傳，送出按鈕已連續穩定啟用。');
+                    return;
                 }
             } else {
                 consecutiveReadySamples = 0;
             }
             await new Promise(r => setTimeout(r, pollIntervalMs));
         }
-        const error = new Error('Microsoft 365 Copilot 的附件仍在上傳或送出按鈕尚未啟用；系統已停止，不會按 Enter 或自動重送。');
+        const diagnostics = lastSendTarget && lastSendTarget.diagnostics
+            ? ` 候選: ${lastSendTarget.diagnostics}`
+            : ` 附件名稱可見=${Boolean(lastUploadState && lastUploadState.everyNameVisible)}`;
+        const error = new Error(`Microsoft 365 Copilot 的附件仍在上傳或送出按鈕尚未啟用；系統已停止，不會按 Enter 或自動重送。${diagnostics}`);
         error.code = 'M365_ATTACHMENT_UPLOAD_TIMEOUT';
         throw error;
     }
@@ -1328,6 +1370,20 @@ class PageInteractor {
             };
             const nearComposer = (btn, composer) => {
                 if (!composer) return false;
+                // A long M365 draft is rendered inside a scrollable editor.  In
+                // that state the contenteditable child can have a large
+                // negative viewport rect even though its visible editor shell
+                // and Send button are on screen.  Treat a nearby shared,
+                // visible composer ancestor as authoritative before comparing
+                // the inner editor geometry.
+                let ancestor = composer.parentElement;
+                for (let depth = 0; ancestor && depth < 6; depth += 1, ancestor = ancestor.parentElement) {
+                    const ancestorRect = ancestor.getBoundingClientRect();
+                    const intersectsViewport = ancestorRect.width > 0 && ancestorRect.height > 0 &&
+                        ancestorRect.bottom >= 0 && ancestorRect.top <= window.innerHeight &&
+                        ancestorRect.right >= 0 && ancestorRect.left <= window.innerWidth;
+                    if (intersectsViewport && ancestor.contains(btn)) return true;
+                }
                 const rect = btn.getBoundingClientRect();
                 const inputRect = composer.getBoundingClientRect();
                 const buttonCenterY = rect.top + rect.height / 2;
@@ -1817,16 +1873,33 @@ class PageInteractor {
         }, { names: fileNames, selectors: markerSelectors });
 
         let selected = false;
-        const inputs = this.page.locator('input[type="file"]');
-        const inputCount = await inputs.count().catch(() => 0);
-        for (let index = inputCount - 1; index >= 0 && !selected; index -= 1) {
-            const input = inputs.nth(index);
-            const disabled = await input.isDisabled().catch(() => true);
-            if (disabled) continue;
-            try {
-                await input.setInputFiles(filePaths);
-                selected = true;
-            } catch (_) { }
+        let selectedInputSource = '';
+        // M365 can render unrelated hidden file inputs elsewhere in the app.
+        // A successful setInputFiles() on one of those controls produces no
+        // attachment card but used to stop the search.  Prefer the input owned
+        // by the visible chat composer, then retain the generic fallback for
+        // older M365 layouts.
+        const inputSelectors = [
+            '#m365-chat-input-shared-container input[type="file"]',
+            'input[type="file"]',
+        ];
+        for (const inputSelector of inputSelectors) {
+            const inputs = this.page.locator(inputSelector);
+            const inputCount = await inputs.count().catch(() => 0);
+            for (let index = inputCount - 1; index >= 0 && !selected; index -= 1) {
+                const input = inputs.nth(index);
+                const disabled = await input.isDisabled().catch(() => true);
+                if (disabled) continue;
+                try {
+                    await input.setInputFiles(filePaths);
+                    selected = true;
+                    selectedInputSource = inputSelector;
+                } catch (_) { }
+            }
+            if (selected) break;
+        }
+        if (selected) {
+            console.log(`📎 [PageInteractor] 已透過 Copilot composer 附件控制選取 ${fileNames.length} 個檔案 (${selectedInputSource}).`);
         }
 
         if (!selected) {

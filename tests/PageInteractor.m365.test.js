@@ -160,6 +160,53 @@ describe('PageInteractor M365 safety behavior', () => {
         expect(trigger.click).toHaveBeenCalledTimes(1);
     });
 
+    test('accepts an already-selected hidden response mode in a narrow Word preview layout', async () => {
+        const trigger = {
+            isVisible: jest.fn().mockResolvedValue(false),
+            innerText: jest.fn().mockResolvedValue('自動'),
+            getAttribute: jest.fn((name) => Promise.resolve(
+                name === 'aria-expanded' ? 'false' : (name === 'aria-label' ? '模型選取器' : null)
+            )),
+            click: jest.fn(),
+        };
+        const page = {
+            locator: jest.fn((selector) => selector === '[role="menuitemradio"]'
+                ? locatorGroup([])
+                : locatorGroup([trigger])),
+        };
+        const interactor = new PageInteractor(page, {}, definition);
+
+        await expect(interactor._ensureM365ResponseMode('auto')).resolves.toEqual({
+            ok: true,
+            requested: 'auto',
+            observed: 'auto',
+            changed: false,
+        });
+        expect(trigger.click).not.toHaveBeenCalled();
+    });
+
+    test('does not accept a hidden response-mode control when it shows a different mode', async () => {
+        const trigger = {
+            isVisible: jest.fn().mockResolvedValue(false),
+            innerText: jest.fn().mockResolvedValue('快速回應'),
+            getAttribute: jest.fn().mockResolvedValue(null),
+        };
+        const page = { locator: jest.fn(() => locatorGroup([trigger])) };
+        const narrowDefinition = {
+            ...definition,
+            responseModeSelectors: {
+                ...definition.responseModeSelectors,
+                waitTimeoutMs: 1,
+                pollIntervalMs: 1,
+            },
+        };
+        const interactor = new PageInteractor(page, {}, narrowDefinition);
+
+        await expect(interactor._ensureM365ResponseMode('auto')).rejects.toMatchObject({
+            code: 'M365_RESPONSE_MODE_UNAVAILABLE',
+        });
+    });
+
     test('stops before reading or typing when M365 cannot confirm the queued response mode', async () => {
         const page = {};
         const interactor = new PageInteractor(page, {}, definition);
@@ -554,8 +601,50 @@ describe('PageInteractor M365 safety behavior', () => {
             pollIntervalMs: 1,
         })).resolves.toBeUndefined();
 
-        expect(page.evaluate).toHaveBeenCalledTimes(4);
+        expect(page.evaluate).toHaveBeenCalledTimes(3);
         expect(sendTarget).toHaveBeenCalledTimes(3);
+    });
+
+    test('accepts an enabled real send button even when M365 keeps a broad busy marker', async () => {
+        const page = {
+            evaluate: jest.fn().mockResolvedValue({
+                errorText: '', pending: true, everyNameVisible: true,
+            }),
+        };
+        const interactor = new PageInteractor(page, {}, definition);
+        jest.spyOn(interactor, '_tryClickSendButton').mockResolvedValue({
+            clicked: true, score: 120, label: '傳送',
+        });
+
+        await expect(interactor._waitForM365AttachmentUploadReady({
+            files: [{ name: 'evidence.txt' }],
+        }, 'button', 1000, {
+            minimumWaitMs: 0,
+            stableSamples: 2,
+            pollIntervalMs: 1,
+        })).resolves.toBeUndefined();
+    });
+
+    test('accepts an enabled send button when M365 hides uploaded filenames from body text', async () => {
+        const page = {
+            evaluate: jest.fn().mockResolvedValue({
+                errorText: '', pending: false, everyNameVisible: false,
+            }),
+        };
+        const interactor = new PageInteractor(page, {}, definition);
+        const sendTarget = jest.spyOn(interactor, '_tryClickSendButton').mockResolvedValue({
+            clicked: true, score: 120, label: '傳送',
+        });
+
+        await expect(interactor._waitForM365AttachmentUploadReady({
+            files: [{ name: 'evidence.txt' }],
+        }, 'button', 1000, {
+            minimumWaitMs: 0,
+            stableSamples: 2,
+            pollIntervalMs: 1,
+        })).resolves.toBeUndefined();
+
+        expect(sendTarget).toHaveBeenCalledTimes(2);
     });
 
     test('stops on an M365 attachment upload error before looking for the send button', async () => {

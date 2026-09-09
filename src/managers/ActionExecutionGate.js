@@ -2,8 +2,9 @@ const skillManager = require('./SkillManager');
 const SkillPackageRegistry = require('./SkillPackageRegistry');
 const { toolsetManager, SCENE_TOOLSETS } = require('./ToolsetManager');
 
-const BUILTIN_ACTIONS = new Set(['command', 'mcp_call', 'multi_agent', 'toolset']);
+const BUILTIN_ACTIONS = new Set(['command', 'mcp_call', 'multi_agent', 'toolset', 'attach-local-files']);
 const REMOVED_ACTIONS = new Set(['schedule', 'list-schedules']);
+const SAFE_REFERENCE_ID = /^[a-zA-Z0-9][a-zA-Z0-9_-]{0,127}$/;
 
 function normalizeActionName(value) {
     return String(value || '')
@@ -124,6 +125,24 @@ class ActionExecutionGate {
                 };
             }
             return { ok: true, lane: 'host', normalizedAction: 'plan_checkpoint' };
+        }
+
+        if (normalizedAction === 'attach-local-files') {
+            const folderId = String(action.folder_id || '').trim();
+            const relativePaths = action.relative_paths;
+            const purpose = String(action.purpose || '').trim();
+            const unknownFields = Object.keys(action).filter((key) => !['action', 'folder_id', 'relative_paths', 'purpose'].includes(key));
+            if (!SAFE_REFERENCE_ID.test(folderId)) {
+                return { ok: false, code: 'M365_LOCAL_ATTACHMENT_FOLDER_INVALID', error: 'attach_local_files requires a selected folder_id.' };
+            }
+            if (!Array.isArray(relativePaths) || relativePaths.length < 1 || relativePaths.length > 100
+                || relativePaths.some((item) => typeof item !== 'string' || !item.trim() || item.length > 1000)) {
+                return { ok: false, code: 'M365_LOCAL_ATTACHMENT_PATHS_INVALID', error: 'attach_local_files requires 1 to 100 relative_paths.' };
+            }
+            if (!purpose || purpose.length > 1000 || unknownFields.length > 0) {
+                return { ok: false, code: 'M365_LOCAL_ATTACHMENT_REQUEST_INVALID', error: 'attach_local_files requires a short purpose and no unsupported fields.' };
+            }
+            return { ok: true, lane: 'host', normalizedAction: 'attach_local_files' };
         }
 
         if (normalizedAction === 'mcp-call') {

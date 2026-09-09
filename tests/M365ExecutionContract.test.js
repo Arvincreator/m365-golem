@@ -52,6 +52,54 @@ describe('M365 execution contract', () => {
         expect(inferVerification('在工作區建立一份 Word 報告', route)).toContain('.docx');
     });
 
+    test('requires evidence for an explicit read-only capability test', () => {
+        const route = {
+            commandLane: { recommended: false },
+            skills: [],
+            mcpTools: [{ id: 'm365-session-bridge/m365_bridge_status', policy: { risk: 'read' } }],
+        };
+
+        expect(classifyExecutionExpectation('測試看看 M365 Bridge 能不能用', route, '應該可以使用'))
+            .toEqual(expect.objectContaining({ required: true, reason: 'read_only_verification', local: false }));
+    });
+
+    test('keeps autonomous read-only support optional for general advice', () => {
+        const route = {
+            commandLane: { recommended: false },
+            skills: [{ id: 'log-reader', policy: { risk: 'read' } }],
+            mcpTools: [],
+        };
+
+        expect(classifyExecutionExpectation('你建議我怎麼改善這個流程？', route, '建議如下'))
+            .toEqual(expect.objectContaining({ required: false, reason: 'optional_or_non_execution' }));
+    });
+
+    test('accepts native attachment analysis without manufacturing a local command observation', () => {
+        const route = {
+            commandLane: { recommended: true, reason: 'local_inspection' },
+            skills: [],
+            mcpTools: [],
+        };
+
+        expect(classifyExecutionExpectation(
+            '請閱讀兩份附件，比較內容並提出三項改善建議',
+            route,
+            '分析如下',
+            { nativeAttachmentCount: 2 }
+        )).toEqual({ required: false, reason: 'native_attachment_analysis', local: false });
+    });
+
+    test('still requires execution when the attached file itself must be changed', () => {
+        const route = { commandLane: { recommended: true, reason: 'local_authoring' }, skills: [], mcpTools: [] };
+
+        expect(classifyExecutionExpectation(
+            '請修改附件並產生新的 Word 文件',
+            route,
+            '',
+            { nativeAttachmentCount: 1 }
+        )).toEqual(expect.objectContaining({ required: true, local: true }));
+    });
+
     test('does not turn explanations into an execution obligation', () => {
         const route = { commandLane: { recommended: true }, skills: [], mcpTools: [] };
         expect(classifyExecutionExpectation('請解釋 Word 文件是怎麼產生的', route, '說明')).toEqual(expect.objectContaining({ required: false }));
@@ -151,6 +199,27 @@ describe('M365 execution contract', () => {
             ],
         });
         expect(result.issues).toContain('workspace_listing_not_observed');
+    });
+
+    test('does not require a local command when a SharePoint folder listing has host evidence', () => {
+        const result = validatePlanCompletion({
+            plan: {
+                goal: '列出指定 SharePoint 資料夾第一層內容',
+                completionCriteria: '取得實際 SharePoint 資料夾內容',
+                steps: [{ id: 's1', status: 'completed' }],
+            },
+            run: {
+                objective: '列出 SharePoint 資料夾的檔案與子資料夾',
+                startedAt: new Date().toISOString(),
+            },
+            events: [
+                { eventType: 'autonomous_action_planned', payload: { actionId: 'a1', planStepId: 's1', actionDescriptor: { kind: 'mcp', server: 'm365-session-bridge', tool: 'm365_list_folder' } } },
+                { eventType: 'autonomous_observation_recorded', payload: { actionId: 'a1', planStepId: 's1', status: 'succeeded' } },
+            ],
+        });
+        expect(result).toEqual(expect.objectContaining({ ok: true, issues: [] }));
+        expect(inferVerification('列出 SharePoint 資料夾第一層內容', { commandLane: { recommended: false } }))
+            .not.toContain('local directory-listing');
     });
 
     test('rejects capability guesses and repeated permission as plan blockers', () => {

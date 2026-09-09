@@ -47,6 +47,7 @@ import { socket } from "@/lib/socket";
 import { cn } from "@/lib/utils";
 import {
     M365_ATTACHMENT_ACCEPT,
+    collectClipboardImageCandidates,
     collectDroppedAttachmentCandidates,
     fileToBase64,
     formatAttachmentSize,
@@ -115,6 +116,18 @@ type ComposerPicker = "files" | "mcp" | "skills" | null;
 type ConversationTimelineItem =
     | { kind: "message"; message: M365Message }
     | { kind: "execution"; runId: string; anchorId: string; messages: M365Message[] };
+
+type AttachmentBatchProgress = {
+    jobId: string;
+    status: "preparing" | "uploading" | "reading" | "completed" | "failed";
+    totalFiles: number;
+    batchCount: number;
+    batchIndex: number;
+    completedFiles: number;
+    batchFiles: string[];
+    detail: string;
+    error: string;
+};
 
 function localFolderName(folderPath: string): string {
     const normalized = String(folderPath || "").replace(/[\\/]+$/, "");
@@ -279,6 +292,59 @@ function GolemActivityBubble() {
     );
 }
 
+function AttachmentBatchProgressBubble({ progress }: { progress: AttachmentBatchProgress }) {
+    const complete = progress.status === "completed";
+    const failed = progress.status === "failed";
+    const percent = progress.totalFiles > 0
+        ? Math.round((progress.completedFiles / progress.totalFiles) * 100)
+        : 0;
+    const title = failed ? "附件分批處理失敗" : complete ? "附件分批處理完成" : "附件分批處理中";
+    return (
+        <article role="status" aria-live="polite" aria-label={title} className="mr-auto w-full max-w-[620px]">
+            <details className={cn("group overflow-hidden rounded-2xl border bg-secondary/30 shadow-sm", failed ? "border-red-500/40" : complete ? "border-emerald-500/35" : "border-cyan-500/35")}>
+                <summary className="flex cursor-pointer list-none items-center gap-3 px-4 py-3 marker:content-none">
+                    <span className={cn("flex h-8 w-8 shrink-0 items-center justify-center rounded-full", failed ? "bg-red-500/12 text-red-600" : complete ? "bg-emerald-500/12 text-emerald-600" : "bg-cyan-500/12 text-cyan-600 dark:text-cyan-300")}>
+                        {failed ? <AlertTriangle className="h-4 w-4" /> : complete ? <CheckCircle2 className="h-4 w-4" /> : <Loader2 className="h-4 w-4 animate-spin" />}
+                    </span>
+                    <span className="min-w-0 flex-1">
+                        <span className="block text-sm font-semibold">{title}</span>
+                        <span className="mt-0.5 block text-xs text-muted-foreground">
+                            共 {progress.totalFiles} 個檔案、{progress.batchCount} 批
+                            {progress.batchIndex > 0 ? ` · 第 ${progress.batchIndex}/${progress.batchCount} 批` : ""}
+                            {` · 已讀取 ${progress.completedFiles}/${progress.totalFiles}`}
+                        </span>
+                    </span>
+                    <span className="shrink-0 text-[11px] text-muted-foreground">{failed ? "已停止" : `${percent}%`}</span>
+                    <ChevronDown className="h-4 w-4 shrink-0 text-muted-foreground transition-transform group-open:rotate-180" />
+                </summary>
+                <div className="border-t border-border/70 px-4 py-3 text-xs leading-5">
+                    <div className="mb-3 h-1.5 overflow-hidden rounded-full bg-secondary">
+                        <div className={cn("h-full rounded-full transition-[width]", failed ? "bg-red-500" : complete ? "bg-emerald-500" : "bg-cyan-500")} style={{ width: `${failed ? percent : Math.max(percent, progress.status === "uploading" ? 3 : 0)}%` }} />
+                    </div>
+                    {progress.batchFiles.length > 0 && <p className="break-words [overflow-wrap:anywhere] text-muted-foreground">本批：{progress.batchFiles.join("、")}</p>}
+                    {progress.detail && <p className="mt-1 break-words [overflow-wrap:anywhere] text-muted-foreground">{progress.detail}</p>}
+                    {progress.error && <p className="mt-1 break-words [overflow-wrap:anywhere] text-red-600 dark:text-red-300">{progress.error}</p>}
+                </div>
+            </details>
+        </article>
+    );
+}
+
+function ClipboardImagePreview({ file }: { file: File }) {
+    const previewUrl = useMemo(() => URL.createObjectURL(file), [file]);
+
+    useEffect(() => () => URL.revokeObjectURL(previewUrl), [previewUrl]);
+
+    return (
+        <span
+            role="img"
+            aria-label="貼上的圖片預覽"
+            className="h-7 w-7 shrink-0 rounded bg-cover bg-center"
+            style={{ backgroundImage: `url(${previewUrl})` }}
+        />
+    );
+}
+
 export default function M365ChatPage() {
     const selection = useM365WorkspaceSelection();
     if (!selection.hydrated || !selection.activeProjectId || !selection.activeConversationId) return <div className="p-8">請從左側選擇或建立專案對話。</div>;
@@ -414,6 +480,24 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
             && (!message.requestId || !pausedResponseRequestIds.has(message.requestId))
     ).length, [completedRequestIds, messages, pausedResponseRequestIds]);
     const showGolemActivity = sending || activeDialogueCount > 0;
+    const attachmentBatchProgress = useMemo<AttachmentBatchProgress | null>(() => {
+        const event = [...(runDetail?.events || [])].reverse().find((item) => item.eventType === "attachment_batch_progress");
+        if (!event) return null;
+        const payload = event.payload || {};
+        const status = String(payload.status || "");
+        if (!["preparing", "uploading", "reading", "completed", "failed"].includes(status)) return null;
+        return {
+            jobId: String(payload.jobId || ""),
+            status: status as AttachmentBatchProgress["status"],
+            totalFiles: Math.max(0, Number(payload.totalFiles || 0)),
+            batchCount: Math.max(0, Number(payload.batchCount || 0)),
+            batchIndex: Math.max(0, Number(payload.batchIndex || 0)),
+            completedFiles: Math.max(0, Number(payload.completedFiles || 0)),
+            batchFiles: Array.isArray(payload.batchFiles) ? payload.batchFiles.map(String) : [],
+            detail: String(payload.detail || ""),
+            error: String(payload.error || ""),
+        };
+    }, [runDetail]);
     const latestMessageKey = useMemo(() => {
         const latest = messages[messages.length - 1];
         return latest
@@ -766,16 +850,17 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
         });
     };
 
-    const addAttachmentCandidates = useCallback((candidates: AttachmentCandidate[]) => {
+    const addAttachmentCandidates = useCallback((candidates: AttachmentCandidate[]): number => {
         setAttachmentWarnings([]);
-        setPendingAttachments((current) => {
-            const merged = mergeAttachmentCandidates(current, candidates);
-            if (otherAttachmentBytes(controller) + merged.attachments.reduce((sum, item) => sum + item.file.size, 0) > 50 * 1024 * 1024) {
-                setAttachmentWarnings(["所有對話的待選附件合計最多 50 MiB，請先移除其他對話附件。"]); return current;
-            }
-            setAttachmentWarnings(merged.warnings);
-            return merged.attachments;
-        });
+        const current = controller.getSnapshot().files;
+        const merged = mergeAttachmentCandidates(current, candidates);
+        if (otherAttachmentBytes(controller) + merged.attachments.reduce((sum, item) => sum + item.file.size, 0) > 50 * 1024 * 1024) {
+            setAttachmentWarnings(["所有對話的待選附件合計最多 50 MiB，請先移除其他對話附件。"]);
+            return 0;
+        }
+        setAttachmentWarnings(merged.warnings);
+        setPendingAttachments(merged.attachments);
+        return merged.attachments.length - current.length;
     }, [controller, setPendingAttachments]);
 
     const addFiles = (files: FileList | null) => {
@@ -840,6 +925,15 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
         } catch (dropError) {
             setAttachmentWarnings([errorMessage(dropError)]);
         }
+    };
+
+    const handleComposerPaste = (event: React.ClipboardEvent<HTMLTextAreaElement>) => {
+        if (sending || conversation?.bindingState === "reconcile_required") return;
+        const candidates = collectClipboardImageCandidates(event.clipboardData);
+        if (candidates.length === 0) return;
+        setAttachmentProgress("");
+        const addedCount = addAttachmentCandidates(candidates);
+        if (addedCount > 0) setAttachmentProgress(`已從剪貼簿加入 ${addedCount} 張圖片；送出時會一併傳給 Copilot。`);
     };
 
     const cancelStagedAttachmentBatch = async (batchId: string) => {
@@ -938,6 +1032,21 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
             const submitted = snapshot.draft;
             const text = submitted.quote ? `引用回答：\n${submitted.quote.excerpt}\n\n追問：\n${submitted.text.trim()}` : submitted.text.trim();
             attachmentBatchId = await stagePendingAttachmentBatch(snapshot.files);
+            if (replyingToRun && currentRun && ["WAITING_USER", "BLOCKED"].includes(currentRun.status)) {
+                await apiPost(apiUrl(`/api/runs/${encodeURIComponent(currentRun.id)}/resume`), {
+                    input: text,
+                    attachmentBatchId: attachmentBatchId || undefined,
+                    selectedLocalFolderIds: submitted.localFolders.map((folder) => folder.id),
+                });
+                await controller.accepted(snapshot);
+                if (!alive.current) return;
+                setReplyingToRun(false);
+                setAttachmentProgress(attachmentBatchId ? "附件已交付本機服務；將承接原多步驟工作。" : "");
+                setComposerMenuOpen(false);
+                setNotice("補充內容已加入原多步驟工作，Golem 會承接先前進度。");
+                await Promise.all([loadRuns(), loadMessages()]);
+                return;
+            }
             const accepted = await apiPost<{ requestId: string }>(apiUrl("/api/chat"), {
                 golemId: "golem_A",
                 projectId: project.id,
@@ -976,10 +1085,10 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
             if (followRequestIdRef.current === "pending") followRequestIdRef.current = null;
             setSending(false);
             setAttachmentProgress("");
+            if (!isApiAbortError(requestError)) await loadContext().catch(() => undefined);
             setError(isApiAbortError(requestError)
                 ? "傳送連線已中止；內容仍保留。請先核對是否已排隊，不會自動重送。"
                 : `${errorMessage(requestError)} 內容已保留；請先核對是否已排隊，不會自動重送。`);
-            if (!isApiAbortError(requestError)) await loadContext().catch(() => undefined);
         } finally {
             sendGuard.current = false;
             controller.endSubmit();
@@ -1204,8 +1313,8 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                                     <AlertTriangle className="mt-0.5 h-4 w-4 shrink-0" />
                                     <p>
                                         {item.status === "manual_check_required"
-                                            ? "這一輪重送後仍超過 60 秒；請到 Copilot 檢查是否有權限、下載或特殊提示。"
-                                            : "M365 回覆已超過 60 秒。按「再次確認」後，系統會先找這一輪信封；只有頁面已空閒且確實找不到時，才會重送一次。"}
+                                            ? "這一輪重送後仍超過等待時間；請到 Copilot 檢查是否有權限、下載或特殊提示。"
+                                            : "M365 回覆已超過等待時間。按「再次確認」後，系統會先找這一輪的新回覆；只有頁面已空閒且確實找不到時，才會重送一次。"}
                                     </p>
                                 </div>
                                 {item.status === "manual_check_required" ? (
@@ -1269,7 +1378,7 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                             const isWarning = ["ambiguous", "failed"].includes(message.deliveryState) || message.role === "system";
                             return (
                                 <article key={message.id} className={cn(
-                                    "flex max-w-[86%] flex-col",
+                                    "flex w-full min-w-0 max-w-[86%] flex-col",
                                     isUser ? "ml-auto items-end" : "mr-auto items-start"
                                 )}>
                                     <div className={cn("mb-1 flex items-center gap-2", isUser && "flex-row-reverse")}>
@@ -1284,9 +1393,9 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                                         </span>
                                         <span className="text-[10px] text-muted-foreground">{formatLocalDate(message.createdAt)}</span>
                                     </div>
-                                    <div className="min-w-0">
+                                    <div className="min-w-0 max-w-full">
                                         <div className={cn(
-                                            "inline-block max-w-full rounded-2xl border p-3 text-left text-base leading-7",
+                                            "inline-block max-w-full overflow-hidden rounded-2xl border p-3 text-left text-base leading-7",
                                             isUser
                                                 ? "rounded-tr-none border-blue-500/20 bg-blue-600/10 text-blue-900 dark:text-blue-100"
                                                 : "border-transparent bg-transparent text-foreground/90",
@@ -1295,7 +1404,7 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                                             {message.role === "assistant" ? (
                                                 <M365MessageContent content={message.content} />
                                             ) : (
-                                                <div className="prose prose-sm max-w-none break-words text-foreground dark:prose-invert prose-p:my-2 prose-pre:overflow-x-auto">
+                                                <div className="prose prose-sm max-w-none break-words [overflow-wrap:anywhere] text-foreground dark:prose-invert prose-p:my-2 prose-pre:overflow-x-auto">
                                                     <ReactMarkdown remarkPlugins={[remarkGfm]} components={externalConversationLinkComponents}>{message.content}</ReactMarkdown>
                                                 </div>
                                             )}
@@ -1308,7 +1417,8 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                                 </article>
                             );
                         })}
-                        {showGolemActivity && <GolemActivityBubble />}
+                        {attachmentBatchProgress && <AttachmentBatchProgressBubble progress={attachmentBatchProgress} />}
+                        {showGolemActivity && (!attachmentBatchProgress || ["completed", "failed"].includes(attachmentBatchProgress.status)) && <GolemActivityBubble />}
                     </div>
                 </div>
                 {!followingLatest && messages.length > 0 && (
@@ -1334,7 +1444,7 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                         if (!event.currentTarget.contains(event.relatedTarget as Node | null)) setDragActive(false);
                     }}
                     onDrop={(event) => void handleAttachmentDrop(event)}
-                    className={cn("relative border-t border-border bg-card/50 p-3", replyingToRun && "hidden")}
+                    className="relative border-t border-border bg-card/50 p-3"
                 >
                     <div className="mb-2 text-xs text-muted-foreground" role="status">
                         {draftState.status === "saved" ? "已在本機加密保存" : draftState.status === "saving" ? "保存中…" : draftState.status === "loading" ? "載入草稿…" : "尚未保存"}
@@ -1384,6 +1494,7 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                                 ref={composerRef}
                                 value={input}
                                 onChange={(event) => setInput(event.target.value)}
+                                onPaste={handleComposerPaste}
                                 aria-label="訊息草稿"
                                 onCompositionStart={() => { composing.current = true; }}
                                 onCompositionEnd={() => { composing.current = false; }}
@@ -1411,7 +1522,11 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                                             className="inline-flex max-w-64 items-center gap-1 rounded-lg border border-cyan-500/30 bg-cyan-500/5 px-2 py-1 text-[11px] hover:bg-cyan-500/10 disabled:opacity-60"
                                             title={`移除附件：${item.displayPath}`}
                                         >
-                                            <Paperclip className="h-3 w-3 shrink-0 text-cyan-500" />
+                                            {item.file.type.startsWith("image/") ? (
+                                                <ClipboardImagePreview file={item.file} />
+                                            ) : (
+                                                <Paperclip className="h-3 w-3 shrink-0 text-cyan-500" />
+                                            )}
                                             <span className="truncate">{item.displayPath}</span>
                                             <span className="shrink-0 text-muted-foreground">{formatAttachmentSize(item.file.size)}</span>
                                             <X className="h-3 w-3 shrink-0 text-muted-foreground" />
@@ -1760,12 +1875,30 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                                         <FileText className="mt-0.5 h-3.5 w-3.5 shrink-0 text-primary" />
                                         <span className="min-w-0">
                                             <span className="block font-medium">AGENTS.md</span>
-                                            <span className="block text-[10px] text-muted-foreground">Golem 自主管理 · {projectWorkspace.memoryCount} 則專案記憶</span>
+                                            <span className="block text-[10px] text-muted-foreground">Golem 自主管理的專案指示與記憶</span>
                                         </span>
                                     </button>
                                 )}
                             </div>
                         </section>
+
+                        {projectWorkspace && (
+                            <section className="rounded-2xl border border-emerald-500/25 bg-emerald-500/5 p-4">
+                                <div className="flex items-center justify-between gap-3">
+                                    <div>
+                                        <h4 className="text-sm font-semibold">專案狀態紀錄</h4>
+                                        <p className="mt-1 text-xs text-muted-foreground">目前累積 {projectWorkspace.memoryCount} 則紀錄</p>
+                                    </div>
+                                    <button
+                                        type="button"
+                                        onClick={() => setShowAgentsEditor(true)}
+                                        className="shrink-0 rounded-lg border border-emerald-500/25 bg-background px-3 py-1.5 text-xs font-medium hover:bg-accent"
+                                    >
+                                        查看
+                                    </button>
+                                </div>
+                            </section>
+                        )}
 
                         <section className="rounded-2xl border border-border bg-card p-4">
                             <h4 className="text-xs font-semibold uppercase tracking-[0.12em] text-muted-foreground">工具</h4>
@@ -1806,7 +1939,7 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                                     </span>
                                     <span className="text-right text-muted-foreground">
                                         {run.id === currentRun?.id && runDetail?.plan
-                                            ? `計畫 ${runDetail.plan.steps.filter((step) => step.status === "completed").length}/${runDetail.plan.steps.length} · 宿主執行 ${run.currentStep}${run.goalMode ? " · 無固定上限" : `/${run.maxSteps}`}`
+                                            ? `計畫 ${run.status === "COMPLETED" ? runDetail.plan.steps.length : runDetail.plan.steps.filter((step) => step.status === "completed").length}/${runDetail.plan.steps.length} · 宿主執行 ${run.currentStep}${run.goalMode ? " · 無固定上限" : `/${run.maxSteps}`}`
                                             : `宿主執行 ${run.currentStep}${run.goalMode ? " · 無固定上限" : `/${run.maxSteps}`}`}
                                     </span>
                                 </div>
@@ -1814,7 +1947,7 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                                     <details open className="mt-3 rounded-xl border border-border bg-secondary/35 p-3">
                                         <summary className="cursor-pointer select-none text-xs font-semibold text-primary">
                                             <span className="ml-1 inline-flex max-w-[calc(100%-1rem)] flex-col align-middle">
-                                                <span>Copilot 自主計畫 · v{runDetail.plan.revision} · {runDetail.plan.steps.filter((step) => step.status === "completed").length}/{runDetail.plan.steps.length}</span>
+                                                <span>Copilot 自主計畫 · v{runDetail.plan.revision} · {run.status === "COMPLETED" ? runDetail.plan.steps.length : runDetail.plan.steps.filter((step) => step.status === "completed").length}/{runDetail.plan.steps.length}</span>
                                                 <span className="mt-0.5 truncate text-[11px] font-normal text-foreground">
                                                     目前：{run.status === "COMPLETED" ? (runDetail.plan.status === "complete" ? "計畫已完成" : "已完成（使用者核對）") : runDetail.plan.status === "complete" ? "計畫已完成" : runDetail.plan.steps.find((step) => step.id === runDetail.plan?.currentStepId)?.title || (runDetail.plan.status === "wait_user" ? "等待你的補充" : runDetail.plan.status === "wait_approval" ? "等待核准" : runDetail.plan.status === "blocked" ? "計畫受阻" : "正在更新計畫")}
                                                     {run.status === "COMPLETED" ? "" : pendingLocalActions.length > 0 ? " · 等待工具核准" : actionExecutionQueue.length > 0 ? " · 工具執行中" : run.status === "PAUSED" ? " · 已暫停" : runDetail.plan.status === "running" ? " · 等待 Observation" : ""}
@@ -1824,13 +1957,13 @@ function ScopedM365Chat({ projectId: activeProjectId, conversationId: activeConv
                                         <div className="mt-3 h-1.5 overflow-hidden rounded-full bg-background">
                                             <div
                                                 className="h-full rounded-full bg-primary transition-all"
-                                                style={{ width: `${Math.round((runDetail.plan.steps.filter((step) => step.status === "completed").length / runDetail.plan.steps.length) * 100)}%` }}
+                                                style={{ width: `${run.status === "COMPLETED" ? 100 : Math.round((runDetail.plan.steps.filter((step) => step.status === "completed").length / runDetail.plan.steps.length) * 100)}%` }}
                                             />
                                         </div>
                                         <p className="mt-2 text-xs leading-5 text-muted-foreground">完成條件：{runDetail.plan.completionCriteria}</p>
                                         <ol className="mt-3 space-y-2">
                                             {runDetail.plan.steps.map((step, index) => {
-                                                const displayedStatus = step.status;
+                                                const displayedStatus = run.status === "COMPLETED" && step.status !== "skipped" ? "completed" : step.status;
                                                 return (
                                                     <li key={step.id} className="flex gap-2 text-xs leading-5">
                                                         <span className={cn(

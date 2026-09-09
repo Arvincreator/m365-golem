@@ -22,19 +22,20 @@ export const DEFAULT_READ_HOST_PATTERNS = SHAREPOINT_ONLINE_HOST_SUFFIXES.map((s
 
 /**
  * config/policy.json schema (spec section 20).
- * Read access and write authorization are intentionally separate: readHostPatterns
- * scopes the SharePoint/OneDrive browser surface, while allowedHosts and
- * allowedSites are the explicit target allowlist. deniedHosts and deniedSites
- * are deny-first safety overrides for targets that must never be used.
+ * SharePoint/OneDrive targets are allowed by default within the supported
+ * Microsoft host families. The signed-in Edge session and SharePoint remain
+ * the authority for what the user can actually access; deniedHosts and
+ * deniedSites are local deny-first overrides.
+ *
+ * Older policy files may still contain allowedHosts, allowedSites, or
+ * allowedLibraries. Zod strips those legacy keys so they cannot silently keep
+ * acting as authorization gates after this migration.
  */
 export const PolicySchema = z.object({
   writeEnabled: z.boolean().default(false),
   readHostPatterns: z.array(z.string().min(1)).default([...DEFAULT_READ_HOST_PATTERNS]),
-  allowedHosts: z.array(z.string()).default([]),
-  allowedSites: z.array(z.string()).default([]),
   deniedHosts: z.array(z.string()).default([]),
   deniedSites: z.array(z.string()).default([]),
-  allowedLibraries: z.array(z.string()).default([]),
   allowedLocalPaths: z.array(z.string()).default([]),
   allowOverwrite: z.boolean().default(false),
   allowRecycle: z.boolean().default(false),

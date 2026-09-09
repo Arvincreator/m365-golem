@@ -148,6 +148,35 @@ class M365LocalFolderService {
         }));
     }
 
+    resolveAttachmentFiles(references, folderId, relativePaths) {
+        const selected = this.validateReferences(references);
+        const reference = selected.find((item) => item.id === String(folderId || '').trim());
+        if (!reference) {
+            throw folderError('M365_LOCAL_FOLDER_SCOPE_INVALID', 'The requested folder is not selected for this conversation.', 403);
+        }
+        if (!Array.isArray(relativePaths) || relativePaths.length < 1 || relativePaths.length > 100) {
+            throw folderError('M365_LOCAL_ATTACHMENT_SELECTION_INVALID', 'Select between 1 and 100 local files.');
+        }
+        const files = relativePaths.map((relativePath) => {
+            const resolved = this._resolveTarget(reference, relativePath, 'file');
+            const sourceName = path.basename(resolved.target);
+            if (SENSITIVE_FILE_RE.test(sourceName) || SENSITIVE_EXTENSION_RE.test(sourceName)) {
+                throw folderError('M365_LOCAL_FOLDER_SENSITIVE_FILE', 'Credential and secret files cannot be attached to Microsoft 365.', 403);
+            }
+            return {
+                name: sourceName,
+                relativePath: resolved.relative.split(path.sep).join('/'),
+                path: resolved.target,
+                size: resolved.stat.size,
+            };
+        });
+        const names = files.map((file) => file.name.toLocaleLowerCase());
+        if (new Set(names).size !== names.length) {
+            throw folderError('M365_LOCAL_ATTACHMENT_DUPLICATE_NAME', 'Selected files must have unique filenames before uploading.', 409);
+        }
+        return files;
+    }
+
     _resolveTarget(reference, relativePath, expectedType) {
         const validated = this._validateReference(reference);
         const relative = cleanRelativePath(relativePath);

@@ -222,6 +222,21 @@ class M365AttachmentService {
         return { file: entry, fileCount: manifest.files.length, totalBytes: manifest.totalBytes };
     }
 
+    stageLocalFile(batchId, binding, input = {}) {
+        const sourcePath = path.resolve(String(input.sourcePath || ''));
+        let stat;
+        try { stat = fs.lstatSync(sourcePath); } catch (_) {
+            throw attachmentError('M365_ATTACHMENT_SOURCE_NOT_FOUND', 'The selected local attachment is no longer available.', 404);
+        }
+        if (!stat.isFile() || stat.isSymbolicLink() || stat.size < 1 || stat.size > this.maxFileBytes) {
+            throw attachmentError('M365_ATTACHMENT_SOURCE_INVALID', 'The selected local attachment is not a supported regular file.', 400);
+        }
+        return this.stageFile(batchId, binding, {
+            fileName: input.fileName || path.basename(sourcePath),
+            base64Data: fs.readFileSync(sourcePath).toString('base64'),
+        });
+    }
+
     resolveBatch(batchId, binding) {
         const manifest = this._readManifest(batchId);
         this._assertBinding(manifest, binding.projectId, binding.conversationId);

@@ -55,6 +55,7 @@ export const NATIVE_MSG_HOST_TO_EXT_MAX_BYTES = 1024 * 1024 - 4096; // headroom 
  * and the native-host consumer must both match):
  *
  *   status  : { siteUrl?: string }
+ *   resolveSharingUrl: { sharingUrl: string }
  *   download: { siteUrl: string; serverRelativeUrl: string; destinationPath: string (pre-validated absolute path) }
  *   upload  : { localPath: string (pre-validated absolute path); siteUrl: string; folderServerRelativeUrl: string; fileName: string; overwrite: boolean }
  *   copy    : { siteUrl: string; sourceServerRelativeUrl: string; destServerRelativeUrl: string; overwrite: boolean }
@@ -82,6 +83,7 @@ export const NATIVE_MSG_HOST_TO_EXT_MAX_BYTES = 1024 * 1024 - 4096; // headroom 
  */
 const PipeOpSchema = z.enum([
   "status",
+  "resolveSharingUrl",
   "download",
   "upload",
   "copy",
@@ -155,6 +157,7 @@ export const NativeMessageSchema = z.object({
     .optional(),
   type: z.enum([
     "bridge-status",
+    "resolve-sharing-url",
     "sp-get-file",
     "sp-upload-file",
     "sp-copy",

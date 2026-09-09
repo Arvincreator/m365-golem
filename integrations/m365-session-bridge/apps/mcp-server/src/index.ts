@@ -36,6 +36,7 @@ import {
   checkOverwrite,
   checkRecycleAllowed,
   checkConfirmationToken,
+  isSharePointOnlineHost,
 } from "@m365-bridge/policy";
 import { fileExists } from "@m365-bridge/files";
 import { AuditLogger, newRequestId, type AuditEvent } from "@m365-bridge/audit";
@@ -129,8 +130,30 @@ function throwIfPipeError(reply: { ok: boolean; errorCode?: string; errorMessage
 
 function targetAuthorizer(policy: ReturnType<typeof getPolicy>) {
   const session = createAuthorizationSession();
-  return (urlStr: string, action: string, detail?: string) =>
-    authorizeSharePointTarget(urlStr, policy, nativeHost, action, detail, { session, audit });
+  return async (urlStr: string, action: string, detail?: string) => {
+    let targetUrl = urlStr;
+    let parsed: URL;
+    try {
+      parsed = new URL(urlStr);
+    } catch {
+      throw new BridgeError(ErrorCode.INVALID_INPUT, `Not a valid URL: ${urlStr}`);
+    }
+
+    if (/^\/:[^/]+:\/(?:s|g)\//i.test(parsed.pathname)) {
+      if (parsed.protocol !== "https:" || !isSharePointOnlineHost(parsed.hostname)) {
+        throw new BridgeError(ErrorCode.HOST_NOT_ALLOWED, "Sharing links must use a supported SharePoint Online host");
+      }
+      const resolved = await nativeHost.sendRequest("resolveSharingUrl", { sharingUrl: urlStr }, 45_000);
+      throwIfPipeError(resolved, ErrorCode.INVALID_INPUT);
+      const resolvedUrl = resolved.result?.resolvedUrl;
+      if (typeof resolvedUrl !== "string") {
+        throw new BridgeError(ErrorCode.INVALID_INPUT, "SharePoint sharing URL did not resolve to a usable target");
+      }
+      targetUrl = resolvedUrl;
+    }
+
+    return authorizeSharePointTarget(targetUrl, policy, nativeHost, action, detail, { session, audit });
+  };
 }
 
 const server = new McpServer({ name: "m365-session-bridge", version: BRIDGE_VERSION });
@@ -139,7 +162,7 @@ server.registerTool(
   "m365_bridge_status",
   {
     description:
-       "Check whether the M365 Session Bridge is online: Edge extension connectivity, whether a Microsoft 365 session is available, the SharePoint/OneDrive host scope, and the current allow/deny policy. This tool does not search Microsoft 365 and never returns cookies, tokens, or request digests.",
+       "Check whether the M365 Session Bridge is online: Edge extension connectivity, the supported SharePoint/OneDrive host scope, deny rules, and write mode. This tool does not search Microsoft 365 and never returns cookies, tokens, or request digests.",
     inputSchema: BridgeStatusInput.shape,
   },
   async () =>
@@ -149,26 +172,10 @@ server.registerTool(
       let m365SessionAvailable = false;
       let probeDetail: Record<string, unknown> = {};
       if (extensionOnline) {
-        // Session detection must remain useful even before the owner has
-        // explicitly authorized a target. Use an allowed host root only for
-        // the read-only status probe; file operations use the deny-first
-        // target authorizer and may open the native approval dialog.
-        // A "/personal/..." site only resolves under the "-my" host, while a
-        // "/sites/..." (or other) site belongs on the regular tenant host —
-        // allowedHosts and allowedSites are separate arrays with no implicit
-        // index pairing, so pick the host that actually matches the site
-        // path's shape instead of always zipping allowedHosts[0].
-        const firstSite = policy.allowedSites[0];
-        const myHost = policy.allowedHosts.find((host) => host.endsWith("-my.sharepoint.com"));
-        const tenantHost = policy.allowedHosts.find((host) => !host.endsWith("-my.sharepoint.com")) ?? policy.allowedHosts[0];
-        const siteHost = firstSite?.startsWith("/personal/") ? myHost ?? policy.allowedHosts[0] : tenantHost;
-        const siteUrl =
-          firstSite && siteHost
-            ? `https://${siteHost}${firstSite}`
-            : (myHost ?? policy.allowedHosts[0])
-              ? `https://${myHost ?? policy.allowedHosts[0]}`
-              : undefined;
-        const reply = await nativeHost.sendRequest("status", { siteUrl }, 15_000);
+        // With no target allowlist there is no configured tenant URL to
+        // probe. Status therefore proves extension connectivity; actual M365
+        // access is verified when an exact target URL is used.
+        const reply = await nativeHost.sendRequest("status", {}, 15_000);
         type StatusResultShape = { extensionOnline?: boolean; reachable?: boolean; result?: { reachable?: boolean } };
         const result = reply.result as StatusResultShape | undefined;
         extensionOnline = Boolean(reply.ok && result?.extensionOnline);
@@ -181,7 +188,7 @@ server.registerTool(
         // debuggable without digging into logs: which URL was probed, and
         // what the pipe/extension layer actually returned.
         probeDetail = {
-          probedSiteUrl: siteUrl ?? null,
+          probedSiteUrl: null,
           replyOk: reply.ok,
           replyErrorCode: reply.errorCode ?? null,
           replyErrorMessage: reply.errorMessage ?? null,
@@ -191,12 +198,9 @@ server.registerTool(
       return {
         extensionOnline,
         m365SessionAvailable,
-        tenantHost: policy.allowedHosts[0] ?? null,
         readHostPatterns: policy.readHostPatterns,
         bridgeVersion: BRIDGE_VERSION,
         writeMode: policy.writeEnabled,
-        allowedHosts: policy.allowedHosts,
-        allowedSites: policy.allowedSites,
         deniedHosts: policy.deniedHosts,
         deniedSites: policy.deniedSites,
         ...probeDetail,

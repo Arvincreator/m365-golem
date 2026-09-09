@@ -39,6 +39,16 @@ test('new text while initial flush is pending is flushed before snapshot capture
     const snapshot = await submit; expect(snapshot.draft.text).toBe('B');
     await controller.accepted(snapshot); controller.endSubmit(); expect(controller.getSnapshot().draft.text).toBe('');
 });
+test('accepted send keeps selected local folders available for follow-up turns', async () => {
+    const { controller, get } = fixture(); await controller.initialize();
+    const folder = { id: 'folder_receipts', name: '憑證', path: 'C:\\Receipts' };
+    controller.update({ text: '先列出檔案', localFolders: [folder] });
+    const snapshot = await controller.beginSubmit();
+    await controller.accepted(snapshot); controller.endSubmit();
+    expect(controller.getSnapshot().draft.text).toBe('');
+    expect(controller.getSnapshot().draft.localFolders).toEqual([folder]);
+    expect(get().localFolders).toEqual([folder]);
+});
 test('two windows preserve local edits on conflict and explicitly resolve', async () => {
     const { controller: a, transport } = fixture(); const b = new DraftController(transport);
     await Promise.all([a.initialize(), b.initialize()]);

@@ -1,6 +1,6 @@
 {
   "name": "m365-session-bridge",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "Built-in M365 Golem bridge: local MCP -> Native Messaging -> visible Edge session -> SharePoint/OneDrive REST",
   "workspaces": [

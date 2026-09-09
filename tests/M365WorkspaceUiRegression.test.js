@@ -13,6 +13,15 @@ describe('M365 workspace UI regressions', () => {
         expect(source).toContain('if (!conversationExists) selectProject(activeProjectId);');
     });
 
+    test('shows project conversations five at a time and resets after collapse', () => {
+        const source = read('web-dashboard/src/app/dashboard/layout.tsx');
+        expect(source).toContain('const CONVERSATION_PAGE_SIZE = 5;');
+        expect(source).toContain('conversations.slice(0, visibleConversationCount)');
+        expect(source).toContain('visibleConversationCount + CONVERSATION_PAGE_SIZE');
+        expect(source).toContain('delete next[projectId];');
+        expect(source).toContain('顯示更多');
+    });
+
     test('clears a prior chat error after valid context loads or the selection disappears', () => {
         const source = read('web-dashboard/src/app/dashboard/chat/page.tsx');
         expect(source).toContain('await Promise.all([loadMessages(), loadRuns(), loadPendingLocalActions(), loadPendingResponses()]);\n        if (ticket.current()) setError("");');
@@ -41,9 +50,14 @@ describe('M365 workspace UI regressions', () => {
         expect(source).toContain('collectDroppedAttachmentCandidates');
         expect(source).toContain('/api/m365/workspace/pick-folder');
         expect(source).toContain('selectedLocalFolderIds: submitted.localFolders.map');
+        expect(source).toContain('attachmentBatchId: attachmentBatchId || undefined,\n                    selectedLocalFolderIds: submitted.localFolders.map');
+        expect(source).not.toContain('新的本機資料夾請先返回一般對話加入');
         expect(source).toContain('本機資料夾只提供路徑並按需讀取');
         expect(source).not.toContain('node.setAttribute("webkitdirectory", "")');
         expect(source).toContain('onDrop={(event) => void handleAttachmentDrop(event)}');
+        expect(source).toContain('onPaste={handleComposerPaste}');
+        expect(source).toContain('collectClipboardImageCandidates(event.clipboardData)');
+        expect(source).toContain('送出時會一併傳給 Copilot');
         expect(source).toContain('M365 處理與送出結果以對話狀態為準');
     });
 
@@ -104,9 +118,9 @@ describe('M365 workspace UI regressions', () => {
         expect(source).toContain('工具執行中');
         expect(source).toContain('等待 Observation');
         expect(source).toContain('進行中');
-        expect(source).toContain('`計畫 ${runDetail.plan.steps.filter');
+        expect(source).toContain('`計畫 ${run.status === "COMPLETED" ? runDetail.plan.steps.length');
         expect(source).toContain('run.goalMode ? " · 無固定上限" : `/${run.maxSteps}`');
-        expect(source).toContain('const displayedStatus = step.status;');
+        expect(source).toContain('const displayedStatus = run.status === "COMPLETED" && step.status !== "skipped" ? "completed" : step.status;');
         expect(source).toContain('runAction(run, "complete"');
         expect(source).toContain('確認已完成');
         expect(source).toContain('每輪都會先判斷');
@@ -144,13 +158,19 @@ describe('M365 workspace UI regressions', () => {
         expect(source).toContain('需要授權或補充時仍會停下');
     });
 
-    test('turns the automatic-turn ceiling into a one-turn continuation gate', () => {
+    test('continues with a fresh N+1 automatic-turn allowance', () => {
         const source = read('web-dashboard/src/features/m365-workspace/components/RunAttention.tsx');
+        expect(source).toContain('已停止重複要求 Copilot 改寫');
+        expect(source).toContain('M365_PROTOCOL_REPAIR_EXHAUSTED');
+        expect(source).toContain('未收到 GOLEM_PLAN，沒有啟動多步驟');
+        expect(source).toContain('這不是要你補資料');
+        expect(source).toContain('!unplannedRepairFailure');
+        expect(source).toContain('清除錯誤狀態並返回一般對話');
         expect(source).toContain('run.errorCode === "M365_AUTO_TURN_LIMIT"');
         expect(source).toContain('下一回合尚未送出');
-        expect(source).toContain('{ grantAutoTurns: 1 }');
-        expect(source).toContain('再執行 1 回合');
-        expect(source).toContain('再次到達上限時會重新詢問');
+        expect(source).toContain('{ continueAutoRun: true }');
+        expect(source).toContain('繼續自動執行');
+        expect(source).toContain('以 N+1 回合為新的自動執行額度');
     });
 
     test('suppresses browser cancellation text instead of showing it as a workspace failure', () => {
@@ -168,7 +188,9 @@ describe('M365 workspace UI regressions', () => {
         expect(source).toContain('[0, 140, 280].map((delay) =>');
         expect(source).toContain('animate-bounce motion-reduce:animate-pulse');
         expect(source).toContain('const showGolemActivity = sending || activeDialogueCount > 0;');
-        expect(source).toContain('{showGolemActivity && <GolemActivityBubble />}');
+        expect(source).toContain('<AttachmentBatchProgressBubble progress={attachmentBatchProgress} />');
+        expect(source).toContain('showGolemActivity && (!attachmentBatchProgress');
+        expect(source).toContain('附件分批處理中');
         expect(source).toContain('!pausedResponseRequestIds.has(message.requestId)');
     });
 

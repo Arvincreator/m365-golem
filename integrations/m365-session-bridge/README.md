@@ -12,9 +12,11 @@ SharePoint or OneDrive URL.
 ## Distribution boundary
 
 Git tracks source code, package lock files, manifest templates, and the
-deny-first default policy only. The fresh-install policy permits non-destructive
-write tools (create folder, upload without overwrite, copy, move, rename and
-metadata/version operations) only after the target host/site is authorized.
+deny-first default policy only. Supported SharePoint Online and OneDrive for
+Business targets are available by default when the signed-in user has access;
+local host/site deny entries take priority. The fresh-install policy permits
+non-destructive write tools (create folder, upload without overwrite, copy,
+move, rename and metadata/version operations) only when write mode is enabled.
 Overwrite, recycle, permanent delete, sharing and permission changes remain
 disabled by default. Installation creates the following per-user
 state under `%LOCALAPPDATA%\M365-Golem\m365-session-bridge`:

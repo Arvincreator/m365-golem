@@ -4,6 +4,7 @@ const crypto = require('crypto');
 const express = require('express');
 const LocalWorkspacePicker = require('../../src/services/LocalWorkspacePicker');
 const { getM365AttachmentService } = require('../../src/services/M365AttachmentService');
+const { getM365LocalFolderService } = require('../../src/services/M365LocalFolderService');
 const {
     acquireM365DispatchLease,
     activateM365Conversation,
@@ -548,8 +549,28 @@ module.exports = function registerM365WorkspaceRoutes(server) {
     router.post('/api/runs/:runId/resume', async (req, res) => {
         try {
             const coordinator = await getM365RunCoordinator(server);
+            const selectedLocalFolderIds = req.body.selectedLocalFolderIds;
+            if (selectedLocalFolderIds !== undefined && !Array.isArray(selectedLocalFolderIds)) {
+                return res.status(400).json({
+                    success: false,
+                    error: 'M365_LOCAL_FOLDER_SELECTION_INVALID',
+                    message: 'Local folder selections must be an array.',
+                });
+            }
+            if (Array.isArray(selectedLocalFolderIds) && selectedLocalFolderIds.length > 0) {
+                const store = await getM365WorkspaceStore(server);
+                const existingRun = await store.getRun(req.params.runId);
+                const conversation = await store.getConversation(existingRun.conversationId);
+                const savedDraft = await store.getDraft(conversation.projectId, conversation.id);
+                const folders = getM365LocalFolderService(server).resolveSelectedReferences(
+                    selectedLocalFolderIds,
+                    savedDraft.localFolders
+                );
+                coordinator.rememberRunLocalFolders(existingRun.id, folders);
+            }
             const run = await coordinator.resumeRun(req.params.runId, req.body.input || '', {
-                grantAutoTurns: req.body.grantAutoTurns,
+                continueAutoRun: req.body.continueAutoRun,
+                attachmentBatchId: req.body.attachmentBatchId,
             });
             return res.json({ success: true, run });
         } catch (error) {

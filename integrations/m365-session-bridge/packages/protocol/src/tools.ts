@@ -13,12 +13,9 @@ export interface BridgeStatusResult {
   status: "success" | "error";
   extensionOnline: boolean;
   m365SessionAvailable: boolean;
-  tenantHost: string | null;
   readHostPatterns: string[];
   bridgeVersion: string;
   writeMode: boolean;
-  allowedHosts: string[];
-  allowedSites: string[];
   deniedHosts: string[];
   deniedSites: string[];
 }

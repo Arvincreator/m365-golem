@@ -108,6 +108,31 @@ describe('ConversationManager', () => {
         expect(settled).toBe(true);
     });
 
+    test('returns an internal attachment receipt without dispatching it or consuming an automatic turn', async () => {
+        const receipt = {
+            text: '[GOLEM_BATCH_RECEIPT]{"schema_version":"golem_attachment_batch/1"}[/GOLEM_BATCH_RECEIPT]',
+            attachments: [],
+            status: 'ENVELOPE_COMPLETE',
+        };
+        mockBrain.sendMessage.mockResolvedValue(receipt);
+        cm = new ConversationManager(mockBrain, mockShunter, mockController);
+        const budgetSpy = jest.spyOn(cm, '_autoTurnBudget');
+
+        const result = await cm.enqueue(mockCtx, 'internal batch', {
+            bypassDebounce: true,
+            isPriority: true,
+            isSystemFeedback: true,
+            skipAutoTurnBudget: true,
+            batchIngestMode: true,
+            waitForCompletion: true,
+            attachment: { validatedByM365Harness: true, files: [{ name: 'brief.pdf' }] },
+        });
+
+        expect(result).toBe(receipt);
+        expect(budgetSpy).not.toHaveBeenCalled();
+        expect(mockShunter.dispatch).not.toHaveBeenCalled();
+    });
+
     test('should request queue approval when busy', () => {
         cm = new ConversationManager(mockBrain, mockShunter, mockController);
         jest.spyOn(cm, '_processQueue').mockImplementation(() => {});
@@ -192,6 +217,38 @@ describe('ConversationManager', () => {
             expect.objectContaining({
                 isSystemFeedback: true,
                 allowActions: false
+            })
+        );
+    });
+
+    test('keeps background maintenance hard-silent through the queue and shunter', async () => {
+        cm = new ConversationManager(mockBrain, mockShunter, mockController);
+        const budgetSpy = jest.spyOn(cm, '_autoTurnBudget');
+        cm.queue.push({
+            ctx: mockCtx,
+            text: '[GOLEM_PROJECT_MEMORY_REPAIR]\nrepair silently',
+            attachment: null,
+            options: {
+                isSystemFeedback: true,
+                suppressReply: true,
+                hardSuppressReply: true,
+                backgroundMaintenance: true,
+                skipAutoTurnBudget: true,
+            },
+        });
+
+        await cm._processQueue();
+
+        expect(budgetSpy).not.toHaveBeenCalled();
+        expect(mockShunter.dispatch).toHaveBeenCalledWith(
+            mockCtx,
+            expect.any(Object),
+            mockBrain,
+            mockController,
+            expect.objectContaining({
+                suppressReply: true,
+                hardSuppressReply: true,
+                backgroundMaintenance: true,
             })
         );
     });
@@ -356,7 +413,7 @@ describe('ConversationManager', () => {
                 nextLimit: 3,
             });
             expect(mockCtx.reply).toHaveBeenCalledWith(
-                expect.stringContaining('上限會由 2 增加為 3'),
+                expect.stringContaining('新的 3 回合自動執行額度'),
                 expect.any(Object)
             );
 
@@ -367,7 +424,7 @@ describe('ConversationManager', () => {
                 options: {
                     isSystemFeedback: true,
                     workspaceRunId: 'run-soft-cap',
-                    autoTurnBudget: { used: 2, limit: 3 },
+                    autoTurnBudget: { used: 0, limit: 3, reset: true },
                 },
             });
             await cm._processQueue();
@@ -379,6 +436,7 @@ describe('ConversationManager', () => {
                 expect.objectContaining({ isSystemFeedback: true })
             );
             expect(onAutoTurnLimit).toHaveBeenCalledTimes(1);
+            expect(cm.autoTurnStateByRun.get('run-soft-cap')).toEqual({ used: 1, limit: 3 });
         } finally {
             ConfigManager.CONFIG.MAX_AUTO_TURNS = originalLimit;
         }

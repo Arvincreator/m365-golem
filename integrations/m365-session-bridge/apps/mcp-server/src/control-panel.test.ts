@@ -9,11 +9,8 @@ function validPolicy() {
   return {
     writeEnabled: true,
     readHostPatterns: ["*.sharepoint.com"],
-    allowedHosts: ["tenant.sharepoint.com"],
-    allowedSites: ["/sites/TestSite"],
     deniedHosts: [],
     deniedSites: [],
-    allowedLibraries: [],
     allowedLocalPaths: ["%TEMP%\\m365"],
     allowOverwrite: false,
     allowRecycle: true,
@@ -48,9 +45,9 @@ test("control panel is loopback-only and edits policy lists through validated en
     assert.equal(page.status, 200);
     const html = await page.text();
     assert.match(html, /M365 Session Bridge/);
-    assert.match(html, /白名單網域/);
     assert.match(html, /黑名單網域/);
-    assert.match(html, /永遠允許/);
+    assert.doesNotMatch(html, /白名單/);
+    assert.match(html, /預設可嘗試存取/);
     assert.match(html, /允許上傳的本機專案資料夾/);
 
     const initial = await fetch(`http://127.0.0.1:${port}/api/policy`);
@@ -105,11 +102,11 @@ test("control panel is loopback-only and edits policy lists through validated en
     assert.deepEqual(confirmedPolicy.deniedHosts, ["blocked.sharepoint.com"]);
     assert.equal(confirmedPolicy.writeEnabled, true);
 
-    // Non-SharePoint hostnames must be rejected when adding to any host list.
+    // Removed allowlist fields must not remain writable through the legacy API.
     const rejectedHost = await fetch(`http://127.0.0.1:${port}/api/entries`, {
       method: "POST",
       headers: { "content-type": "application/json", origin: `http://127.0.0.1:${port}` },
-      body: JSON.stringify({ list: "allowedHosts", value: "evil.com" }),
+      body: JSON.stringify({ list: "allowedHosts", value: "tenant.sharepoint.com" }),
     });
     assert.equal(rejectedHost.status, 400);
 

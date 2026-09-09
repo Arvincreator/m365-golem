@@ -67,6 +67,10 @@ class ResponseParser {
             .replace(/\[\[\s*END\s*:[^\]\n\r]+?\]/gi, '')
             .replace(/\[\s*BEGIN\s*:[^\]\n\r]+?\]\]/gi, '')
             .replace(/\[\s*END\s*:[^\]\n\r]+?\]\]/gi, '')
+            // Copilot occasionally emits XML-style protocol closers even when
+            // instructed to use square brackets. They are transport metadata,
+            // never user-facing reply content.
+            .replace(/<\/?(?:GOLEM_(?:MEMORY|PROJECT_MEMORY|USER_MEMORY|CONVERSATION_TITLE|ACTION|PLAN|REPLY)|AVOID_MEMORY)>/gi, '')
             .replace(/\[\/(?:GOLEM_(?:MEMORY|PROJECT_MEMORY|USER_MEMORY|CONVERSATION_TITLE|ACTION|PLAN|REPLY)|AVOID_MEMORY)\]/gi, '')
             .replace(/(?:^|\n)\s*\[(?:\/?GOLEM_(?:MEMORY|PROJECT_MEMORY|USER_MEMORY|CONVERSATION_TITLE|ACTION|PLAN|REPLY)|\/?AVOID_MEMORY)\]\s*(?=\n|$)/gi, '\n')
             .replace(/^\s*null\s*$/i, '')

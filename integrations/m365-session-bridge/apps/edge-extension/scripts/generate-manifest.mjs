@@ -20,7 +20,6 @@ const templatePath = path.join(extensionDir, "manifest.template.json");
 const outPath = path.join(extensionDir, "manifest.json");
 
 const policy = JSON.parse(readFileSync(policyPath, "utf8"));
-const hosts = Array.isArray(policy.allowedHosts) ? policy.allowedHosts : [];
 const defaultReadHostPatterns = [
   "*.sharepoint.com",
   "*.sharepoint.us",
@@ -41,14 +40,7 @@ for (const pattern of readHostPatterns) {
   }
 }
 
-for (const allowedHost of hosts) {
-  const normalized = String(allowedHost).trim().toLowerCase();
-  if (!supportedSuffixes.some((suffix) => normalized.endsWith(suffix))) {
-    throw new Error(`allowedHosts contains a non-SharePoint hostname: ${allowedHost}`);
-  }
-}
-
-const hostPatterns = [...new Set([...readHostPatterns, ...hosts].map((h) => `https://${h}/*`))];
+const hostPatterns = [...new Set(readHostPatterns.map((h) => `https://${h}/*`))];
 const template = readFileSync(templatePath, "utf8");
 const manifest = template.replace(
   '"host_permissions": ["__HOST_PERMISSIONS_PLACEHOLDER__"]',

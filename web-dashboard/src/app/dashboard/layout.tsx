@@ -58,6 +58,8 @@ import type {
 type ProjectSort = "recent" | "name";
 type WorkspaceMode = "managed" | "create" | "existing";
 
+const CONVERSATION_PAGE_SIZE = 5;
+
 const EMPTY_PROJECT_FORM = {
     name: "",
     description: "",
@@ -95,6 +97,7 @@ function CodexSidebar({ open, setOpen }: { open: boolean; setOpen: (value: boole
     const [projects, setProjects] = useState<M365Project[]>([]);
     const [conversationsByProject, setConversationsByProject] = useState<Record<string, M365Conversation[]>>({});
     const [expandedProjectIds, setExpandedProjectIds] = useState<Set<string>>(new Set());
+    const [visibleConversationCounts, setVisibleConversationCounts] = useState<Record<string, number>>({});
     const [toolsOpen, setToolsOpen] = useState(false);
     const [creatingConversationProjectId, setCreatingConversationProjectId] = useState("");
     const [showProjectDialog, setShowProjectDialog] = useState(false);
@@ -205,6 +208,11 @@ function CodexSidebar({ open, setOpen }: { open: boolean; setOpen: (value: boole
             next.add(activeProjectId);
             return next;
         });
+        setVisibleConversationCounts((current) => (
+            current[activeProjectId]
+                ? current
+                : { ...current, [activeProjectId]: CONVERSATION_PAGE_SIZE }
+        ));
     }, [activeProjectId]);
 
     const activeProject = useMemo(
@@ -283,6 +291,10 @@ function CodexSidebar({ open, setOpen }: { open: boolean; setOpen: (value: boole
             setProjects((current) => [data.project, ...current]);
             setConversationsByProject((current) => ({ ...current, [data.project.id]: [] }));
             setExpandedProjectIds((current) => new Set(current).add(data.project.id));
+            setVisibleConversationCounts((current) => ({
+                ...current,
+                [data.project.id]: CONVERSATION_PAGE_SIZE,
+            }));
             selectProject(data.project.id);
             setProjectForm(EMPTY_PROJECT_FORM);
             setShowProjectDialog(false);
@@ -313,6 +325,10 @@ function CodexSidebar({ open, setOpen }: { open: boolean; setOpen: (value: boole
                 item.id === project.id ? { ...item, updatedAt: data.conversation.updatedAt } : item
             )));
             setExpandedProjectIds((current) => new Set(current).add(project.id));
+            setVisibleConversationCounts((current) => ({
+                ...current,
+                [project.id]: current[project.id] || CONVERSATION_PAGE_SIZE,
+            }));
             selectConversation(project.id, data.conversation.id);
             router.push("/dashboard/chat");
         } catch (error) {
@@ -379,13 +395,20 @@ function CodexSidebar({ open, setOpen }: { open: boolean; setOpen: (value: boole
     };
 
     const toggleProject = (projectId: string) => {
+        const expanding = !expandedProjectIds.has(projectId);
         setExpandedProjectIds((current) => {
             const next = new Set(current);
-            if (next.has(projectId)) next.delete(projectId);
-            else next.add(projectId);
+            if (expanding) next.add(projectId);
+            else next.delete(projectId);
             return next;
         });
-        if (projectId !== activeProjectId) selectProject(projectId);
+        setVisibleConversationCounts((current) => {
+            if (expanding) return { ...current, [projectId]: CONVERSATION_PAGE_SIZE };
+            const next = { ...current };
+            delete next[projectId];
+            return next;
+        });
+        if (expanding && projectId !== activeProjectId) selectProject(projectId);
     };
 
     return (
@@ -508,6 +531,9 @@ function CodexSidebar({ open, setOpen }: { open: boolean; setOpen: (value: boole
                             {visibleProjects.map((project) => {
                                 const expanded = expandedProjectIds.has(project.id);
                                 const conversations = conversationsByProject[project.id] || [];
+                                const visibleConversationCount = visibleConversationCounts[project.id] || CONVERSATION_PAGE_SIZE;
+                                const visibleConversations = conversations.slice(0, visibleConversationCount);
+                                const remainingConversationCount = Math.max(0, conversations.length - visibleConversations.length);
                                 return (
                                     <div key={project.id}>
                                         <div className={cn(
@@ -539,7 +565,7 @@ function CodexSidebar({ open, setOpen }: { open: boolean; setOpen: (value: boole
                                             <div className="ml-5 border-l border-border/70 pl-2">
                                                 {conversations.length === 0 ? (
                                                     <p className="px-2 py-2 text-[11px] text-muted-foreground">尚無對話</p>
-                                                ) : conversations.map((conversation) => (
+                                                ) : visibleConversations.map((conversation) => (
                                                     <div
                                                         key={conversation.id}
                                                         className={cn(
@@ -596,6 +622,22 @@ function CodexSidebar({ open, setOpen }: { open: boolean; setOpen: (value: boole
                                                         </DropdownMenuPrimitive.Root>
                                                     </div>
                                                 ))}
+                                                {remainingConversationCount > 0 && (
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setVisibleConversationCounts((current) => ({
+                                                            ...current,
+                                                            [project.id]: Math.min(
+                                                                conversations.length,
+                                                                visibleConversationCount + CONVERSATION_PAGE_SIZE
+                                                            ),
+                                                        }))}
+                                                        className="flex min-h-8 w-full items-center justify-center rounded-md px-2 text-xs font-medium text-primary transition-colors hover:bg-accent/70"
+                                                        aria-label={`顯示「${project.name}」更多對話，尚有 ${remainingConversationCount} 個`}
+                                                    >
+                                                        顯示更多
+                                                    </button>
+                                                )}
                                             </div>
                                         )}
                                     </div>

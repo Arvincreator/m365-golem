@@ -53,6 +53,19 @@ describe('M365AttachmentService', () => {
         expect(fs.existsSync(path.join(rootDir, batch.batchId))).toBe(false);
     });
 
+    test('stages an approved regular local file through the same trusted manifest', () => {
+        const source = path.join(rootDir, 'source.docx');
+        fs.writeFileSync(source, Buffer.from('synthetic office bytes'));
+        const batch = service.createBatch(binding);
+
+        service.stageLocalFile(batch.batchId, binding, { sourcePath: source, fileName: 'report.docx' });
+        const resolved = service.resolveBatch(batch.batchId, binding);
+
+        expect(resolved.validatedByM365Harness).toBe(true);
+        expect(resolved.files).toHaveLength(1);
+        expect(resolved.files[0]).toEqual(expect.objectContaining({ name: 'report.docx' }));
+    });
+
     test('rejects cross-project access, unsafe names, unsupported types, and duplicates', () => {
         const batch = service.createBatch(binding);
         expect(() => service.stageFile(batch.batchId, {

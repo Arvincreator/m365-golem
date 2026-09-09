@@ -24,6 +24,7 @@ interface SocketContext {
 interface PendingEntry {
   resolve: (response: PipeResponse) => void;
   timer: NodeJS.Timeout;
+  socket?: net.Socket;
 }
 
 const offlineResponse = (message: string): PipeResponse => ({
@@ -48,7 +49,8 @@ export class NativeHostServer {
   private readonly secretPath = defaultSecretPath();
   private mode: ServerMode = "starting";
   private secret: string | null = null;
-  private nativeSocket: net.Socket | null = null;
+  private readonly nativeSockets = new Set<net.Socket>();
+  private preferredNativeSocket: net.Socket | null = null;
   private proxySocket: net.Socket | null = null;
   private proxyBuffer = "";
   private proxyConnecting = false;
@@ -82,7 +84,7 @@ export class NativeHostServer {
   }
 
   isNativeHostConnected(): boolean {
-    if (this.mode === "owner") return this.nativeSocket !== null && !this.nativeSocket.destroyed;
+    if (this.mode === "owner") return this.getPreferredNativeSocket() !== null;
     if (this.mode === "proxy") return this.proxySocket !== null && !this.proxySocket.destroyed;
     return false;
   }
@@ -92,9 +94,10 @@ export class NativeHostServer {
     this.proxyRetryTimer = null;
     this.failPending("Bridge server closed");
     this.failProxyPending("Bridge proxy closed");
-    this.nativeSocket?.destroy();
+    for (const socket of this.nativeSockets) socket.destroy();
     this.proxySocket?.destroy();
-    this.nativeSocket = null;
+    this.nativeSockets.clear();
+    this.preferredNativeSocket = null;
     this.proxySocket = null;
     if (this.mode === "owner") this.server.close();
     this.mode = "starting";
@@ -172,11 +175,12 @@ export class NativeHostServer {
   }
 
   private acceptNativeHost(context: SocketContext): void {
-    if (this.nativeSocket && this.nativeSocket !== context.socket) {
-      this.nativeSocket.destroy();
-      this.failPending("Edge native host was replaced by a newer connection");
-    }
-    this.nativeSocket = context.socket;
+    // Multiple Edge profiles can legitimately have the extension installed.
+    // Keep every connection alive instead of making their reconnect loops kick
+    // each other off forever. The most recently connected/reloaded profile is
+    // preferred for new requests; older connections remain as hot fallbacks.
+    this.nativeSockets.add(context.socket);
+    this.preferredNativeSocket = context.socket;
   }
 
   private onNativeResponse(response: PipeResponse): void {
@@ -189,9 +193,52 @@ export class NativeHostServer {
 
   private onSocketClose(context: SocketContext): void {
     clearTimeout(context.helloTimer);
-    if (context.role === "native-host" && this.nativeSocket === context.socket) {
-      this.nativeSocket = null;
-      this.failPending("Edge native host disconnected");
+    if (context.role === "native-host") {
+      this.nativeSockets.delete(context.socket);
+      this.failPendingForSocket(context.socket, "Edge native host disconnected");
+      if (this.preferredNativeSocket === context.socket) {
+        this.preferredNativeSocket = this.getMostRecentNativeSocket();
+      }
+    }
+  }
+
+  private getMostRecentNativeSocket(): net.Socket | null {
+    let latest: net.Socket | null = null;
+    for (const socket of this.nativeSockets) {
+      if (!socket.destroyed) latest = socket;
+    }
+    return latest;
+  }
+
+  private getPreferredNativeSocket(): net.Socket | null {
+    if (this.preferredNativeSocket && !this.preferredNativeSocket.destroyed) {
+      return this.preferredNativeSocket;
+    }
+    this.preferredNativeSocket = this.getMostRecentNativeSocket();
+    return this.preferredNativeSocket;
+  }
+
+  private getNativeSocketCandidates(): net.Socket[] {
+    const preferred = this.getPreferredNativeSocket();
+    const remaining = [...this.nativeSockets].filter((socket) => !socket.destroyed && socket !== preferred).reverse();
+    return preferred ? [preferred, ...remaining] : remaining;
+  }
+
+  private shouldTryAnotherNativeHost(response: PipeResponse): boolean {
+    if (response.ok) return false;
+    if (response.errorCode === "BRIDGE_OFFLINE" || response.errorCode === "EDGE_EXTENSION_OFFLINE") return true;
+    if (response.errorCode !== "INTERNAL_ERROR") return false;
+    const message = response.errorMessage?.toLowerCase() ?? "";
+    return message.includes("cannot access contents of the page") || message.includes("extension manifest must request permission");
+  }
+
+  private failPendingForSocket(socket: net.Socket, message: string): void {
+    const response = offlineResponse(message);
+    for (const [id, entry] of this.pending) {
+      if (entry.socket !== socket) continue;
+      clearTimeout(entry.timer);
+      this.pending.delete(id);
+      entry.resolve({ ...response, id });
     }
   }
 
@@ -223,13 +270,33 @@ export class NativeHostServer {
     return readSecret(this.secretPath) ?? this.secret;
   }
 
-  private sendDirectRequest(op: PipeRequest["op"], payload: Record<string, unknown>, timeoutMs: number): Promise<PipeResponse> {
-    const socket = this.nativeSocket;
+  private async sendDirectRequest(op: PipeRequest["op"], payload: Record<string, unknown>, timeoutMs: number): Promise<PipeResponse> {
+    const candidates = this.getNativeSocketCandidates();
     const secret = this.currentSecret();
-    if (!socket || socket.destroyed || !secret) {
-      return Promise.resolve(offlineResponse("Native host is not connected"));
+    if (candidates.length === 0 || !secret) {
+      return offlineResponse("Native host is not connected");
     }
 
+    let lastResponse = offlineResponse("Native host is not connected");
+    for (const socket of candidates) {
+      if (socket.destroyed) continue;
+      const response = await this.sendRequestToNativeSocket(socket, secret, op, payload, timeoutMs);
+      lastResponse = response;
+      if (!this.shouldTryAnotherNativeHost(response)) {
+        this.preferredNativeSocket = socket;
+        return response;
+      }
+    }
+    return lastResponse;
+  }
+
+  private sendRequestToNativeSocket(
+    socket: net.Socket,
+    secret: string,
+    op: PipeRequest["op"],
+    payload: Record<string, unknown>,
+    timeoutMs: number
+  ): Promise<PipeResponse> {
     const id = crypto.randomUUID();
     const req: PipeRequest = { kind: "request", id, secret, op, payload };
     return new Promise((resolve) => {
@@ -238,7 +305,7 @@ export class NativeHostServer {
           resolve({ kind: "response", id, ok: false, errorCode: "EDGE_EXTENSION_OFFLINE", errorMessage: "Timed out waiting for native host" });
         }
       }, timeoutMs);
-      this.pending.set(id, { resolve, timer });
+      this.pending.set(id, { resolve, timer, socket });
       socket.write(JSON.stringify(req) + "\n");
     });
   }

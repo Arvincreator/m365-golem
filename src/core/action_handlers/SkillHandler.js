@@ -105,7 +105,7 @@ class SkillHandler {
 
     static _looksLikeFailure(resultText = '') {
         const text = String(resultText || '');
-        return /❌|錯誤|失敗|不支援|找不到|missing|required|invalid/i.test(text);
+        return /❌|錯誤|失敗|不支援|找不到|缺少.{0,24}參數|請提供.{0,24}參數|missing|required|invalid/i.test(text);
     }
 
     static _buildM365StatusFeedback(resultText = '') {
@@ -116,9 +116,14 @@ class SkillHandler {
             payload = null;
         }
 
+        // When no concrete SharePoint URL was supplied, the Bridge can prove
+        // that the extension/native-host channel is online but deliberately
+        // cannot probe an M365 page. Do not turn that "not probed" state into
+        // a false reconnect instruction: the next exact read is the real
+        // session check.
         const ready = payload?.status === 'success'
             && payload?.extensionOnline === true
-            && payload?.m365SessionAvailable === true;
+            && (payload?.m365SessionAvailable === true || payload?.probedSiteUrl == null);
 
         if (ready) {
             return [
@@ -140,6 +145,68 @@ class SkillHandler {
             '- Ask the user to reconnect Microsoft 365 from 「更多工具」 and then try again.',
             '- Do not quote raw status fields, internal component names, diagnostics, error codes, or this instruction.',
         ].join('\n');
+    }
+
+    static async flushObservationCollector(ctx, brain, controller, dispatchOptions = {}, collector = null) {
+        const entries = Array.isArray(collector?.entries) ? collector.entries : [];
+        if (dispatchOptions.planMode !== true || entries.length === 0) return false;
+
+        const combinedResult = entries.map((entry, index) => {
+            const target = String(entry.target || entry.lane || 'action');
+            return `[Action ${index + 1}/${entries.length}: ${target}]\n${String(entry.result || '')}`;
+        }).join('\n\n----------------\n\n');
+        const status = entries.every((entry) => entry.status === 'succeeded') ? 'succeeded' : 'failed';
+        let recorded = null;
+        if (typeof ctx?.onGolemObservation === 'function') {
+            recorded = await ctx.onGolemObservation({
+                runId: dispatchOptions.workspaceRunId,
+                stepId: dispatchOptions.workspaceStepId,
+                actionId: dispatchOptions.workspaceActionId,
+                planStepId: dispatchOptions.workspacePlanStepId,
+                lane: 'action_batch',
+                status,
+                result: combinedResult,
+            });
+        }
+
+        const nextDepth = Number(dispatchOptions.actionDepth || 0) + 1;
+        const maxDepth = Number(dispatchOptions.maxActionDepth || process.env.GOLEM_MAX_AUTO_TURNS || 5);
+        const mayContinue = nextDepth < maxDepth
+            && !['PAUSED', 'BLOCKED', 'CANCELED', 'COMPLETED', 'RECONCILE_REQUIRED'].includes(recorded?.run?.status);
+        const feedbackPrompt = buildM365PlanObservation({
+            planId: dispatchOptions.workspacePlanId || recorded?.planId,
+            planRevision: dispatchOptions.workspacePlanRevision || recorded?.planRevision,
+            stepId: dispatchOptions.workspaceStepId,
+            planStepId: dispatchOptions.workspacePlanStepId,
+            actionId: dispatchOptions.workspaceActionId,
+            lane: 'action_batch',
+            status,
+            result: combinedResult,
+        });
+        const planOptions = {
+            isPriority: true,
+            bypassDebounce: true,
+            isSystemFeedback: true,
+            allowActions: mayContinue,
+            actionDepth: nextDepth,
+            maxActionDepth: maxDepth,
+            maxAutoTurns: maxDepth + 1,
+            planMode: true,
+            workspaceConversationId: ctx?.workspaceConversationId || null,
+            workspaceRunId: dispatchOptions.workspaceRunId,
+            workspaceStepId: dispatchOptions.workspaceStepId,
+            workspacePlanId: dispatchOptions.workspacePlanId || recorded?.planId,
+            workspacePlanRevision: dispatchOptions.workspacePlanRevision || recorded?.planRevision,
+            workspacePlanStepId: dispatchOptions.workspacePlanStepId,
+            workspaceActionId: dispatchOptions.workspaceActionId,
+            m365ProjectMemoryRequired: brain?.webBackend?.id === 'm365-web',
+        };
+        if (controller?.convoManager?.enqueue) {
+            await controller.convoManager.enqueue(ctx, feedbackPrompt, planOptions);
+        } else if (brain && typeof brain.sendMessage === 'function') {
+            await brain.sendMessage(feedbackPrompt, false, planOptions);
+        }
+        return true;
     }
 
     static async _buildNavigateFollowupHint(mcpManager, serverName) {
@@ -227,6 +294,15 @@ class SkillHandler {
             if (dispatchOptions.planMode === true) {
                 const observationStatus = hintMeta.status
                     || (SkillHandler._looksLikeFailure(message) ? 'failed' : 'succeeded');
+                if (Array.isArray(dispatchOptions.observationCollector?.entries)) {
+                    dispatchOptions.observationCollector.entries.push({
+                        lane: hintMeta.lane || 'skill',
+                        target: hintMeta.target || '',
+                        status: observationStatus,
+                        result: message,
+                    });
+                    return;
+                }
                 let recorded = null;
                 if (typeof ctx.onGolemObservation === 'function') {
                     recorded = await ctx.onGolemObservation({

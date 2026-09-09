@@ -66,7 +66,7 @@ M365_LOCAL_MEMORY_ENABLED=false
 M365_ACTIONS_ENABLED=false
 M365_AUTO_BOOT_PROMPT=false
 M365_PAGE_READY_TIMEOUT_MS=20000
-M365_RESPONSE_TIMEOUT_MS=60000
+M365_RESPONSE_TIMEOUT_MS=300000
 
 PLAYWRIGHT_M365_BROWSER_CHANNEL=msedge
 PLAYWRIGHT_M365_STEALTH_ENABLED=false
@@ -104,12 +104,12 @@ PLAYWRIGHT_M365_BLOCK_HEAVY_RESOURCES=false
 | `M365_ATTACHMENT_LEGACY_REJECTED` | 收到未綁定專案／對話的舊式附件 | 由目前 M365 對話框重新選取、貼上或拖曳附件 |
 | `M365_LOCAL_FOLDER_*` | 本輪資料夾參照失效、超出範圍或要求讀取受保護內容 | 重新選取特定資料夾，或改為指定安全的相對檔案路徑；不要放寬資料邊界 |
 | `M365_SEND_UNCONFIRMED` | 已嘗試一次送出，但無法確認是否成功 | 不自動重送；先查看 Edge 頁面，避免重複訊息 |
-| `M365_RESPONSE_NOT_FOUND` | 送出成功，但 60 秒內沒有命中可信的 Copilot 回覆節點 | 查看主控台的 selector 計數；診斷只含節點屬性與文字長度，不含提示或回覆內容 |
+| `M365_RESPONSE_NOT_FOUND` | 送出成功，但在設定的等待時間內沒有命中可信的 Copilot 回覆節點 | 查看主控台的 selector 計數；診斷只含節點屬性與文字長度，不含提示或回覆內容 |
 
 ## 尚未通過的項目
 
 - 尚未驗證租戶的服務端聊天歷史、稽核與資料保留設定；這些不由 GOLEM 安全模式控制。
-- 尚未證明目前 selector 能涵蓋其他租戶、語言或未來 Microsoft 365 UI 版本；找不到可信節點時仍會在 60 秒內停止且不自動重送。
+- 尚未證明目前 selector 能涵蓋其他租戶、語言或未來 Microsoft 365 UI 版本；找不到可信節點時仍會在設定的等待時間內停止且不自動重送。
 - M365 網頁附件與回覆中的可見下載連結已納入傳輸；語音、Agent 與其他 Microsoft 365 工作負載自動操作仍不在範圍。內建 Session Bridge 與其他 Skill/MCP 只能在其既有權限、本機政策與核准範圍內執行，不能視為租戶管理員已授權或正式上線。
 - `M365_POC_SAFE_MODE=false`、`M365_LOCAL_MEMORY_ENABLED=true` 或 `M365_ACTIONS_ENABLED=true` 即使存在，也不代表已核准；啟用前需要另外做資料邊界、權限與人工審查。工具總開關即使開啟，也只代表可以「提出並人工核准」本機工具動作，不是自動核准。
 
@@ -117,7 +117,7 @@ PLAYWRIGHT_M365_BLOCK_HEAVY_RESOURCES=false
 
 - GitHub 只保存 `integrations/m365-session-bridge` 的可重建原始碼、鎖版依賴、manifest template 與 deny-first policy template。
 - 安裝時才在 `%LOCALAPPDATA%\M365-Golem\m365-session-bridge` 產生政策、IPC 秘密與稽核紀錄；`data/mcp-servers.json` 與 Native Messaging 實機 manifest 也只存在本機。
-- 初始 policy 允許非破壞性寫入工具，但不內建任何租戶、站台或文件庫白名單。支援但未列入的精確 SharePoint／OneDrive 目標會顯示原生核准視窗；覆寫、回收、永久刪除、外部分享與權限變更預設關閉，拒絕、逾時、401 或 403 都不得繞過。
+- Bridge 不再維護租戶、站台或文件庫白名單。支援的精確 SharePoint／OneDrive 目標預設可嘗試存取，實際範圍由 Edge 登入帳號與 Microsoft 365 權限決定；使用者可加入網域或站台路徑黑名單。非破壞性寫入仍受 `writeEnabled` 控制，覆寫、回收、永久刪除、外部分享與權限變更維持獨立安全開關，黑名單、401 或 403 都不得繞過。
 - Edge 擴充功能不能靜默安裝，必須由使用者在 `edge://extensions` 親自載入。這個人工步驟與 Microsoft 登入／MFA 都不是自動測試通過就能取代的正式驗收。
 
 ## 外部範例的採用邊界

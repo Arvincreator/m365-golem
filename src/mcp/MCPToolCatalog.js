@@ -46,8 +46,16 @@ function getSchemaType(schema = {}) {
 }
 
 function exampleValueForSchema(schema = {}, name = 'value') {
+    if (schema.example !== undefined) return schema.example;
     if (schema.default !== undefined) return schema.default;
+    if (schema.const !== undefined) return schema.const;
     if (Array.isArray(schema.enum) && schema.enum.length > 0) return schema.enum[0];
+    if (Array.isArray(schema.anyOf) && schema.anyOf.length > 0) {
+        return exampleValueForSchema(schema.anyOf[0] || {}, name);
+    }
+    if (Array.isArray(schema.oneOf) && schema.oneOf.length > 0) {
+        return exampleValueForSchema(schema.oneOf[0] || {}, name);
+    }
 
     const type = getSchemaType(schema);
     if (type === 'boolean') return false;
@@ -95,6 +103,10 @@ function buildActionExample(serverName, toolName, inputSchema = {}) {
 
 function normalizeTool(server, tool) {
     const inputSchema = tool.inputSchema || tool.schema || null;
+    const generatedExample = buildActionExample(server.name, tool.name, inputSchema || {});
+    const configuredExample = tool.example && typeof tool.example === 'object'
+        ? tool.example
+        : null;
     return {
         server: server.name,
         name: tool.name,
@@ -103,7 +115,16 @@ function normalizeTool(server, tool) {
         description: tool.description || '',
         inputSchema,
         required: inputSchema && Array.isArray(inputSchema.required) ? inputSchema.required : [],
-        example: buildActionExample(server.name, tool.name, inputSchema || {}),
+        example: configuredExample
+            ? {
+                action: 'mcp_call',
+                server: server.name,
+                tool: tool.name,
+                parameters: configuredExample.parameters && typeof configuredExample.parameters === 'object'
+                    ? configuredExample.parameters
+                    : generatedExample.parameters,
+            }
+            : generatedExample,
     };
 }
 

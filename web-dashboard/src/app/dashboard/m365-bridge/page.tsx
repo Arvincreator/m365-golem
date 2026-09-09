@@ -21,15 +21,12 @@ type BridgePolicy = {
     allowOverwrite: boolean;
     allowRecycle: boolean;
     readHostPatterns: string[];
-    allowedHosts: string[];
-    allowedSites: string[];
     deniedHosts: string[];
     deniedSites: string[];
-    allowedLibraries: string[];
     allowedLocalPaths: string[];
 };
 
-type EditableList = "allowedHosts" | "allowedSites" | "deniedHosts" | "deniedSites" | "allowedLocalPaths";
+type EditableList = "deniedHosts" | "deniedSites" | "allowedLocalPaths";
 type EditableSetting = "writeEnabled" | "allowOverwrite" | "allowRecycle";
 type McpServer = { name: string; enabled?: boolean; connected?: boolean };
 
@@ -40,21 +37,9 @@ const LIST_CARDS: Array<{
     placeholder: string;
 }> = [
     {
-        key: "allowedHosts",
-        title: "允許的 SharePoint 網域",
-        description: "加入後，該網域可依站台規則使用；黑名單永遠優先。",
-        placeholder: "tenant.sharepoint.com",
-    },
-    {
-        key: "allowedSites",
-        title: "允許的站台路徑",
-        description: "只允許指定站台或 OneDrive 個人站台路徑。",
-        placeholder: "/sites/Finance",
-    },
-    {
         key: "deniedHosts",
         title: "禁止的網域",
-        description: "即使出現在白名單，這些網域仍會被拒絕。",
+        description: "明確排除不應由 Golem 操作的 SharePoint 網域。",
         placeholder: "blocked.sharepoint.com",
     },
     {
@@ -153,8 +138,6 @@ export default function M365BridgePage() {
     const [policy, setPolicy] = useState<BridgePolicy | null>(null);
     const [server, setServer] = useState<McpServer | null>(null);
     const [inputs, setInputs] = useState<Record<EditableList, string>>({
-        allowedHosts: "",
-        allowedSites: "",
         deniedHosts: "",
         deniedSites: "",
         allowedLocalPaths: "",
@@ -233,7 +216,7 @@ export default function M365BridgePage() {
     async function changeEntry(list: EditableList, value: string, method: "POST" | "DELETE") {
         const normalized = value.trim();
         if (!normalized) return;
-        const loosensBoundary = (method === "POST" && (list === "allowedHosts" || list === "allowedSites" || list === "allowedLocalPaths"))
+        const loosensBoundary = (method === "POST" && list === "allowedLocalPaths")
             || (method === "DELETE" && (list === "deniedHosts" || list === "deniedSites"));
         if (loosensBoundary && !window.confirm("這項變更會擴大 Bridge 可接觸的範圍。確定繼續嗎？")) return;
 
@@ -311,7 +294,7 @@ export default function M365BridgePage() {
                         <ShieldCheck className="h-5 w-5 text-primary" />
                         <p className="mt-4 text-xs text-muted-foreground">授權邊界</p>
                         <p className="mt-1 font-semibold">黑名單優先</p>
-                        <p className="mt-2 text-xs leading-5 text-muted-foreground">本頁設定不會繞過 Edge 工作階段、站台權限、原生目標核准或 Action Gate。</p>
+                        <p className="mt-2 text-xs leading-5 text-muted-foreground">登入帳號可見的支援站點預設可嘗試存取；黑名單、站台權限與 Action Gate 仍會阻擋不允許的操作。</p>
                     </section>
                 </div>
 
@@ -320,7 +303,7 @@ export default function M365BridgePage() {
                     <p className="mt-2 text-sm leading-6 text-muted-foreground">建立資料夾、上傳、複製、移動、重新命名與中繼資料更新屬於非破壞性寫入；覆寫和資源回收筒仍預設關閉。</p>
                     <div className="mt-5 grid gap-3 md:grid-cols-3">
                         {([
-                            ["writeEnabled", "允許非破壞性寫入", "仍需通過目標政策與核准"],
+                            ["writeEnabled", "允許非破壞性寫入", "仍需通過黑名單、M365 權限與 Action Gate"],
                             ["allowOverwrite", "允許覆寫既有檔案", "只有工具明確要求時才會覆寫"],
                             ["allowRecycle", "允許移到資源回收筒", "永久刪除仍固定禁止"],
                         ] as Array<[EditableSetting, string, string]>).map(([key, label, detail]) => (

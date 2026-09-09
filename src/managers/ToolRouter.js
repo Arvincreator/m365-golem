@@ -24,6 +24,7 @@ const M365_SEARCH_RE = /(搜尋|查找|全文搜尋|全域搜尋|找出.{0,24}(?
 const M365_FOLDER_CONTENT_RE = /(?:(?:列出|列舉|查看|檢視|取得|獲取|讀取|盤點).{0,24}(?:sharepoint|one\s*drive|onedrive|資料夾|folder).{0,24}(?:內容|檔案|文件|清單|列表|根目錄)|(?:sharepoint|one\s*drive|onedrive|資料夾|folder).{0,24}(?:內容|檔案|文件|清單|列表|根目錄).{0,24}(?:列出|列舉|查看|檢視|取得|獲取|讀取|盤點))/i;
 const M365_FILE_CONTENT_RE = /(?:(?:取得|獲取|讀取|下載|開啟|分析).{0,24}(?:sharepoint|one\s*drive|onedrive|檔案|文件).{0,16}(?:內容|全文|資料)|(?:sharepoint|one\s*drive|onedrive|檔案|文件).{0,24}(?:內容|全文|資料).{0,16}(?:取得|獲取|讀取|下載|開啟|分析))/i;
 const M365_CAPABILITY_PROBE_RE = /(?:(?:可以|能(?:不能)?|是否能|看(?:得)?到|讀(?:得)?到|存取|連線|使用).{0,32}(?:sharepoint|one\s*drive|onedrive|microsoft\s*365|\bm365\b)|(?:sharepoint|one\s*drive|onedrive|microsoft\s*365|\bm365\b).{0,32}(?:可以|能|可用|看(?:得)?到|讀(?:得)?到|存取|連線)|(?:can\s+you|are\s+you\s+able\s+to|do\s+you\s+have\s+access\s+to).{0,32}(?:sharepoint|one\s*drive|onedrive|microsoft\s*365|\bm365\b))/i;
+const EXPLICIT_M365_BRIDGE_RE = /(?:m365[\s_-]*(?:session[\s_-]*)?bridge|m365[\s_-]*session[\s_-]*bridge|微軟\s*365\s*bridge)/i;
 const STOPWORDS = new Set([
     'the', 'and', 'for', 'with', 'from', 'this', 'that', 'what', 'when', 'where', 'how',
     '你', '我', '他', '她', '它', '我們', '你們', '請', '幫我', '可以', '一下', '這個', '那個',
@@ -66,7 +67,10 @@ function inferIntentBoosts(text) {
     add(/(搜尋後|深入查看|深入網頁|繼續查看這個網頁|deep dive|follow-up crawl)/i, ['duckduckgo-devtools-bridge', 'duckduckgo-search', 'chrome-devtools']);
     add(/(排程|提醒|schedule|定時|每天|明天|下週|cron)/i, ['collab-calendar']);
     add(/(行程|行事曆|日曆|calendar|今天有什麼|明天有什麼|這週|下週|新增行程|加入行程|排行程|有什麼約|約了什麼|協作日曆)/i, ['collab-calendar']);
-    add(/(檔案|附件|參考資料|reference)/i, ['reference-files']);
+    // `reference-files` is the separately registered knowledge library. A
+    // browser-native attachment is already visible to Copilot and must not be
+    // routed back through this skill merely because the user said "附件".
+    add(/(參考資料|參考文件|reference files?|reference library)/i, ['reference-files']);
 
     const isM365DataTask = M365_DATA_RE.test(t);
     if (isM365DataTask) {
@@ -139,6 +143,44 @@ function summarizeSchema(schema) {
     if (properties.length > 0) bits.push(`params: ${properties.slice(0, 8).join(', ')}`);
     if (required.length > 0) bits.push(`required: ${required.slice(0, 8).join(', ')}`);
     return bits.join('; ');
+}
+
+function extractExactM365Url(value) {
+    const match = String(value || '').match(/https?:\/\/[^\s<>"'。！？；，、）】]+/i);
+    if (!match) return '';
+    const url = match[0];
+    return /(?:\.sharepoint\.(?:com|us|de|cn)|sharepoint-mil\.us)/i.test(url) ? url : '';
+}
+
+function schemaTypeLabel(schema = {}) {
+    if (schema.const !== undefined) return `constant ${JSON.stringify(schema.const)}`;
+    if (Array.isArray(schema.enum) && schema.enum.length > 0) return `one of ${schema.enum.map(value => JSON.stringify(value)).join(' | ')}`;
+    if (Array.isArray(schema.type)) return schema.type.join('|');
+    if (schema.type) return schema.type;
+    if (schema.properties) return 'object';
+    if (schema.items) return 'array';
+    if (schema.anyOf || schema.oneOf) return 'structured value';
+    return 'value';
+}
+
+function summarizeMcpParameterGuide(schema, maxChars = 1600) {
+    if (!schema || typeof schema !== 'object') return '  Parameters: use the exact fields shown in the example; do not add guessed fields.';
+    const properties = schema.properties && typeof schema.properties === 'object' ? schema.properties : {};
+    const required = new Set(Array.isArray(schema.required) ? schema.required : []);
+    const lines = [];
+    for (const [name, property] of Object.entries(properties)) {
+        const details = [schemaTypeLabel(property || {}), required.has(name) ? 'required' : 'optional'];
+        if (property?.format) details.push(`format=${property.format}`);
+        if (property?.default !== undefined) details.push(`default=${JSON.stringify(property.default)}`);
+        if (property?.minimum !== undefined) details.push(`min=${property.minimum}`);
+        if (property?.maximum !== undefined) details.push(`max=${property.maximum}`);
+        const description = String(property?.description || '').replace(/\s+/g, ' ').trim();
+        lines.push(`  - ${name}: ${details.join('; ')}${description ? ` — ${description}` : ''}`);
+    }
+    if (lines.length === 0) lines.push('  - No parameters. Use "parameters": {}.');
+    if (schema.additionalProperties === false) lines.push('  - Additional parameter names are forbidden; use only the fields above.');
+    const output = lines.join('\n');
+    return output.length <= maxChars ? output : `${output.slice(0, maxChars - 24).trim()}\n  …(schema truncated)`;
 }
 
 function compactJson(value) {
@@ -244,11 +286,21 @@ class ToolRouter {
         const preferredSkillIds = new Set((options.preferredSkillIds || []).map(normalizeText));
         const preferredSkillActions = new Set((options.preferredSkillActions || []).map(normalizeText));
         const preferredMcpServers = new Set((options.preferredMcpServers || []).map(normalizeText));
+        const nativeAttachmentRequest = /(?:附件|attached files?)/i.test(String(query || ''))
+            && !/(?:ref_[a-z0-9_-]+|參考(?:附件|文件|資料)(?:庫)?|reference library)/i.test(String(query || ''));
         const requestClass = this.policy.classifyRequest(query);
+        const explicitM365BridgeRequest = EXPLICIT_M365_BRIDGE_RE.test(String(query || ''));
+        const exactM365Url = extractExactM365Url(query);
         const vectorBoostIds = options.vectorBoostIds instanceof Set ? options.vectorBoostIds : new Set();
         const exactMcpIntentIds = new Set(
             inferIntentBoosts(query).filter((id) => id.startsWith('m365-session-bridge/'))
         );
+        // A concrete read operation is itself the capability check. Do not
+        // make the model spend the turn on status when it can run the exact
+        // requested read and let its Observation prove connectivity.
+        if ([...exactMcpIntentIds].some((id) => id !== 'm365-session-bridge/m365_bridge_status')) {
+            exactMcpIntentIds.delete('m365-session-bridge/m365_bridge_status');
+        }
         const hasExactMcpRoute = exactMcpIntentIds.size > 0;
         const hasUnsupportedM365Search = M365_DATA_RE.test(String(query || ''))
             && M365_SEARCH_RE.test(String(query || ''))
@@ -262,6 +314,12 @@ class ToolRouter {
 
         const skillCandidates = SkillPackageRegistry.listSkillPackages({ userDataDir: this.userDataDir })
             .filter(pkg => pkg.enabled !== false)
+            .filter(pkg => {
+                const id = normalizeText(pkg.id || pkg.action);
+                const explicitlySelected = preferredSkillIds.has(normalizeText(pkg.id))
+                    || preferredSkillActions.has(normalizeText(pkg.action));
+                return !(nativeAttachmentRequest && id === 'reference-files' && !explicitlySelected);
+            })
             .map(pkg => {
                 const content = SkillPackageRegistry.readPackagePrompt(pkg).slice(0, 2500);
                 const manifest = pkg.manifest || {};
@@ -344,6 +402,23 @@ class ToolRouter {
                     preferred: preferredMcpServers.has(normalizeText(server.name)),
                     score: 0,
                 };
+                if (server.name === 'm365-session-bridge' && exactM365Url) {
+                    if (tool.name === 'm365_list_folder') {
+                        candidate.example = {
+                            action: 'mcp_call',
+                            server: server.name,
+                            tool: tool.name,
+                            parameters: { folderUrl: exactM365Url },
+                        };
+                    } else if (tool.name === 'm365_get_file_url') {
+                        candidate.example = {
+                            action: 'mcp_call',
+                            server: server.name,
+                            tool: tool.name,
+                            parameters: { fileUrl: exactM365Url },
+                        };
+                    }
+                }
                 candidate.score = scoreCandidate(query, candidate);
                 if (candidate.preferred) {
                     candidate.semanticBoost = true;
@@ -378,13 +453,13 @@ class ToolRouter {
         const nativeScore = (options.semanticMatches || []).find(match => match.id === 'capability/native-m365')?.score || 0;
         const remoteOnly = EXPLICIT_REMOTE_ARTIFACT_TARGET_RE.test(String(query || ''))
             && !/(?:在|到|於|on|to).{0,12}(?:工作區|專案資料夾|桌面|本機|本地|project\s+workspace|workspace|desktop|local)/i.test(String(query || ''));
-        const explanationOnly = requestClass.passive || (
-            /(?:解釋|說明|介紹|比較|explain).*(?:原理|概念|是什麼|concept|principle)/i.test(String(query || ''))
-            && !/(?:幫我|替我|直接|然後|並)/.test(String(query || ''))
-        );
+        const explanationOnly = requestClass.passive || /(?:解釋|說明|介紹|比較|explain)/i.test(String(query || ''));
+        const semanticInspection = semanticLocal?.id === 'capability/local-inspection';
         const semanticCommand = !!semanticLocal && semanticLocal.score >= nativeScore + 0.03
-            && !explanationOnly && !requestClass.skillCatalog && !remoteOnly;
-        const keywordCommand = requestClass.shouldRoute && isLikelyCommandTask(query);
+            && !requestClass.skillCatalog && !remoteOnly
+            && (semanticInspection || !explanationOnly);
+        const keywordCommand = isLikelyCommandTask(query)
+            && (requestClass.shouldRoute || requestClass.passive);
         const commandRecommended = keywordCommand || semanticCommand;
         const localArtifactBuild = commandRecommended
             && (isLocalArtifactBuild(String(query || '')) || (semanticCommand && semanticLocal.id === 'capability/local-authoring'));
@@ -403,12 +478,14 @@ class ToolRouter {
             inactiveSkillCount,
             catalogRequest,
             connectorBoundary,
+            explicitM365BridgeRequest,
+            exactM365Url,
             mcpTools: routedMcpTools,
             commandLane,
             diagnostics: {
                 ...(options.diagnostics || { mode: 'keyword_fallback', reason: 'synchronous_route', matches: [] }),
                 commandSource: semanticCommand ? 'semantic' : keywordCommand ? 'keyword' : 'none',
-                commandRejected: semanticLocal && !semanticCommand ? (explanationOnly ? 'explanation_only' : remoteOnly ? 'remote_destination' : requestClass.skillCatalog ? 'catalog_only' : 'ambiguous_capability') : null,
+                commandRejected: semanticLocal && !semanticCommand ? (explanationOnly && !semanticInspection ? 'mutation_not_authorized' : remoteOnly ? 'remote_destination' : requestClass.skillCatalog ? 'catalog_only' : 'ambiguous_capability') : null,
                 selectedTools: [...skills.map(item => item.id), ...routedMcpTools.map(item => item.id)],
             },
             nativeGroundingSuggested: nativeScore >= 0.55 && (nativeScore >= (semanticLocal?.score || 0) || M365_DATA_RE.test(String(query || ''))),
@@ -445,12 +522,15 @@ class ToolRouter {
 
         const lines = [
             '<tool-routing>',
-            `[System note: 以下是本輪依使用者訊息自動產生的工具建議。若任務符合，優先使用；若不符合，可以忽略。當工具能取得事實、操作外部系統或執行專門能力時，不要只用文字猜測。Active scene: ${result.activeScene}]`,
+            `[System note: 以下是本輪依使用者目標自動產生的工具候選。請自行判斷使用工具是否能實質提高正確性、即時性、可驗證性或完成度；相關時可主動使用，不相關時忽略。不要因使用者未明說「用工具」就拒絕查證，也不要為了展示工具而呼叫。Active scene: ${result.activeScene}]`,
         ];
 
         lines.push('- Retrieved capabilities are candidates, not proof of availability or authorization. Choose the next step from the actual user goal and available inputs. Inspect capabilities before promising outputs; retain all Action Gate checks.');
         lines.push('- Separate native source retrieval, local authoring, and remote writes. Failure in one lane blocks only steps requiring its missing result. Use already available source content only within its visible evidence; never invent missing content.');
         if (result.nativeGroundingSuggested) lines.push('- Native Microsoft 365 grounding may help this task if available in this session. This is not a callable Golem action; native research does not prove local file creation or remote writes.');
+        if (result.explicitM365BridgeRequest && result.mcpTools.some((tool) => tool.server === 'm365-session-bridge')) {
+            lines.push('- The user explicitly selected M365 Bridge for this turn. Follow the listed m365-session-bridge route; do not substitute native Microsoft 365 grounding, search, or capability narration for that requested connector test.');
+        }
         if (result.catalogRequest?.skills) {
             lines.push(`Current available Skill catalog (${result.skillCatalog.length}; authoritative for this turn):`);
             if (result.skillCatalog.length === 0) {
@@ -480,16 +560,17 @@ class ToolRouter {
         }
 
         if (result.commandLane.recommended) {
-            if (result.diagnostics.commandSource === 'semantic') lines.push('- The local lane was retrieved semantically. Confirm that an actual local operation is requested; a similarity match alone must not trigger execution.');
+            if (result.diagnostics.commandSource === 'semantic') lines.push('- The local lane was retrieved semantically. Read-only inspection may be used proactively when it materially improves the answer. Creating or changing local artifacts still requires the user to have requested that effect.');
             lines.push('Relevant command lane:');
             if (result.commandLane.reason === 'local_project_artifact_authoring') {
                 lines.push('- command: local project artifact creation or modification detected. Use the assigned project workspace to inspect, create/edit, and verify the real files; do not substitute a long inline draft unless the user explicitly asked only for a snippet.');
                 lines.push('- Local capability boundary: local document creation does not depend on a working SharePoint or OneDrive connection. If the source content is already visibly available, use it within its evidence limits. If required source content is missing, request only that missing input; do not claim all local authoring is unavailable.');
                 lines.push('- Inspect the actual local runtime and document libraries before choosing how to create a file. Honor an explicitly requested local destination, resolve its real path rather than guessing, avoid overwriting existing files, and verify the resulting file format and readable contents before reporting success. Never rename plain text to .docx or invent an installed document tool.');
+                lines.push('- On Windows, never reconstruct a multi-line Python or JavaScript source file with repeated echo, >, or >> because PowerShell quoting and its default text encoding can corrupt the source. In one GOLEM_ACTION you may use ordered actions: first write the complete UTF-8 source from Base64 with an explicit byte-writing API, then run it, then independently verify the artifact. If a host Observation reports a syntax, quoting, encoding, or null-byte error, change the construction method; do not retry the same command shape.');
                 lines.push('- Exact action shape: {"action":"command","parameter":"<one bounded native command>"}. When the user requests execution, emit the smallest appropriate command action; an informational question does not authorize creating files. When the outcome needs dependent inspect/build/verify work, maintain GOLEM_PLAN and issue only its current bounded action.');
             } else {
                 lines.push('- command: local OS/repo operation detected. For the current Windows harness, inspect its working directory with this exact shell action: {"action":"command","parameter":"echo %CD%"}. Replace the command only when another native operation is required.');
-                lines.push('- The user already requested this read/list/inspect/check operation. Emit the smallest read-only command action now; do not merely say that you could propose it. The local approval gate will ask for confirmation.');
+                lines.push('- If inspecting the local workspace materially improves the answer, emit the smallest bounded read-only command action now. For a general explanation that needs no local evidence, answer directly. The local approval gate will handle any required confirmation.');
             }
         }
 
@@ -515,13 +596,18 @@ class ToolRouter {
                 const schemaSummary = summarizeSchema(tool.inputSchema);
                 const policy = tool.policy ? ` [${tool.policy.strength}; risk=${tool.policy.risk}${tool.policy.requiresConfirmation ? '; confirm first' : ''}]` : '';
                 lines.push(`- mcp_call server="${tool.server}" tool="${tool.name}": ${tool.description || 'no description'}${schemaSummary ? ` (${schemaSummary})` : ''}${policy}`);
+                lines.push('  Usage: choose this tool only for the stated capability. Put every tool argument inside "parameters"; never place tool arguments beside "server" or "tool". Use actual values from the request or a prior Observation, never placeholders.');
+                lines.push(summarizeMcpParameterGuide(tool.inputSchema));
                 lines.push(`  Use this exact action shape:\n  ${compactJson(tool.example)}`);
+                lines.push('  After emitting the call, wait for the host Observation. Treat its returned data or error as the result; do not claim success from the proposed action alone.');
             }
         }
 
         if (result.mcpTools.some((tool) => tool.server === 'm365-session-bridge' && tool.name === 'm365_bridge_status')) {
             lines.push('M365 access-probe rule:');
-            lines.push('- A question about whether OneDrive or SharePoint files are accessible is a request to check, not a reason to refuse based on missing prior tool results. First try the native Microsoft 365 file/content grounding available in this signed-in Copilot session.');
+            lines.push(result.explicitM365BridgeRequest
+                ? '- The user selected M365 Bridge, so use the listed Bridge read-only action directly. Do not run native Microsoft 365 search first or treat its result as a Bridge test.'
+                : '- A question about whether OneDrive or SharePoint files are accessible is a request to check, not a reason to refuse based on missing prior tool results. First try the native Microsoft 365 file/content grounding available in this signed-in Copilot session.');
             lines.push('- If this response does not contain a visible grounded file result or citation, you must emit the listed read-only status action in this same response. Do not replace the check with suggestions, example queries, or a request for a filename, and do not give an access conclusion before the check.');
             lines.push('- A successful status result proves only that assistance is available; it does not prove that every file is visible. If a specific link is required, ask for that link in plain language after the check.');
             lines.push('- Keep [GOLEM_REPLY] user-friendly. Do not expose the names Work IQ, Bridge, MCP, Action, Observation, tool-routing, harness, protocol, schema, or other internal execution details unless the user explicitly asks how the system works.');
@@ -530,14 +616,19 @@ class ToolRouter {
         if (result.mcpTools.some((tool) => tool.server === 'm365-session-bridge' && ['m365_list_folder', 'm365_download_file'].includes(tool.name))) {
             lines.push('M365 exact-target handoff rule:');
             lines.push('- These tools are available in this Golem workspace. Do not say that the local Microsoft 365 file connection or its listing/download capability is unavailable when the tools are listed here.');
-            lines.push('- They require an exact SharePoint/OneDrive folder or file URL. If the user asks for a multi-stage outcome and the exact URL is not known yet, use a durable plan: first use native Microsoft 365 grounding to locate and visibly cite the target, record that native stage with plan_checkpoint, then use the listed exact-target tool in the next plan turn.');
+            if (result.exactM365Url) {
+                lines.push(`- The exact user-provided target for this turn is ${result.exactM365Url}. Use it in the listed action now; do not replace it with example.com, request it again, or perform native search first.`);
+            } else {
+                lines.push('- These tools require an exact SharePoint/OneDrive folder or file URL. If the user asks for a multi-stage outcome and the exact URL is not known yet, use a durable plan: first use native Microsoft 365 grounding to locate and visibly cite the target, record that native stage with plan_checkpoint, then use the listed exact-target tool in the next plan turn.');
+            }
             lines.push('- m365_list_folder returns the direct entries of one exact folder. m365_download_file retrieves one exact file for a later local inspection step. Neither tool is a tenant-wide semantic search engine.');
             lines.push('- Do not stop after explaining this sequence. Start the first real stage now, and keep [GOLEM_REPLY] in plain user language without internal tool or protocol names.');
         }
 
         lines.push('Decision rules:');
         lines.push('- Route priority: local OS/repo work => command; packaged capability => skill action; external integration/service/browser connector => mcp_call.');
-        lines.push('- If the user explicitly requested an operation and a viable route is listed above, emit the action in this response. Do not answer only with capability narration such as "I can propose an action".');
+        lines.push('- Select tools by expected value, not by whether the user literally named a tool. For relevant read-only verification or discovery, you may emit the action proactively. If the user requested an operation and a viable route is listed, emit it now instead of only narrating capability.');
+        lines.push('- Tool relevance is not mutation authorization. Before create/update/delete/send/publish/install or another external-state change, confirm that the user requested that effect; otherwise ask first.');
         lines.push('- Never use mcp_call for pure local shell tasks. Never use command for external connector tasks that already have MCP tools.');
         lines.push('- For public web search tasks, prefer skill action {"action":"duckduckgo-search","args":{"query":"..."}}. Use chrome-devtools only when the task requires browser interaction, login, DOM, console, or network inspection.');
         lines.push('- For browse-and-read tasks, prefer a 2-step MCP action array: (1) navigate_page/new_page, then (2) take_snapshot, and summarize from snapshot.');

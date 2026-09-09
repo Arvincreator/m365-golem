@@ -100,7 +100,63 @@ class ResponseExtractor {
      * may have appeared after the normal wait expired.
      */
     static async inspectExistingResponse(page, selector, startTag, endTag, options = {}) {
-        const result = await page.evaluate(({ sel, sTag, eTag, responseContainers, stopSelectors }) => {
+        const result = await page.evaluate(({ sel, sTag, eTag, responseContainers, stopSelectors, allowUnwrapped, baselineText }) => {
+            const readStructuredText = (container) => {
+                let output = String(container?.innerText || container?.textContent || '');
+                let cursor = 0;
+                let structuralNodes = [];
+                try {
+                    structuralNodes = Array.from(container.querySelectorAll('h1, h2, h3, h4, h5, h6, strong, b, li'));
+                } catch (_) { }
+
+                for (const node of structuralNodes) {
+                    const nodeText = String(node?.innerText || node?.textContent || '').trim();
+                    if (!nodeText) continue;
+                    const index = output.indexOf(nodeText, cursor);
+                    if (index < 0) continue;
+
+                    const tag = String(node.tagName || '').toLowerCase();
+                    let marker = '';
+                    let closingMarker = '';
+                    if (/^h[1-6]$/.test(tag)) {
+                        marker = `${'#'.repeat(Number(tag.slice(1)))} `;
+                    } else if (tag === 'strong' || tag === 'b') {
+                        marker = '**';
+                        closingMarker = '**';
+                    } else if (tag === 'li') {
+                        const parent = node.parentElement;
+                        if (String(parent?.tagName || '').toLowerCase() === 'ol') {
+                            const siblings = Array.from(parent?.children || []).filter((child) => String(child?.tagName || '').toLowerCase() === 'li');
+                            const start = Number(parent?.getAttribute?.('start')) || 1;
+                            marker = `${start + Math.max(0, siblings.indexOf(node))}. `;
+                        } else {
+                            marker = '- ';
+                        }
+                        const before = output.slice(0, index);
+                        if (siblingsFirst(parent, node) && before.endsWith('\n') && !before.endsWith('\n\n')) marker = `\n${marker}`;
+                    }
+
+                    const precedingLine = output.slice(Math.max(0, index - 16), index);
+                    const alreadyMarked = tag === 'li'
+                        ? /(?:^|\n)\s*(?:[-*+]\s+|\d+[.)]\s+)$/.test(precedingLine)
+                        : (tag === 'strong' || tag === 'b')
+                            ? /\*\*$/.test(precedingLine)
+                            : /(?:^|\n)#{1,6}\s+$/.test(precedingLine);
+                    if (marker && !alreadyMarked) {
+                        output = `${output.slice(0, index)}${marker}${nodeText}${closingMarker}${output.slice(index + nodeText.length)}`;
+                        cursor = index + marker.length + nodeText.length + closingMarker.length;
+                    } else {
+                        cursor = index + nodeText.length;
+                    }
+                }
+                return output;
+
+                function siblingsFirst(parent, node) {
+                    if (!parent) return true;
+                    const items = Array.from(parent.children || []).filter((child) => String(child?.tagName || '').toLowerCase() === 'li');
+                    return items[0] === node;
+                }
+            };
             const visible = (node) => {
                 if (!node || !(node instanceof HTMLElement)) return false;
                 const style = window.getComputedStyle(node);
@@ -132,12 +188,7 @@ class ResponseExtractor {
             const isGenerating = (stopSelectors || []).some((candidate) => {
                 try { return Array.from(document.querySelectorAll(candidate)).some(visible); } catch (_) { return false; }
             });
-            for (let index = containers.length - 1; index >= 0; index -= 1) {
-                const container = containers[index];
-                const rawText = String(container.innerText || container.textContent || '');
-                const startIndex = rawText.indexOf(sTag);
-                const endIndex = rawText.indexOf(eTag, startIndex + sTag.length);
-                if (startIndex < 0 || endIndex <= startIndex) continue;
+            const collectArtifacts = (container) => {
                 const links = Array.from(container.querySelectorAll('a[href]')).map((anchor) => {
                     const href = String(anchor.href || '');
                     if (!/^https:\/\//i.test(href)) return null;
@@ -182,13 +233,53 @@ class ResponseExtractor {
                         elementType: 'image',
                     };
                 }).filter(Boolean);
-                return {
-                    found: true,
-                    busy: isGenerating,
-                    status: 'ENVELOPE_COMPLETE',
-                    text: rawText.substring(startIndex + sTag.length, endIndex).trim(),
-                    attachments: [...links, ...images],
-                };
+                const containerText = String(container.innerText || container.textContent || '');
+                const previewFiles = Array.from(document.querySelectorAll('button[id^="https://"], [role="button"][id^="https://"]'))
+                    .filter(visible)
+                    .map((button) => ({
+                        button,
+                        url: String(button.id || ''),
+                        name: String(button.innerText || button.textContent || button.getAttribute('aria-label') || 'M365 文件')
+                            .replace(/\s+/g, ' ').trim().slice(0, 240),
+                    }))
+                    .filter(({ button, name }) => {
+                        const insideResponse = typeof container.contains === 'function' && container.contains(button);
+                        return insideResponse || (name && containerText.includes(name));
+                    })
+                    .map(({ url, name }) => ({
+                        url,
+                        name,
+                        hasDownload: true,
+                        elementType: 'link',
+                    }));
+                return [...links, ...images, ...previewFiles];
+            };
+            for (let index = containers.length - 1; index >= 0; index -= 1) {
+                const container = containers[index];
+                const rawText = readStructuredText(container);
+                const startIndex = rawText.indexOf(sTag);
+                const endIndex = rawText.indexOf(eTag, startIndex + sTag.length);
+                if (startIndex >= 0 && endIndex > startIndex) {
+                    return {
+                        found: true,
+                        busy: isGenerating,
+                        status: 'ENVELOPE_COMPLETE',
+                        text: rawText.substring(startIndex + sTag.length, endIndex).trim(),
+                        attachments: collectArtifacts(container),
+                    };
+                }
+                if (allowUnwrapped && !isGenerating) {
+                    const trimmedText = rawText.trim();
+                    if (trimmedText && trimmedText !== String(baselineText || '').trim()) {
+                        return {
+                            found: true,
+                            busy: false,
+                            status: 'FALLBACK_RECOVERED',
+                            text: trimmedText,
+                            attachments: collectArtifacts(container),
+                        };
+                    }
+                }
             }
             return { found: false, busy: isGenerating, status: isGenerating ? 'GENERATING' : 'NOT_FOUND', text: '', attachments: [] };
         }, {
@@ -201,6 +292,8 @@ class ResponseExtractor {
             stopSelectors: Array.isArray(options.stopSelectors) && options.stopSelectors.length > 0
                 ? options.stopSelectors
                 : ['button[aria-label*="Stop" i]', 'button[aria-label*="停止" i]', '[data-testid*="stop" i]'],
+            allowUnwrapped: options.allowUnwrapped === true,
+            baselineText: String(options.baselineText || ''),
         });
         result.attachments = ResponseExtractor.normalizeVisibleArtifacts(result.attachments, {
             includeSources: options.extractSourceLinks === true,
@@ -239,6 +332,62 @@ class ResponseExtractor {
         const result = await page.evaluate(
             async ({ sel, sTag, eTag, oldText, _stableComplete, _stableThinking, _stableFallback, _pollInterval, _timeout, _responseContainers, _diagnosticSelectors, _stopSelectors, _extractAttachments, _extractSourceLinks }) => {
                 return new Promise((resolve) => {
+                    const readStructuredText = (container) => {
+                        let output = String(container?.innerText || container?.textContent || '');
+                        let cursor = 0;
+                        let structuralNodes = [];
+                        try {
+                            structuralNodes = Array.from(container.querySelectorAll('h1, h2, h3, h4, h5, h6, strong, b, li'));
+                        } catch (_) { }
+
+                        for (const node of structuralNodes) {
+                            const nodeText = String(node?.innerText || node?.textContent || '').trim();
+                            if (!nodeText) continue;
+                            const index = output.indexOf(nodeText, cursor);
+                            if (index < 0) continue;
+
+                            const tag = String(node.tagName || '').toLowerCase();
+                            let marker = '';
+                            let closingMarker = '';
+                            if (/^h[1-6]$/.test(tag)) {
+                                marker = `${'#'.repeat(Number(tag.slice(1)))} `;
+                            } else if (tag === 'strong' || tag === 'b') {
+                                marker = '**';
+                                closingMarker = '**';
+                            } else if (tag === 'li') {
+                                const parent = node.parentElement;
+                                if (String(parent?.tagName || '').toLowerCase() === 'ol') {
+                                    const siblings = Array.from(parent?.children || []).filter((child) => String(child?.tagName || '').toLowerCase() === 'li');
+                                    const start = Number(parent?.getAttribute?.('start')) || 1;
+                                    marker = `${start + Math.max(0, siblings.indexOf(node))}. `;
+                                } else {
+                                    marker = '- ';
+                                }
+                                const before = output.slice(0, index);
+                                if (siblingsFirst(parent, node) && before.endsWith('\n') && !before.endsWith('\n\n')) marker = `\n${marker}`;
+                            }
+
+                            const precedingLine = output.slice(Math.max(0, index - 16), index);
+                            const alreadyMarked = tag === 'li'
+                                ? /(?:^|\n)\s*(?:[-*+]\s+|\d+[.)]\s+)$/.test(precedingLine)
+                                : (tag === 'strong' || tag === 'b')
+                                    ? /\*\*$/.test(precedingLine)
+                                    : /(?:^|\n)#{1,6}\s+$/.test(precedingLine);
+                            if (marker && !alreadyMarked) {
+                                output = `${output.slice(0, index)}${marker}${nodeText}${closingMarker}${output.slice(index + nodeText.length)}`;
+                                cursor = index + marker.length + nodeText.length + closingMarker.length;
+                            } else {
+                                cursor = index + nodeText.length;
+                            }
+                        }
+                        return output;
+
+                        function siblingsFirst(parent, node) {
+                            if (!parent) return true;
+                            const items = Array.from(parent.children || []).filter((child) => String(child?.tagName || '').toLowerCase() === 'li');
+                            return items[0] === node;
+                        }
+                    };
                     const startTime = Date.now();
                     let beganAt = 0;
                     let stableCount = 0;
@@ -337,7 +486,7 @@ class ResponseExtractor {
                             container = currentLastBubble;
                         }
 
-                        const rawText = container.innerText || "";
+                        const rawText = readStructuredText(container);
                         const matchedSelector = (_responseContainers || []).find((candidate) => {
                             try {
                                 return currentLastBubble.matches(candidate) || Boolean(currentLastBubble.closest(candidate));
@@ -388,8 +537,14 @@ class ResponseExtractor {
                                 if (!href || !href.startsWith('http')) return;
                                 const isDownload = a.hasAttribute('download');
                                 const linkText = String(a.innerText || a.textContent || a.getAttribute('aria-label') || a.getAttribute('title') || '').trim();
+                                let queryFileName = '';
+                                try {
+                                    const parsedHref = new URL(href, window.location.href);
+                                    queryFileName = decodeURIComponent(parsedHref.searchParams.get('file') || '').trim();
+                                } catch (_) { }
                                 const hasFileExt = /\.(pdf|docx|xlsx|pptx|csv|txt|zip|md|js|py)(?:$|[?#])/i.test(href)
-                                    || /\.(pdf|docx|xlsx|pptx|csv|txt|zip|md|js|py)$/i.test(linkText);
+                                    || /\.(pdf|docx|xlsx|pptx|csv|txt|zip|md|js|py)$/i.test(linkText)
+                                    || /\.(pdf|docx|xlsx|pptx|csv|txt|zip|md|js|py)$/i.test(queryFileName);
                                 const isGoogleContent = href.includes('googleusercontent.com') || href.includes('blob:');
                                 const looksLikeDownload = /download|attachment/i.test(href);
                                 if (_extractSourceLinks || isDownload || hasFileExt || isGoogleContent || looksLikeDownload) {
@@ -400,7 +555,7 @@ class ResponseExtractor {
                                     attachments.push({
                                         url: href,
                                         mimeType: mime,
-                                        name: linkText || a.getAttribute('download') || '',
+                                        name: queryFileName || linkText || a.getAttribute('download') || '',
                                         linkText,
                                         downloadName: String(a.getAttribute('download') || ''),
                                         ariaLabel: String(a.getAttribute('aria-label') || ''),
@@ -414,6 +569,34 @@ class ResponseExtractor {
                                     });
                                 }
                             });
+
+                            // Copilot document creation renders the generated
+                            // Office file as a visible preview button outside
+                            // the assistant article. Its id is the trusted
+                            // HTTPS file URL, so capture it just like the
+                            // recovery path does after a bounded timeout.
+                            try {
+                                Array.from(document.querySelectorAll('button[id^="https://"], [role="button"][id^="https://"]'))
+                                    .filter((button) => {
+                                        const style = window.getComputedStyle(button);
+                                        const rect = button.getBoundingClientRect();
+                                        return rect.width > 0 && rect.height > 0
+                                            && style.display !== 'none'
+                                            && style.visibility !== 'hidden';
+                                    })
+                                    .forEach((button) => {
+                                        const name = String(button.innerText || button.textContent || button.getAttribute('aria-label') || 'M365 文件')
+                                            .replace(/\s+/g, ' ').trim().slice(0, 240);
+                                        const insideResponse = typeof container.contains === 'function' && container.contains(button);
+                                        if (!insideResponse && (!name || !rawText.includes(name))) return;
+                                        attachments.push({
+                                            url: String(button.id || ''),
+                                            name,
+                                            hasDownload: true,
+                                            elementType: 'link',
+                                        });
+                                    });
+                            } catch (_) { }
                         }
                         lastAttachments = attachments;
 

@@ -7,6 +7,7 @@ const mockStore = {
     getDraft: jest.fn(),
     listProjectReferences: jest.fn(),
     getProject: jest.fn(),
+    listMessages: jest.fn(),
     addMessage: jest.fn(),
     updateMessageDeliveryState: jest.fn(),
     updateConversationTitleIfPlaceholder: jest.fn(),
@@ -173,6 +174,7 @@ describe('workspace-aware M365 chat route', () => {
             contextVersion: 1,
         });
         mockStore.getDraft.mockResolvedValue({ localFolders: [] });
+        mockStore.listMessages.mockResolvedValue([]);
         mockLocalFolderService.resolveSelectedReferences.mockReturnValue([]);
         mockLocalFolderService.validateReferences.mockReturnValue([]);
         mockStore.addMessage
@@ -535,6 +537,35 @@ describe('workspace-aware M365 chat route', () => {
         await waitFor(() => serverContext.m365DispatchLease === null);
     });
 
+    test('refreshes the project-memory card without adding a chat message', async () => {
+        mockHandleDashboardMessage.mockImplementation(async (ctx) => {
+            await ctx.onProjectMemoryUpdated({ updatedCount: 2 });
+            await ctx.onTransportComplete({ text: '完整的 Copilot 回覆' });
+            await ctx.reply('完整的 Copilot 回覆');
+        });
+
+        const result = await postChat({
+            golemId: 'golem_A',
+            projectId: 'project-1',
+            conversationId: 'conversation-1',
+            message: '列出資料夾內容。',
+        });
+
+        expect(result.response.status).toBe(200);
+        await waitFor(() => serverContext.m365DispatchLease === null);
+        expect(serverContext.broadcastLog).toHaveBeenCalledWith(expect.objectContaining({
+            type: 'project_memory_updated',
+            raw: '',
+            conversationId: 'conversation-1',
+            transient: true,
+        }));
+        expect(mockStore.addMessage).toHaveBeenCalledTimes(2);
+        expect(mockStore.addMessage).toHaveBeenLastCalledWith('conversation-1', expect.objectContaining({
+            role: 'assistant',
+            content: '完整的 Copilot 回覆',
+        }));
+    });
+
     test('rejects unassigned or cross-project references before reading content or dispatching', async () => {
         mockStore.listProjectReferences.mockResolvedValue([]);
         const result = await postChat({ golemId: 'golem_A', projectId: 'project-1', conversationId: 'conversation-1', message: 'synthetic', referenceFileIds: ['other-project-reference'] });
@@ -548,6 +579,9 @@ describe('workspace-aware M365 chat route', () => {
         mockHandleDashboardMessage.mockImplementation(async (ctx) => {
             expect(ctx.m365InternalControl).toBe(true);
             expect(ctx.toolRoutingQuery).toBe('建立 Word 報告');
+            expect(ctx.textOverride).toContain('[USER_REQUEST]');
+            expect(ctx.textOverride).toContain('[GOLEM_PLAN_CONTROL]internal[/GOLEM_PLAN_CONTROL]');
+            expect(ctx.textOverride).not.toContain('[USER_REQUEST]\n建立 Word 報告\n[/USER_REQUEST]');
             const meta = { isSystemFeedback: true, workspaceRunId: 'run-1' };
             await ctx.onTransportStart(meta);
             await ctx.onTransportAccepted(meta);
@@ -568,6 +602,68 @@ describe('workspace-aware M365 chat route', () => {
             role: 'assistant', content: 'corrected response', runId: 'run-1',
         }));
         expect(serverContext.broadcastLog.mock.calls.some(([item]) => String(item.raw || '').startsWith('[User]'))).toBe(false);
+    });
+
+    test('preserves user clarification inside an internal autonomous-plan continuation', async () => {
+        mockHandleDashboardMessage.mockImplementation(async (ctx) => {
+            expect(ctx.m365InternalControl).toBe(true);
+            expect(ctx.toolRoutingQuery).toBe('確認資料夾內有哪些檔案');
+            expect(ctx.textOverride).toContain('[GOLEM_PLAN_CONTROL]');
+            expect(ctx.textOverride).toContain('[USER_CONTINUATION_INPUT]');
+            expect(ctx.textOverride).toContain('請讀取第一張圖片內容');
+            expect(ctx.textOverride).toContain('[/USER_CONTINUATION_INPUT]');
+            await ctx.onTransportStart({ isSystemFeedback: true, workspaceRunId: 'run-1' });
+            await ctx.onTransportAccepted({ isSystemFeedback: true, workspaceRunId: 'run-1' });
+            await ctx.onTransportComplete({ text: 'continued response' }, { isSystemFeedback: true, workspaceRunId: 'run-1' });
+            await ctx.reply('continued response');
+        });
+
+        await serverContext.dispatchM365WorkspaceMessage({
+            golemId: 'golem_A', projectId: 'project-1', conversationId: 'conversation-1',
+            message: [
+                '[GOLEM_PLAN_CONTROL]',
+                'Resume the active plan.',
+                '[USER_CONTINUATION_INPUT]',
+                '請讀取第一張圖片內容',
+                '[/USER_CONTINUATION_INPUT]',
+                '[/GOLEM_PLAN_CONTROL]',
+            ].join('\n'),
+            runId: 'run-1', planId: 'run-1', planRevision: 2,
+            internalControl: true, toolRoutingQuery: '確認資料夾內有哪些檔案',
+        });
+        await waitFor(() => serverContext.m365DispatchLease === null);
+
+        expect(mockStore.addMessage).toHaveBeenCalledTimes(1);
+        expect(mockStore.addMessage).toHaveBeenCalledWith('conversation-1', expect.objectContaining({
+            role: 'assistant', content: 'continued response', runId: 'run-1',
+        }));
+    });
+
+    test('preserves a host Observation instead of replacing it with the routing objective', async () => {
+        mockHandleDashboardMessage.mockImplementation(async (ctx) => {
+            expect(ctx.m365InternalControl).toBe(true);
+            expect(ctx.toolRoutingQuery).toBe('讀取圖片內容');
+            expect(ctx.textOverride).toContain('[GOLEM_OBSERVATION]');
+            expect(ctx.textOverride).toContain('Attachment receipt: p4_invoice.png');
+            expect(ctx.textOverride).toContain('[/GOLEM_OBSERVATION]');
+            await ctx.onTransportStart({ isSystemFeedback: true, workspaceRunId: 'run-1' });
+            await ctx.onTransportAccepted({ isSystemFeedback: true, workspaceRunId: 'run-1' });
+            await ctx.onTransportComplete({ text: 'observation response' }, { isSystemFeedback: true, workspaceRunId: 'run-1' });
+            await ctx.reply('observation response');
+        });
+
+        await serverContext.dispatchM365WorkspaceMessage({
+            golemId: 'golem_A', projectId: 'project-1', conversationId: 'conversation-1',
+            message: '[GOLEM_OBSERVATION]\nAttachment receipt: p4_invoice.png\n[/GOLEM_OBSERVATION]',
+            runId: 'run-1', planId: 'run-1', planRevision: 3,
+            internalControl: true, toolRoutingQuery: '讀取圖片內容',
+        });
+        await waitFor(() => serverContext.m365DispatchLease === null);
+
+        expect(mockStore.addMessage).toHaveBeenCalledTimes(1);
+        expect(mockStore.addMessage).toHaveBeenCalledWith('conversation-1', expect.objectContaining({
+            role: 'assistant', content: 'observation response', runId: 'run-1',
+        }));
     });
 
     test('does not honor an external request to hide a user message as internal control', async () => {
@@ -593,49 +689,87 @@ describe('workspace-aware M365 chat route', () => {
         }));
     });
 
-    test('turns an explicit local task with a prose-only refusal into an execution repair', async () => {
-        const startExecutionContract = jest.fn().mockResolvedValue({
-            accepted: false,
-            planMode: true,
-            runId: 'run-repair-1',
-            planId: null,
-            planRevision: 0,
-            protocolRepair: { status: 'retry', prompt: 'repair', message: 'working' },
-        });
+    test('keeps a prose-only Copilot answer visible and does not create a run without GOLEM_PLAN', async () => {
+        const startExecutionContract = jest.fn();
         serverContext.m365RunCoordinator = {
             init: jest.fn().mockResolvedValue(),
             startExecutionContract,
             handleAutonomousPlan: jest.fn(),
             requestProtocolRepair: jest.fn(),
         };
-        const turnRoute = {
-            commandLane: { recommended: true, reason: 'local_project_artifact_authoring' },
-            skills: [], mcpTools: [],
-        };
-        mockBrain.toolRouter = { lastRoute: null };
+        const copilotAnswer = 'SharePoint Request Files 與共用資料夾的差異如下；也可以先建立 metadata 欄位，再由人工確認辨識結果。';
         mockHandleDashboardMessage.mockImplementation(async (ctx) => {
             const result = await ctx.onGolemProtocolResponse({
-                rawResponse: 'prose only',
-                parsed: { reply: '我尚未取得可建立 Word 的能力。', actions: [] },
+                rawResponse: copilotAnswer,
+                parsed: { reply: copilotAnswer, actions: [] },
                 actionCount: 0,
                 isSystemFeedback: false,
-                toolRoute: turnRoute,
             });
-            expect(result).toEqual(expect.objectContaining({ runId: 'run-repair-1' }));
-            await ctx.reply('working');
+            expect(result).toBeNull();
+            await ctx.reply(copilotAnswer);
         });
 
         const result = await postChat({
             golemId: 'golem_A', projectId: 'project-1', conversationId: 'conversation-1',
-            message: '在工作區建立一份 Word 報告',
+            message: '請說明 SharePoint Request Files 是否適合客戶上傳及 metadata 設計',
         });
         expect(result.response.status).toBe(200);
         await waitFor(() => serverContext.m365DispatchLease === null);
-        expect(startExecutionContract).toHaveBeenCalledWith(expect.objectContaining({
-            conversationId: 'conversation-1',
-            objective: '在工作區建立一份 Word 報告',
-            verification: expect.stringContaining('.docx'),
+        expect(startExecutionContract).not.toHaveBeenCalled();
+        expect(mockStore.addMessage).toHaveBeenNthCalledWith(2, 'conversation-1', expect.objectContaining({
+            role: 'assistant',
+            content: copilotAnswer,
+            runId: null,
         }));
+    });
+
+    test('routes a visible M365 file result without a plan into same-run control repair', async () => {
+        const requestProtocolRepair = jest.fn().mockResolvedValue({
+            accepted: false,
+            planMode: true,
+            runId: 'run-reconcile-1',
+            planId: 'run-reconcile-1',
+            planRevision: 8,
+            protocolRepair: {
+                status: 'retry',
+                prompt: 'restore plan only',
+                preserveVisibleResult: true,
+            },
+        });
+        serverContext.m365RunCoordinator = {
+            init: jest.fn().mockResolvedValue(),
+            requestProtocolRepair,
+            handleAutonomousPlan: jest.fn(),
+            startExecutionContract: jest.fn(),
+            getRunLocalFolders: jest.fn(() => []),
+        };
+        mockHandleDashboardMessage.mockImplementation(async (ctx) => {
+            const result = await ctx.onGolemProtocolResponse({
+                rawResponse: '[GOLEM_REPLY]Word 已完成[/GOLEM_REPLY]',
+                parsed: { reply: 'Word 已完成', actions: [] },
+                actionCount: 0,
+                downloadAttachmentCount: 1,
+                responseStatus: 'ENVELOPE_COMPLETE',
+                isSystemFeedback: false,
+            });
+            expect(result).toEqual(expect.objectContaining({ runId: 'run-reconcile-1' }));
+            await ctx.reply('Word 已完成', {
+                attachments: [{ name: 'report.docx', url: 'https://contoso.sharepoint.com/Doc.aspx?file=report.docx' }],
+            });
+        });
+
+        const result = await postChat({
+            golemId: 'golem_A', projectId: 'project-1', conversationId: 'conversation-1',
+            runId: 'run-reconcile-1',
+            message: '請補回剛才產生的 Word 結果',
+        });
+
+        expect(result.response.status).toBe(200);
+        await waitFor(() => serverContext.m365DispatchLease === null);
+        expect(requestProtocolRepair).toHaveBeenCalledWith({
+            runId: 'run-reconcile-1',
+            kind: 'visible_result_recovered',
+        });
     });
 
     test('adds only explicitly selected file text, MCP servers, Skills, and response mode to the Golem workspace envelope', async () => {
@@ -785,6 +919,30 @@ describe('workspace-aware M365 chat route', () => {
         expect(serverContext.m365RunCoordinator.getRunLocalFolders).toHaveBeenCalledWith('run-folder-1');
         expect(mockLocalFolderService.validateReferences).toHaveBeenCalledWith([selectedFolder]);
         expect(mockStore.getDraft).not.toHaveBeenCalled();
+    });
+
+    test('preserves a fresh automatic-turn allowance reset during internal continuation', async () => {
+        mockHandleDashboardMessage.mockImplementation(async (ctx) => {
+            expect(ctx.m365InternalControl).toBe(true);
+            expect(ctx.workspaceAutoTurnBudget).toEqual({ used: 0, limit: 6, reset: true });
+            await ctx.onTransportStart({ isSystemFeedback: true });
+            await ctx.onTransportAccepted({ isSystemFeedback: true });
+            await ctx.onTransportComplete({ text: 'continued' }, { isSystemFeedback: true });
+            await ctx.reply('continued');
+        });
+
+        const result = await serverContext.dispatchM365WorkspaceMessage({
+            golemId: 'golem_A',
+            projectId: 'project-1',
+            conversationId: 'conversation-1',
+            message: 'Continue the saved automatic work.',
+            runId: 'run-auto-1',
+            internalControl: true,
+            autoTurnBudget: { used: 0, limit: 6, reset: true },
+        });
+
+        expect(result).toEqual(expect.objectContaining({ success: true }));
+        await waitFor(() => serverContext.m365DispatchLease === null);
     });
 
     test('marks a native response-mode failure as unsent without requiring reconciliation', async () => {
@@ -960,6 +1118,10 @@ describe('workspace-aware M365 chat route', () => {
         expect(result.response.status).toBe(200);
         await waitFor(() => typeof finishTransport === 'function');
         expect(cleanupBatch).not.toHaveBeenCalled();
+        const dispatchedContext = mockHandleDashboardMessage.mock.calls.at(-1)[0];
+        expect(dispatchedContext.textOverride).toContain('已直接附加到目前的 Microsoft 365 Copilot 草稿');
+        expect(dispatchedContext.textOverride).toContain('不要為了取得 host Observation 而執行工作目錄、echo、dir');
+        expect(dispatchedContext.textOverride).toContain('不要為這些檔名呼叫 reference-files');
 
         finishTransport();
         await waitFor(() => cleanupBatch.mock.calls.length === 1);

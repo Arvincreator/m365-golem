@@ -6,8 +6,6 @@ const http = require('http');
 const DEFAULT_CONTROL_PORT = 43241;
 const MAX_RESPONSE_BYTES = 128 * 1024;
 const EDITABLE_LISTS = new Set([
-    'allowedHosts',
-    'allowedSites',
     'deniedHosts',
     'deniedSites',
     'allowedLocalPaths',

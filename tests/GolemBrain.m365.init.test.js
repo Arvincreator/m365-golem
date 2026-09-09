@@ -319,6 +319,29 @@ describe('GolemBrain m365-web bootstrap', () => {
         expect(routed).toContain('[GOLEM_OBSERVATION]');
     });
 
+    test('keeps first-turn routing when automatic follow-up permission is false', async () => {
+        ConfigManager.CONFIG.M365_ACTIONS_ENABLED = true;
+        const brain = new GolemBrain({
+            golemId: 'm365-first-action-route-test',
+            toolsetScene: 'assistant',
+            toolsetTools: [],
+        });
+        brain._refreshWebBackendDefinition();
+
+        const routed = await brain._withToolRoutingHint(
+            '那用 M365 Bridge 測試看看，能不能列出這個資料夾？',
+            false,
+            {
+                allowActions: false,
+                toolRoutingQuery: '那用 M365 Bridge 測試看看，能不能列出這個 SharePoint 資料夾？',
+            }
+        );
+
+        expect(routed).toContain('<tool-routing>');
+        expect(routed).toContain('m365-session-bridge');
+        expect(routed).toContain('m365_list_folder');
+    });
+
     test('keeps tool-vector routing enabled with an isolated local embedder while long-term memory stays off', async () => {
         ConfigManager.CONFIG.M365_ACTIONS_ENABLED = true;
         const brain = new GolemBrain({ golemId: 'm365-tool-vector-test' });

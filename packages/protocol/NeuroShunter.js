@@ -3,6 +3,7 @@ const { getMemoryFirewallService } = require('../../src/services/MemoryFirewallS
 const MultiAgentHandler = require('../../src/core/action_handlers/MultiAgentHandler');
 const SkillHandler = require('../../src/core/action_handlers/SkillHandler');
 const CommandHandler = require('../../src/core/action_handlers/CommandHandler');
+const AttachmentBatchHandler = require('../../src/core/action_handlers/AttachmentBatchHandler');
 const ActionExecutionGate = require('../../src/managers/ActionExecutionGate');
 const { toolsetManager } = require('../../src/managers/ToolsetManager');
 const { CONFIG } = require('../../src/config');
@@ -308,18 +309,22 @@ class NeuroShunter {
         let textToParse = rawResponse;
         let attachments = options.attachments || [];
         let responseReplyOptions = null;
+        let responseStatus = '';
 
         // 📥 [v9.1.10] 支援結構化回應物件 { text, attachments }
         if (rawResponse && typeof rawResponse === 'object' && !Array.isArray(rawResponse)) {
             textToParse = rawResponse.text || "";
             attachments = [...attachments, ...(rawResponse.attachments || [])];
+            responseStatus = String(rawResponse.status || '');
             if (rawResponse.replyOptions && typeof rawResponse.replyOptions === 'object') {
                 responseReplyOptions = rawResponse.replyOptions;
             }
         }
 
         const parsed = ResponseParser.parse(textToParse);
-        let shouldSuppressReply = options.suppressReply === true;
+        const backgroundMaintenance = options.backgroundMaintenance === true;
+        const hardSuppressReply = options.hardSuppressReply === true || backgroundMaintenance;
+        let shouldSuppressReply = options.suppressReply === true || hardSuppressReply;
         const localContextEnabled = !brain || typeof brain.isLocalContextEnabled !== 'function'
             ? true
             : brain.isLocalContextEnabled();
@@ -347,8 +352,11 @@ class NeuroShunter {
                     rawResponse: textToParse,
                     parsed,
                     actionCount: parsed.actions.length,
+                    downloadAttachmentCount: attachments.filter((item) => item && item.kind === 'download').length,
                     isSystemFeedback: options.isSystemFeedback === true,
+                    backgroundMaintenance,
                     toolRoute: options.m365ToolRoute || null,
+                    responseStatus,
                 });
                 if (protocolResult && protocolResult.planMode) {
                     options = {
@@ -366,18 +374,51 @@ class NeuroShunter {
                     };
                     if (protocolResult.accepted === false) parsed.actions = [];
                     if (protocolResult.warning) {
-                        parsed.reply = `${parsed.reply || ''}\n\n${protocolResult.warning}`.trim();
+                        if (protocolResult.accepted === false && protocolResult.stopRepair === true) {
+                            parsed.reply = '';
+                        } else if (protocolResult.accepted === false && !protocolResult.protocolRepair) {
+                            protocolRepair = {
+                                status: 'retry',
+                                prompt: [
+                                    '[GOLEM_HOST_CONSTRAINT]',
+                                    'The host rejected the previous plan or action. No new tool action was dispatched by this rejection.',
+                                    `Constraint code: ${String(protocolResult.code || 'M365_PLAN_REJECTED')}.`,
+                                    `Host feedback: ${String(protocolResult.warning || '').replace(/^⚠️\s*/, '')}`,
+                                    'Adjust your posture and return the next valid GOLEM_PLAN revision for the same plan_id.',
+                                    'If work can continue, include the corrected GOLEM_ACTION block with the ordered actions needed for the current step.',
+                                    'If human authorization or essential information is genuinely required, use wait_approval or wait_user with a concise question. Do not repeat the rejected response.',
+                                    '[/GOLEM_HOST_CONSTRAINT]',
+                                ].join('\n'),
+                                toolRoutingQuery: String(ctx?.toolRoutingQuery || ''),
+                                message: '',
+                            };
+                            parsed.reply = '';
+                        } else {
+                            parsed.reply = `${parsed.reply || ''}\n\n${protocolResult.warning}`.trim();
+                        }
                     }
                 }
                 if (protocolResult?.protocolRepair) {
+                    const preserveVisibleResult = protocolResult.protocolRepair.preserveVisibleResult === true
+                        || /^FALLBACK_(?:DIFF|RECOVERED)$/i.test(responseStatus);
+                    const visibleReply = parsed.reply;
+                    const visibleAttachments = attachments;
                     protocolRepair = protocolResult.protocolRepair;
                     parsed.actions = [];
-                    parsed.reply = String(protocolRepair.message || '').trim();
-                    // A rejected response may still carry M365-generated downloads or
-                    // citations. They are part of the unaccepted claim, so presenting
-                    // them beside the host repair message would make a fake completion
-                    // look trustworthy to the user.
-                    attachments = [];
+                    if (preserveVisibleResult) {
+                        // The visible M365 answer is still useful even when Copilot
+                        // omitted the protocol envelope. Show it now, then repair only
+                        // the missing control metadata in the background.
+                        parsed.reply = visibleReply;
+                        attachments = visibleAttachments;
+                    } else {
+                        parsed.reply = String(protocolRepair.message || '').trim();
+                        // A rejected response may still carry M365-generated downloads or
+                        // citations. They are part of the unaccepted claim, so presenting
+                        // them beside the host repair message would make a fake completion
+                        // look trustworthy to the user.
+                        attachments = [];
+                    }
                 }
             } catch (error) {
                 console.error('[NeuroShunter] GOLEM_PLAN host callback failed:', error);
@@ -407,13 +448,13 @@ class NeuroShunter {
                         '[GOLEM_PROJECT_MEMORY_REPAIR]',
                         'The prior response did not persist project memory required by this turn. A prose promise is not a write.',
                         repairReason ? `Host validation: ${repairReason}` : '',
-                        'Return exactly one non-empty [GOLEM_PROJECT_MEMORY] JSON array using the allowed schema, plus one concise [GOLEM_REPLY] that says what project state was recorded.',
+                        'Return exactly one non-empty [GOLEM_PROJECT_MEMORY] JSON array using the allowed schema.',
                         'Record the project-scoped work record, rule, decision, current status, preference or habit, or reusable experience/lesson/pitfall established by the turn. Do not mark unverified work complete and do not include a GOLEM_PLAN or GOLEM_ACTION.',
+                        'This is silent background maintenance. Do not include GOLEM_REPLY or any user-facing prose.',
                         '[/GOLEM_PROJECT_MEMORY_REPAIR]',
                     ].filter(Boolean).join('\n'),
                     attempt: projectMemoryRepairAttempt + 1,
                 };
-                shouldSuppressReply = true;
                 return 'queued';
             }
             parsed.reply = `${parsed.reply || ''}\n\n⚠️ 本輪應更新專案記憶，但模型沒有提供可寫入的專案紀錄。`.trim();
@@ -426,7 +467,21 @@ class NeuroShunter {
 
         if (options.planMode === true && parsed.actions.length > 0 && !parsed.plan && options.m365ActionApproved !== true) {
             parsed.actions = [];
-            parsed.reply = `${parsed.reply || ''}\n\n⚠️ 自主計畫已暫停：後續工具動作缺少同版本 GOLEM_PLAN。`.trim();
+            protocolRepair = {
+                status: 'retry',
+                prompt: [
+                    '[GOLEM_HOST_CONSTRAINT]',
+                    'The host rejected the previous tool actions. No tool action was dispatched.',
+                    'Constraint code: M365_SAME_REVISION_PLAN_REQUIRED.',
+                    'Host feedback: Follow-up tool actions must include the matching GOLEM_PLAN revision.',
+                    'Return the current GOLEM_PLAN with the same plan_id and a revised revision, plus the corrected GOLEM_ACTION block for the current step.',
+                    'If human authorization or essential information is genuinely required, use wait_approval or wait_user with a concise question.',
+                    '[/GOLEM_HOST_CONSTRAINT]',
+                ].join('\n'),
+                toolRoutingQuery: String(ctx?.toolRoutingQuery || ''),
+                message: '',
+            };
+            parsed.reply = '';
         }
 
         const isSystemFeedback = options.isSystemFeedback === true;
@@ -459,7 +514,8 @@ class NeuroShunter {
             && brain.webBackend
             && brain.webBackend.id === 'm365-web'
             && brain.webBackend.safeMode
-            && !mayAutoApproveM365Actions(parsed.actions)
+            && (!mayAutoApproveM365Actions(parsed.actions)
+                || parsed.actions.some((action) => String(action?.action || '').toLowerCase().replace(/_/g, '-') === 'attach-local-files'))
             && options.m365ActionApproved !== true
             && !hostCheckpointOnly;
 
@@ -510,13 +566,13 @@ class NeuroShunter {
         }
 
         // 🎯 [v9.1.13] 靜默模式自癒：如果沒有後續動作 (Action)，代表任務結束，強制解除靜默以顯示最終回覆
-        if (shouldSuppressReply && parsed.actions.length === 0 && !projectMemoryRepair) {
+        if (shouldSuppressReply && !hardSuppressReply && parsed.actions.length === 0 && !projectMemoryRepair) {
             console.log(`📢 [NeuroShunter] 偵測到任務結束或無後續動作，自動解除靜默模式。`);
             shouldSuppressReply = false;
         }
 
         // 核心：偵測 [INTERVENE] 標籤以實現觀察者模式自主介入
-        if (textToParse.includes('[INTERVENE]')) {
+        if (!hardSuppressReply && textToParse.includes('[INTERVENE]')) {
             console.log(`🚀 [NeuroShunter] 偵測到 AI 自主介入請求 [INTERVENE]！`);
             shouldSuppressReply = false;
         }
@@ -557,6 +613,17 @@ class NeuroShunter {
                 const memoryResults = Array.isArray(result?.results) ? result.results : [];
                 projectMemoryUpdateCount = memoryResults.filter((item) => item.changed).length;
                 console.log(`[GOLEM_PROJECT_MEMORY] updated=${projectMemoryUpdateCount} project=${ctx.workspaceProjectId}`);
+                if (projectMemoryUpdateCount > 0 && typeof ctx.onProjectMemoryUpdated === 'function') {
+                    try {
+                        await ctx.onProjectMemoryUpdated({
+                            projectId: ctx.workspaceProjectId,
+                            conversationId: ctx.workspaceConversationId || null,
+                            updatedCount: projectMemoryUpdateCount,
+                        });
+                    } catch (notificationError) {
+                        console.warn('[GOLEM_PROJECT_MEMORY] UI refresh notification skipped:', notificationError.message);
+                    }
+                }
                 if (projectMemoryRequired && projectMemoryUpdateCount === 0) {
                     requestProjectMemoryRepair('The project-memory block produced no stored change.');
                 }
@@ -618,17 +685,15 @@ class NeuroShunter {
         // 核准協議仍保留在宿主內部與專用狀態卡，不讓模型以操作細節打斷對話。
         // plan_checkpoint 的回覆本身就是原生 M365 產出，不能被狀態文字蓋掉。
         if (useM365ActionProgressReply && !needsM365Approval) {
-            parsed.reply = buildExecutionProgressText(parsed.actions[0]);
+            parsed.reply = parsed.actions.length > 1
+                ? `執行本步驟的 ${parsed.actions.length} 個動作，正在執行並確認中…`
+                : buildExecutionProgressText(parsed.actions[0]);
         } else if (needsM365Approval) {
             // The approval card above is the complete user-facing status. Avoid
             // following it with a second message that incorrectly says execution
             // has already started.
             parsed.reply = '';
         }
-        if (projectMemoryUpdateCount > 0 && !useM365ActionProgressReply && !needsM365Approval) {
-            parsed.reply = `${parsed.reply || ''}\n\n✓ 已更新此專案的狀態紀錄（${projectMemoryUpdateCount} 則）`.trim();
-        }
-
         // 1. 處理直接回覆 (讓 AI 的解說文字在行動之前出現)
         if (parsed.reply && !shouldSuppressReply) {
             let finalReply = parsed.reply;
@@ -699,6 +764,10 @@ class NeuroShunter {
                 isSystemFeedback: true,
                 allowActions: false,
                 planMode: false,
+                suppressReply: true,
+                hardSuppressReply: true,
+                backgroundMaintenance: true,
+                skipAutoTurnBudget: true,
                 m365ProjectMemoryRequired: true,
                 projectMemoryRepairAttempt: projectMemoryRepair.attempt,
                 workspaceConversationId: ctx.workspaceConversationId || null,
@@ -734,7 +803,7 @@ class NeuroShunter {
                         `[PREVIOUS_INVALID_ACTIONS]\n` +
                         `${compactActions}\n\n` +
                         `修正規則：\n` +
-                        `- 只輸出一個最小必要 action。\n` +
+                        `- 輸出完成目前步驟所需的最小 action 陣列；可包含多個依序執行的動作。\n` +
                         `- 若是行事曆，請用：{"action":"collab-calendar","args":{"action":"add","title":"...","start":"...","end":"..."}}\n` +
                         `- mcp_call 必須包含 server + tool + parameters。\n` +
                         `- command 必須放在 parameter 欄位。\n`;
@@ -797,6 +866,16 @@ class NeuroShunter {
                 ...(Array.isArray(options.preferredSkillIds) ? options.preferredSkillIds : []),
                 ...(Array.isArray(options.preferredSkillActions) ? options.preferredSkillActions : []),
             ];
+            // One plan step may contain several ordered MCP/Skill actions. Keep
+            // their individual results local until every action finishes, then
+            // send one combined host Observation back to Copilot. This avoids
+            // consuming one auto turn per action and prevents later results
+            // from overwriting or obscuring earlier results from the same step.
+            const observationCollector = options.planMode === true
+                && parsed.actions.length > 1
+                && parsed.actions.every((action) => !['command', 'sys-admin'].includes(String(action?.action || '').toLowerCase().replace(/_/g, '-')))
+                ? { entries: [] }
+                : null;
 
             for (const originalAct of parsed.actions) {
                 let act = originalAct;
@@ -828,6 +907,22 @@ class NeuroShunter {
                     case 'multi_agent':
                         await MultiAgentHandler.execute(ctx, act, controller, brain);
                         break;
+                    case 'attach_local_files':
+                        if (!await AttachmentBatchHandler.execute(ctx, act, brain, controller, {
+                            actionDepth,
+                            maxActionDepth,
+                            planMode: options.planMode === true,
+                            workspaceRunId: options.workspaceRunId || null,
+                            workspaceStepId: options.workspaceStepId || null,
+                            workspacePlanId: options.workspacePlanId || null,
+                            workspacePlanRevision: Number(options.workspacePlanRevision || 0),
+                            workspacePlanStepId: options.workspacePlanStepId || null,
+                            workspaceActionId: options.workspaceActionId || null,
+                            actionQueueManaged: options.actionQueueManaged === true,
+                        })) {
+                            rejectedActions.push({ action: act, code: 'ACTION_HANDLER_UNAVAILABLE', error: 'The local attachment batching runtime is unavailable.' });
+                        }
+                        break;
                     case 'command':
                     case 'sys-admin':
                         commandActions.push(act);
@@ -844,6 +939,7 @@ class NeuroShunter {
                             workspacePlanRevision: Number(options.workspacePlanRevision || 0),
                             workspacePlanStepId: options.workspacePlanStepId || null,
                             workspaceActionId: options.workspaceActionId || null,
+                            observationCollector,
                         });
                         if (!isSkillHandled) {
                             rejectedActions.push({
@@ -995,6 +1091,10 @@ class NeuroShunter {
                         );
                     }
                 }
+            }
+
+            if (observationCollector?.entries.length > 0) {
+                await SkillHandler.flushObservationCollector(ctx, brain, controller, options, observationCollector);
             }
 
             // 處理剩餘的終端指令序列並自動啟動回饋循環 (Feedback Loop)

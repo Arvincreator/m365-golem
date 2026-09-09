@@ -32,11 +32,8 @@ function visiblePolicy(policy: VisiblePolicy): Record<string, unknown> {
     allowOverwrite: policy.allowOverwrite,
     allowRecycle: policy.allowRecycle,
     readHostPatterns: policy.readHostPatterns,
-    allowedHosts: policy.allowedHosts,
-    allowedSites: policy.allowedSites,
     deniedHosts: policy.deniedHosts,
     deniedSites: policy.deniedSites,
-    allowedLibraries: policy.allowedLibraries,
     allowedLocalPaths: policy.allowedLocalPaths,
   };
 }
@@ -81,7 +78,7 @@ function isLocalOrigin(req: http.IncomingMessage, port: number): boolean {
 }
 
 function isEditableList(value: unknown): value is EditablePolicyList {
-  return value === "allowedHosts" || value === "allowedSites" || value === "deniedHosts" || value === "deniedSites" || value === "allowedLocalPaths";
+  return value === "deniedHosts" || value === "deniedSites" || value === "allowedLocalPaths";
 }
 
 function controlPanelHtml(port: number): string {
@@ -110,8 +107,8 @@ button.remove{background:#6c3340;padding:5px 9px;font-size:12px}.items{display:f
 </head>
 <body><main>
 <h1>M365 Session Bridge 管理介面</h1>
-<p>管理 SharePoint / OneDrive 的白名單與黑名單。這個頁面只綁定在 <code>127.0.0.1:${port}</code>；Entra ID 的登入權限仍由 Edge 目前的工作階段與 SharePoint 回應決定。</p>
-<div class="notice"><strong>策略順序：</strong>黑名單優先 → 白名單直接通過 → 支援的 SharePoint Online 目標跳出核准 → 其他網域硬擋。核准視窗的「永遠允許」會自動寫入白名單。</div>
+<p>管理 SharePoint / OneDrive 的黑名單與寫入安全開關。這個頁面只綁定在 <code>127.0.0.1:${port}</code>；實際可存取範圍仍由 Edge 目前登入的帳號與 SharePoint 權限決定。</p>
+<div class="notice"><strong>策略順序：</strong>支援的 SharePoint Online 目標預設可嘗試存取 → 黑名單優先拒絕 → Microsoft 365 驗證登入帳號權限。其他網域仍會硬擋。</div>
 <div id="message"></div>
 <section class="card"><h2>一般設定</h2><div class="settings">
 <label><input id="writeEnabled" type="checkbox">允許寫入操作</label>
@@ -119,16 +116,14 @@ button.remove{background:#6c3340;padding:5px 9px;font-size:12px}.items{display:f
 <label><input id="allowRecycle" type="checkbox">允許移到資源回收筒</label>
 </div></section>
 <div class="grid" style="margin-top:16px">
-<section class="card"><h2>白名單網域</h2><div class="row"><input id="allowedHostsInput" placeholder="tenant.sharepoint.com"><button data-add="allowedHosts">加入</button></div><div id="allowedHosts" class="items"></div></section>
 <section class="card"><h2>黑名單網域</h2><div class="row"><input id="deniedHostsInput" placeholder="不要操作的 SharePoint 網域"><button data-add="deniedHosts">加入</button></div><div id="deniedHosts" class="items"></div></section>
-<section class="card"><h2>白名單站台路徑</h2><div class="row"><input id="allowedSitesInput" placeholder="/sites/Finance 或 /personal/user_example_com"><button data-add="allowedSites">加入</button></div><div id="allowedSites" class="items"></div></section>
 <section class="card"><h2>黑名單站台路徑</h2><div class="row"><input id="deniedSitesInput" placeholder="/sites/Confidential"><button data-add="deniedSites">加入</button></div><div id="deniedSites" class="items"></div></section>
 <section class="card"><h2>允許上傳的本機專案資料夾</h2><div class="row"><input id="allowedLocalPathsInput" placeholder="C:\\Users\\you\\Documents\\Project"><button data-add="allowedLocalPaths">加入</button></div><div id="allowedLocalPaths" class="items"></div></section>
 </div>
-<p class="small">站台路徑黑名單會套用到所有列出的 SharePoint / OneDrive 網域；若同時存在白名單與黑名單，黑名單一定優先。根目錄可輸入 <code>/</code>，代表該網域下的根站台。本機路徑請只加入實際專案資料夾，不接受磁碟根目錄；這只允許 Bridge 讀取待上傳檔案，不會讓 SharePoint 取得整台電腦內容。</p>
+<p class="small">站台路徑黑名單會套用到所有支援的 SharePoint / OneDrive 網域。根目錄可輸入 <code>/</code>，代表該網域下的根站台。本機路徑請只加入實際專案資料夾，不接受磁碟根目錄；這只允許 Bridge 讀取待上傳檔案，不會讓 SharePoint 取得整台電腦內容。</p>
 </main>
 <script>
-const lists=['allowedHosts','allowedSites','deniedHosts','deniedSites','allowedLocalPaths'];
+const lists=['deniedHosts','deniedSites','allowedLocalPaths'];
 const $=id=>document.getElementById(id);
 function message(text,error){const el=$('message');el.textContent=text;el.className=error?'error':'';}
 function esc(value){return String(value).replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));}

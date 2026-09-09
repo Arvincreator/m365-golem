@@ -89,13 +89,21 @@ export class DraftController {
         } catch (error) { this.submitting = false; throw error; }
     }
     async accepted(snapshot: Snapshot & { revision: number }) {
-        // A versioned empty row is the tombstone. An older save cannot resurrect it.
+        // Clear one-shot message resources after acceptance, but keep explicitly
+        // selected local folders visible and scoped to this conversation until
+        // the user removes them. This lets follow-up turns inspect another file
+        // without silently losing the only authorized local route.
         try {
-            const saved = await this.transport.write(emptyDraft(), snapshot.revision);
+            const retainedDraft = {
+                ...emptyDraft(),
+                responseMode: snapshot.draft.responseMode,
+                localFolders: snapshot.draft.localFolders,
+            };
+            const saved = await this.transport.write(retainedDraft, snapshot.revision);
             this.revision = saved.revision;
             if (this.state.edit === snapshot.edit) {
                 this.savedEdit = this.state.edit;
-                this.emit({ draft: { ...emptyDraft(), responseMode: snapshot.draft.responseMode, revision: saved.revision }, files: [], status: "saved", error: "" });
+                this.emit({ draft: { ...retainedDraft, revision: saved.revision }, files: [], status: "saved", error: "" });
             } else {
                 this.emit({ draft: { ...this.state.draft, revision: saved.revision }, status: "unsaved" });
             }

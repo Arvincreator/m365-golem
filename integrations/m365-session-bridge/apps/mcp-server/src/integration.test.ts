@@ -24,15 +24,11 @@ function startServer(policyOverrides: Record<string, unknown> = {}): {
   pipeName: string;
 } {
   const basePolicy = JSON.parse(fs.readFileSync(path.join(repoRoot, "config", "policy.default.json"), "utf8"));
-  // Pin the site/library allowlist explicitly rather than inheriting whatever
-  // a developer's local policy happens to contain — otherwise
-  // these tests pass or fail depending on the machine they run on.
+  // Pin mutable safety settings explicitly rather than inheriting whatever a
+  // developer's local policy happens to contain.
   const policy = {
     ...basePolicy,
     writeEnabled: true,
-    allowedHosts: ["contoso.sharepoint.com"],
-    allowedSites: ["/sites/TestSite"],
-    allowedLibraries: [],
     allowedLocalPaths: [path.join(os.homedir(), "Documents", "M365-Golem")],
     ...policyOverrides,
   };
@@ -96,13 +92,12 @@ function startServer(policyOverrides: Record<string, unknown> = {}): {
 
 /**
  * A minimal stand-in for the Edge native host, connected over the same named
- * pipe the real native host would use. It answers `requestApproval` with a
- * configurable decision and records every approval request it receives (so a
- * test can assert exactly which/how many targets triggered the dialog), and
- * answers every other op with a small, valid-shaped success result so the
+ * pipe the real native host would use. It records any legacy
+ * `requestApproval` calls as a regression signal and answers every operation
+ * with a small, valid-shaped success result so the
  * MCP server's tool handler completes without needing the real Edge
  * extension. This lets integration tests exercise the full read-tool ->
- * shared authorizer -> approval-transport path end to end, not just the
+ * shared authorizer -> native-host path end to end, not just the
  * `EDGE_EXTENSION_OFFLINE` short-circuit that fires when no native host is
  * connected at all.
  */
@@ -396,13 +391,9 @@ test("v0.2 read tools require the Edge extension to be connected, same as write 
   // No native host is connected in this harness, so requireExtensionOnline()
   // must reject every read tool before it even reaches the target
   // authorizer, exactly like the write tools above. This intentionally does
-  // NOT prove anything about allowedSites/deniedSites behavior for reads —
-  // since the unified target authorizer, an unlisted-but-supported host on a
-  // read is no longer a free pass (see the dedicated
-  // "read tools route through the same target authorizer as write tools"
-  // tests below, which connect a fake native host to actually exercise that
-  // path instead of short-circuiting on EDGE_EXTENSION_OFFLINE).
-  const bodies = await callTools({ allowedSites: ["/sites/SomewhereElse"], writeEnabled: false }, [
+  // NOT prove anything about deny rules for reads. The connected-host tests
+  // below exercise those paths without this early short-circuit.
+  const bodies = await callTools({ writeEnabled: false }, [
     { name: "m365_list_folder", arguments: { folderUrl: SITE_FOLDER } },
     { name: "m365_list_file_versions", arguments: { fileUrl: SITE_FILE } },
   ]);
@@ -542,7 +533,7 @@ test("m365_list_folder caps maxItems at 1000 and rejects out-of-range values", a
   }
 });
 
-test("m365_bridge_status reports extensionOnline:false and the configured tenant host when idle", async () => {
+test("m365_bridge_status reports extensionOnline:false and deny-first scope when idle", async () => {
   const { child, send, waitFor, policyPath } = startServer();
   try {
     await initialize(send, waitFor);
@@ -552,7 +543,8 @@ test("m365_bridge_status reports extensionOnline:false and the configured tenant
     assert.equal(body.status, "success");
     assert.equal(body.extensionOnline, false);
     assert.equal(body.m365SessionAvailable, false);
-    assert.equal(body.tenantHost, "contoso.sharepoint.com");
+    assert.deepEqual(body.deniedHosts, []);
+    assert.equal("tenantHost" in body, false);
   } finally {
     child.kill();
     fs.unlinkSync(policyPath);
@@ -560,10 +552,10 @@ test("m365_bridge_status reports extensionOnline:false and the configured tenant
 });
 
 // ===========================================================================
-// Unified target authorizer: read tools vs. write tools (APPROVAL_FLOW_SPEC
-// addendum, confirmed 2026-08-10). A connected fake native host is required
-// to actually exercise the approval-dialog branch instead of short-circuiting
-// on EDGE_EXTENSION_OFFLINE, which is what every read-tool test above does.
+// Unified target authorizer: supported targets are allowed by default while
+// explicit deny rules remain authoritative. A connected fake native host is
+// required to exercise the full route instead of short-circuiting on
+// EDGE_EXTENSION_OFFLINE.
 // ===========================================================================
 
 function sleep(ms: number): Promise<void> {
@@ -589,7 +581,7 @@ async function waitForExtensionOnline(
 const UNLISTED_HOST_FILE = "https://other.sharepoint.com/sites/Ops/Shared Documents/report.docx";
 const UNLISTED_HOST_FOLDER = "https://other.sharepoint.com/sites/Ops/Shared Documents";
 
-test("read tools route through the same target authorizer as write tools: unlisted supported host triggers approval on both", async () => {
+test("read and write tools accept an unconfigured supported host without approval", async () => {
   const { child, send, waitFor, policyPath, pipeName } = startServer({ writeEnabled: true });
   const fakeHost = connectFakeNativeHost(pipeName, "deny");
   try {
@@ -606,16 +598,12 @@ test("read tools route through the same target authorizer as write tools: unlist
     for (const [i, call] of readCalls.entries()) {
       send({ jsonrpc: "2.0", id: 1000 + i, method: "tools/call", params: { name: call.name, arguments: call.arguments } });
       const body = textOf(await waitFor(1000 + i));
-      assert.equal(body.status, "error", `${call.name} against an unlisted host should have been denied`);
-      assert.equal(body.code, "FORBIDDEN_BY_POLICY", `${call.name} returned ${String(body.code)} instead of FORBIDDEN_BY_POLICY`);
+      assert.equal(body.status, "success", `${call.name} against a supported host should succeed: ${JSON.stringify(body)}`);
     }
-    assert.equal(fakeHost.approvalRequests.length, 4, "each of the 4 read tools must independently trigger one requestApproval call");
-    for (const req of fakeHost.approvalRequests) {
-      assert.equal(req.hostname, "other.sharepoint.com");
-    }
+    assert.equal(fakeHost.approvalRequests.length, 0, "supported targets must not invoke the removed allowlist approval flow");
 
-    // A write tool against the same unlisted host must hit the identical
-    // approval path — same call count growth, same hostname, same denial.
+    // A non-destructive write still needs writeEnabled, but not a target
+    // allowlist or per-site approval.
     send({
       jsonrpc: "2.0",
       id: 2000,
@@ -623,8 +611,8 @@ test("read tools route through the same target authorizer as write tools: unlist
       params: { name: "m365_rename_file", arguments: { fileUrl: UNLISTED_HOST_FILE, newName: "renamed.docx" } },
     });
     const writeBody = textOf(await waitFor(2000));
-    assert.equal(writeBody.code, "FORBIDDEN_BY_POLICY");
-    assert.equal(fakeHost.approvalRequests.length, 5, "the write tool must reach the same approval transport as the read tools");
+    assert.equal(writeBody.status, "success", JSON.stringify(writeBody));
+    assert.equal(fakeHost.approvalRequests.length, 0);
   } finally {
     fakeHost.close();
     child.kill();
@@ -632,8 +620,8 @@ test("read tools route through the same target authorizer as write tools: unlist
   }
 });
 
-test("read tools route through the same target authorizer as write tools: allowlisted host+site reads silently with zero approval calls", async () => {
-  const { child, send, waitFor, policyPath, pipeName } = startServer({ writeEnabled: true });
+test("configured deny site blocks reads without contacting the approval transport", async () => {
+  const { child, send, waitFor, policyPath, pipeName } = startServer({ writeEnabled: true, deniedSites: ["/sites/TestSite"] });
   // Decision is irrelevant here — the assertion is that it is never asked.
   const fakeHost = connectFakeNativeHost(pipeName, "deny");
   try {
@@ -641,18 +629,11 @@ test("read tools route through the same target authorizer as write tools: allowl
     await initialize(send, waitFor);
     await waitForExtensionOnline(send, waitFor, 900);
 
-    const readCalls: Array<{ name: string; arguments: Record<string, unknown> }> = [
-      { name: "m365_download_file", arguments: { fileUrl: SITE_FILE, destinationPath: path.join(os.homedir(), "Documents", "M365-Golem", "listed.txt") } },
-      { name: "m365_get_file_url", arguments: { fileUrl: SITE_FILE } },
-      { name: "m365_list_folder", arguments: { folderUrl: SITE_FOLDER } },
-      { name: "m365_list_file_versions", arguments: { fileUrl: SITE_FILE } },
-    ];
-    for (const [i, call] of readCalls.entries()) {
-      send({ jsonrpc: "2.0", id: 3000 + i, method: "tools/call", params: { name: call.name, arguments: call.arguments } });
-      const body = textOf(await waitFor(3000 + i));
-      assert.equal(body.status, "success", `${call.name} against an allowlisted host+site should succeed silently: ${JSON.stringify(body)}`);
-    }
-    assert.equal(fakeHost.approvalRequests.length, 0, "an allowlisted host+site must never call the approval transport");
+    send({ jsonrpc: "2.0", id: 3000, method: "tools/call", params: { name: "m365_list_folder", arguments: { folderUrl: SITE_FOLDER } } });
+    const body = textOf(await waitFor(3000));
+    assert.equal(body.status, "error");
+    assert.equal(body.code, "FORBIDDEN_BY_POLICY");
+    assert.equal(fakeHost.approvalRequests.length, 0);
   } finally {
     fakeHost.close();
     child.kill();
