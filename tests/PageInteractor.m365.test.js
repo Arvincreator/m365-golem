@@ -601,8 +601,50 @@ describe('PageInteractor M365 safety behavior', () => {
             pollIntervalMs: 1,
         })).resolves.toBeUndefined();
 
-        expect(page.evaluate).toHaveBeenCalledTimes(4);
+        expect(page.evaluate).toHaveBeenCalledTimes(3);
         expect(sendTarget).toHaveBeenCalledTimes(3);
+    });
+
+    test('accepts an enabled real send button even when M365 keeps a broad busy marker', async () => {
+        const page = {
+            evaluate: jest.fn().mockResolvedValue({
+                errorText: '', pending: true, everyNameVisible: true,
+            }),
+        };
+        const interactor = new PageInteractor(page, {}, definition);
+        jest.spyOn(interactor, '_tryClickSendButton').mockResolvedValue({
+            clicked: true, score: 120, label: '傳送',
+        });
+
+        await expect(interactor._waitForM365AttachmentUploadReady({
+            files: [{ name: 'evidence.txt' }],
+        }, 'button', 1000, {
+            minimumWaitMs: 0,
+            stableSamples: 2,
+            pollIntervalMs: 1,
+        })).resolves.toBeUndefined();
+    });
+
+    test('accepts an enabled send button when M365 hides uploaded filenames from body text', async () => {
+        const page = {
+            evaluate: jest.fn().mockResolvedValue({
+                errorText: '', pending: false, everyNameVisible: false,
+            }),
+        };
+        const interactor = new PageInteractor(page, {}, definition);
+        const sendTarget = jest.spyOn(interactor, '_tryClickSendButton').mockResolvedValue({
+            clicked: true, score: 120, label: '傳送',
+        });
+
+        await expect(interactor._waitForM365AttachmentUploadReady({
+            files: [{ name: 'evidence.txt' }],
+        }, 'button', 1000, {
+            minimumWaitMs: 0,
+            stableSamples: 2,
+            pollIntervalMs: 1,
+        })).resolves.toBeUndefined();
+
+        expect(sendTarget).toHaveBeenCalledTimes(2);
     });
 
     test('stops on an M365 attachment upload error before looking for the send button', async () => {

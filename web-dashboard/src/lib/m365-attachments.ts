@@ -26,6 +26,14 @@ export type AttachmentCandidate = {
     displayPath?: string;
 };
 
+const CLIPBOARD_IMAGE_EXTENSIONS: Record<string, string> = {
+    "image/png": ".png",
+    "image/jpeg": ".jpg",
+    "image/gif": ".gif",
+    "image/bmp": ".bmp",
+    "image/tiff": ".tiff",
+};
+
 type FileSystemEntryLike = {
     isFile: boolean;
     isDirectory: boolean;
@@ -124,6 +132,29 @@ export async function collectDroppedAttachmentCandidates(dataTransfer: DataTrans
         throw new Error("資料夾不會整批上傳。請使用＋選單的「選擇本機資料夾」，讓 Golem 按需讀取。");
     }
     return files.map((file) => ({ file, displayPath: file.name }));
+}
+
+function clipboardImageName(timestamp: number, index: number, extension: string): string {
+    const stamp = new Date(timestamp).toISOString().replace(/[-:]/g, "").replace("T", "-").replace("Z", "");
+    return `screenshot-${stamp}${index > 0 ? `-${index + 1}` : ""}${extension}`;
+}
+
+export function collectClipboardImageCandidates(
+    dataTransfer: DataTransfer,
+    timestamp = Date.now()
+): AttachmentCandidate[] {
+    const imageFiles = Array.from(dataTransfer.items || []).flatMap((item) => {
+        const type = item.type.toLowerCase();
+        if (item.kind !== "file" || !CLIPBOARD_IMAGE_EXTENSIONS[type]) return [];
+        const file = item.getAsFile();
+        return file ? [{ file, type }] : [];
+    });
+
+    return imageFiles.map(({ file, type }, index) => {
+        const name = clipboardImageName(timestamp, index, CLIPBOARD_IMAGE_EXTENSIONS[type]);
+        const renamed = new File([file], name, { type, lastModified: timestamp + index });
+        return { file: renamed, displayPath: name };
+    });
 }
 
 export function fileToBase64(file: File): Promise<string> {

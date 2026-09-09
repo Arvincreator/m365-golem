@@ -222,7 +222,7 @@ function makeM365Definition(config) {
     const configuredResponseTimeoutMs = Number(config && config.M365_RESPONSE_TIMEOUT_MS);
     const responseTimeoutMs = Number.isFinite(configuredResponseTimeoutMs) && configuredResponseTimeoutMs > 0
         ? Math.min(300000, Math.max(10000, configuredResponseTimeoutMs))
-        : 180000;
+        : 300000;
     return {
         id: 'm365-web',
         label: 'Microsoft 365 Copilot Chat',

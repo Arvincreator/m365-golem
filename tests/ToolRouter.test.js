@@ -115,6 +115,18 @@ describe('ToolRouter', () => {
         expect(result.skills.some(skill => skill.id === 'log-reader')).toBe(true);
     });
 
+    test('does not route browser-native attachments through the registered reference library', () => {
+        const router = new ToolRouter({
+            activeScene: 'assistant',
+            activeTools: ['reference-files'],
+            mcpServers: [],
+        });
+
+        const result = router.route('請比較這兩個附件並提出改善建議');
+
+        expect(result.skills.some(skill => skill.id === 'reference-files')).toBe(false);
+    });
+
     test('recommends Chrome DevTools MCP tools for browser interaction', () => {
         const router = new ToolRouter({
             activeScene: 'coding',

@@ -21,6 +21,8 @@ const UNVERIFIED_CAPABILITY_STOP_RE = /(?:沒有|尚未|未取得|找不到|不�
 const REPEATED_PERMISSION_RE = /(?:(?:是否|要不要|可不可以|同意|允許).{0,32}(?:嘗試|執行|繼續|檢查|建立|操作)|(?:if\s+you\s+want|would\s+you\s+like).{0,32}(?:try|continue|proceed))/i;
 const EXECUTION_PROGRESS_SUFFIX = '，正在執行並確認中…';
 const UNSAFE_PROGRESS_RE = /(?:https?:\/\/|[a-z]:\\|GOLEM_|Observation|harness|tool-routing|MCP|Skill|PowerShell|cmd(?:\.exe)?|python(?:\.exe)?|node(?:\.exe)?|已完成|成功|失敗|無法)/i;
+const NATIVE_ATTACHMENT_ANALYSIS_RE = /(?:附件|attached\s+files?|files?\s+attached).{0,48}(?:讀|閱讀|查看|檢視|分析|比較|摘要|整理|說明|建議|歸納)|(?:讀|閱讀|查看|檢視|分析|比較|摘要|整理|說明|建議|歸納).{0,48}(?:附件|attached\s+files?|files?\s+attached)/i;
+const ATTACHMENT_MUTATION_RE = /(?:修改|編輯|重寫|改寫|轉換|建立|產生|製作|儲存|下載|上傳|寄送|發送|刪除|重新命名|move|rename|delete|upload|download|create|generate|edit|rewrite|convert)/i;
 
 function requiresLocalWorkspaceListing(text) {
     const value = String(text || '');
@@ -87,8 +89,9 @@ function buildExecutionProgressText(action, fallback = '執行目前操作並確
     return `${label}${EXECUTION_PROGRESS_SUFFIX}`;
 }
 
-function classifyExecutionExpectation(query, route, reply = '') {
+function classifyExecutionExpectation(query, route, reply = '', context = {}) {
     const request = new ToolUsePolicy().classifyRequest(query);
+    const queryText = String(query || '');
     const local = route?.commandLane?.recommended === true;
     const routedTools = [...(route?.skills || []), ...(route?.mcpTools || [])];
     const routedTool = routedTools.length > 0;
@@ -100,11 +103,19 @@ function classifyExecutionExpectation(query, route, reply = '') {
     if ((request.verificationIntent || request.capabilityProbe) && hasReadOnlyRoute) {
         return { required: true, reason: 'read_only_verification', local: false };
     }
+    // Files already attached to the current Copilot turn are a native M365
+    // input. Reading, comparing, or summarizing them does not require a fake
+    // local command merely to manufacture a host Observation.
+    if (Number(context.nativeAttachmentCount || 0) > 0
+        && NATIVE_ATTACHMENT_ANALYSIS_RE.test(queryText)
+        && !ATTACHMENT_MUTATION_RE.test(queryText)) {
+        return { required: false, reason: 'native_attachment_analysis', local: false };
+    }
     if (!request.explicitAction || request.passive) return { required: false, reason: 'optional_or_non_execution' };
     if (local) return { required: true, reason: route.commandLane.reason || 'local_execution', local: true };
     // Route metadata is advisory. Explicit local work must remain actionable
     // even if a concurrent catalog refresh replaced the active router.
-    if (LOCAL_TARGET_RE.test(String(query || ''))) {
+    if (LOCAL_TARGET_RE.test(queryText)) {
         return { required: true, reason: 'explicit_local_execution', local: true };
     }
     if (routedTool && DEFERRED_EXECUTION_RE.test(String(reply || ''))) {

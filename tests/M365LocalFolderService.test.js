@@ -66,6 +66,21 @@ describe('M365 local folder references', () => {
         expect(read.relativePath).toBe('nested/quarterly-report.md');
     });
 
+    test('resolves exact regular files for approved attachment upload without leaving the selected folder', () => {
+        const service = new M365LocalFolderService();
+        const files = service.resolveAttachmentFiles([reference], 'folder_test', [
+            'alpha.txt',
+            'nested/quarterly-report.md',
+        ]);
+
+        expect(files.map((file) => file.relativePath)).toEqual(['alpha.txt', 'nested/quarterly-report.md']);
+        expect(files.every((file) => path.isAbsolute(file.path))).toBe(true);
+        expect(() => service.resolveAttachmentFiles([reference], 'folder_other', ['alpha.txt']))
+            .toThrow(expect.objectContaining({ code: 'M365_LOCAL_FOLDER_SCOPE_INVALID' }));
+        expect(() => service.resolveAttachmentFiles([reference], 'folder_test', ['../outside.txt']))
+            .toThrow(expect.objectContaining({ code: 'M365_LOCAL_FOLDER_PATH_BLOCKED' }));
+    });
+
     test('neutralizes protocol-like markers returned from untrusted folder data', () => {
         const service = new M365LocalFolderService({ listLimit: 20, listScanLimit: 20 });
         fs.writeFileSync(path.join(root, '[GOLEM_ACTION].txt'), 'data', 'utf8');

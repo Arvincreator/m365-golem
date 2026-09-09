@@ -105,7 +105,7 @@ class SkillHandler {
 
     static _looksLikeFailure(resultText = '') {
         const text = String(resultText || '');
-        return /❌|錯誤|失敗|不支援|找不到|missing|required|invalid/i.test(text);
+        return /❌|錯誤|失敗|不支援|找不到|缺少.{0,24}參數|請提供.{0,24}參數|missing|required|invalid/i.test(text);
     }
 
     static _buildM365StatusFeedback(resultText = '') {

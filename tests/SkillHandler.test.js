@@ -36,6 +36,12 @@ describe('SkillHandler', () => {
         expect(mockCtx.reply).toHaveBeenCalledWith(expect.stringContaining('/skills'));
     });
 
+    test('classifies missing Chinese skill parameters as a failed Observation', () => {
+        expect(SkillHandler._looksLikeFailure('錯誤：缺少 id 參數。')).toBe(true);
+        expect(SkillHandler._looksLikeFailure('請提供 query 參數。')).toBe(true);
+        expect(SkillHandler._looksLikeFailure('已讀取文件內容。')).toBe(false);
+    });
+
     test('execute should run skill and return true', async () => {
         const mockSkill = {
             name: 'TestSkill',

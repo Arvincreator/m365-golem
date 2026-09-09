@@ -1027,6 +1027,8 @@ class PageInteractor {
             : 350;
         const startedAt = Date.now();
         let consecutiveReadySamples = 0;
+        let lastSendTarget = null;
+        let lastUploadState = null;
         while (Date.now() - startedAt < timeoutMs) {
             const uploadState = await this.page.evaluate(({ editorSelector, names }) => {
                 const visible = (node) => {
@@ -1081,30 +1083,42 @@ class PageInteractor {
                 editorSelector: this._getComposerSelectors().join(', '),
                 names: (attachment.files || []).map((file) => String(file.name || '')),
             }).catch(() => ({ errorText: '', pending: true, everyNameVisible: false }));
+            lastUploadState = uploadState;
 
             if (uploadState.errorText) {
                 const error = new Error(`Microsoft 365 Copilot 回報附件上傳失敗：${uploadState.errorText}`);
                 error.code = 'M365_ATTACHMENT_UPLOAD_FAILED';
                 throw error;
             }
-            if (!uploadState.pending && uploadState.everyNameVisible) {
-                const sendTarget = await this._tryClickSendButton(sendSelector);
-                if (sendTarget && sendTarget.clicked) {
-                    consecutiveReadySamples += 1;
-                    const waitedLongEnough = Date.now() - startedAt >= minimumWaitMs;
-                    if (waitedLongEnough && consecutiveReadySamples >= stableSamplesRequired) {
-                        console.log('✅ [PageInteractor] M365 附件已完成 OneDrive 上傳，送出按鈕已連續穩定啟用。');
-                        return;
-                    }
-                } else {
-                    consecutiveReadySamples = 0;
+            // The enabled, composer-adjacent Send control is the authoritative
+            // signal that M365 has accepted the attachments. Some M365 builds
+            // keep a broad aria-busy/progress marker on the composer after the
+            // individual files are ready, so treating that marker as a veto
+            // leaves a perfectly sendable draft stuck until timeout.
+            // The trusted manifest was already matched to visible attachment
+            // cards by _attachM365Files.  Do not require the filenames to stay
+            // discoverable through body text here: the current M365 build can
+            // move those cards into an accessibility-only toolbar while the
+            // composer remains open.  An enabled, composer-adjacent Send
+            // control is the final readiness signal.
+            const sendTarget = await this._tryClickSendButton(sendSelector);
+            lastSendTarget = sendTarget;
+            if (sendTarget && sendTarget.clicked) {
+                consecutiveReadySamples += 1;
+                const waitedLongEnough = Date.now() - startedAt >= minimumWaitMs;
+                if (waitedLongEnough && consecutiveReadySamples >= stableSamplesRequired) {
+                    console.log('✅ [PageInteractor] M365 附件已完成 OneDrive 上傳，送出按鈕已連續穩定啟用。');
+                    return;
                 }
             } else {
                 consecutiveReadySamples = 0;
             }
             await new Promise(r => setTimeout(r, pollIntervalMs));
         }
-        const error = new Error('Microsoft 365 Copilot 的附件仍在上傳或送出按鈕尚未啟用；系統已停止，不會按 Enter 或自動重送。');
+        const diagnostics = lastSendTarget && lastSendTarget.diagnostics
+            ? ` 候選: ${lastSendTarget.diagnostics}`
+            : ` 附件名稱可見=${Boolean(lastUploadState && lastUploadState.everyNameVisible)}`;
+        const error = new Error(`Microsoft 365 Copilot 的附件仍在上傳或送出按鈕尚未啟用；系統已停止，不會按 Enter 或自動重送。${diagnostics}`);
         error.code = 'M365_ATTACHMENT_UPLOAD_TIMEOUT';
         throw error;
     }
@@ -1356,6 +1370,20 @@ class PageInteractor {
             };
             const nearComposer = (btn, composer) => {
                 if (!composer) return false;
+                // A long M365 draft is rendered inside a scrollable editor.  In
+                // that state the contenteditable child can have a large
+                // negative viewport rect even though its visible editor shell
+                // and Send button are on screen.  Treat a nearby shared,
+                // visible composer ancestor as authoritative before comparing
+                // the inner editor geometry.
+                let ancestor = composer.parentElement;
+                for (let depth = 0; ancestor && depth < 6; depth += 1, ancestor = ancestor.parentElement) {
+                    const ancestorRect = ancestor.getBoundingClientRect();
+                    const intersectsViewport = ancestorRect.width > 0 && ancestorRect.height > 0 &&
+                        ancestorRect.bottom >= 0 && ancestorRect.top <= window.innerHeight &&
+                        ancestorRect.right >= 0 && ancestorRect.left <= window.innerWidth;
+                    if (intersectsViewport && ancestor.contains(btn)) return true;
+                }
                 const rect = btn.getBoundingClientRect();
                 const inputRect = composer.getBoundingClientRect();
                 const buttonCenterY = rect.top + rect.height / 2;
@@ -1845,16 +1873,33 @@ class PageInteractor {
         }, { names: fileNames, selectors: markerSelectors });
 
         let selected = false;
-        const inputs = this.page.locator('input[type="file"]');
-        const inputCount = await inputs.count().catch(() => 0);
-        for (let index = inputCount - 1; index >= 0 && !selected; index -= 1) {
-            const input = inputs.nth(index);
-            const disabled = await input.isDisabled().catch(() => true);
-            if (disabled) continue;
-            try {
-                await input.setInputFiles(filePaths);
-                selected = true;
-            } catch (_) { }
+        let selectedInputSource = '';
+        // M365 can render unrelated hidden file inputs elsewhere in the app.
+        // A successful setInputFiles() on one of those controls produces no
+        // attachment card but used to stop the search.  Prefer the input owned
+        // by the visible chat composer, then retain the generic fallback for
+        // older M365 layouts.
+        const inputSelectors = [
+            '#m365-chat-input-shared-container input[type="file"]',
+            'input[type="file"]',
+        ];
+        for (const inputSelector of inputSelectors) {
+            const inputs = this.page.locator(inputSelector);
+            const inputCount = await inputs.count().catch(() => 0);
+            for (let index = inputCount - 1; index >= 0 && !selected; index -= 1) {
+                const input = inputs.nth(index);
+                const disabled = await input.isDisabled().catch(() => true);
+                if (disabled) continue;
+                try {
+                    await input.setInputFiles(filePaths);
+                    selected = true;
+                    selectedInputSource = inputSelector;
+                } catch (_) { }
+            }
+            if (selected) break;
+        }
+        if (selected) {
+            console.log(`📎 [PageInteractor] 已透過 Copilot composer 附件控制選取 ${fileNames.length} 個檔案 (${selectedInputSource}).`);
         }
 
         if (!selected) {

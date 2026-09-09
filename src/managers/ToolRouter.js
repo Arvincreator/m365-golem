@@ -67,7 +67,10 @@ function inferIntentBoosts(text) {
     add(/(搜尋後|深入查看|深入網頁|繼續查看這個網頁|deep dive|follow-up crawl)/i, ['duckduckgo-devtools-bridge', 'duckduckgo-search', 'chrome-devtools']);
     add(/(排程|提醒|schedule|定時|每天|明天|下週|cron)/i, ['collab-calendar']);
     add(/(行程|行事曆|日曆|calendar|今天有什麼|明天有什麼|這週|下週|新增行程|加入行程|排行程|有什麼約|約了什麼|協作日曆)/i, ['collab-calendar']);
-    add(/(檔案|附件|參考資料|reference)/i, ['reference-files']);
+    // `reference-files` is the separately registered knowledge library. A
+    // browser-native attachment is already visible to Copilot and must not be
+    // routed back through this skill merely because the user said "附件".
+    add(/(參考資料|參考文件|reference files?|reference library)/i, ['reference-files']);
 
     const isM365DataTask = M365_DATA_RE.test(t);
     if (isM365DataTask) {
@@ -283,6 +286,8 @@ class ToolRouter {
         const preferredSkillIds = new Set((options.preferredSkillIds || []).map(normalizeText));
         const preferredSkillActions = new Set((options.preferredSkillActions || []).map(normalizeText));
         const preferredMcpServers = new Set((options.preferredMcpServers || []).map(normalizeText));
+        const nativeAttachmentRequest = /(?:附件|attached files?)/i.test(String(query || ''))
+            && !/(?:ref_[a-z0-9_-]+|參考(?:附件|文件|資料)(?:庫)?|reference library)/i.test(String(query || ''));
         const requestClass = this.policy.classifyRequest(query);
         const explicitM365BridgeRequest = EXPLICIT_M365_BRIDGE_RE.test(String(query || ''));
         const exactM365Url = extractExactM365Url(query);
@@ -309,6 +314,12 @@ class ToolRouter {
 
         const skillCandidates = SkillPackageRegistry.listSkillPackages({ userDataDir: this.userDataDir })
             .filter(pkg => pkg.enabled !== false)
+            .filter(pkg => {
+                const id = normalizeText(pkg.id || pkg.action);
+                const explicitlySelected = preferredSkillIds.has(normalizeText(pkg.id))
+                    || preferredSkillActions.has(normalizeText(pkg.action));
+                return !(nativeAttachmentRequest && id === 'reference-files' && !explicitlySelected);
+            })
             .map(pkg => {
                 const content = SkillPackageRegistry.readPackagePrompt(pkg).slice(0, 2500);
                 const manifest = pkg.manifest || {};

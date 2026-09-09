@@ -217,6 +217,7 @@ class M365RunCoordinator {
                 throw serviceError('M365_RUN_RESUME_INVALID', 'This run cannot be resumed from its current state.', 409);
             }
             const input = String(userInput || '').trim();
+            const attachmentBatchId = String(options.attachmentBatchId || '').trim();
             const continueAutoRun = options.continueAutoRun === true;
             if (run.status === 'WAITING_USER' && run.errorCode === 'M365_AUTO_TURN_LIMIT') {
                 if (!continueAutoRun) {
@@ -254,7 +255,7 @@ class M365RunCoordinator {
                 });
                 return this.store.getRun(runId);
             }
-            if (['WAITING_USER', 'BLOCKED'].includes(run.status) && !input) {
+            if (['WAITING_USER', 'BLOCKED'].includes(run.status) && !input && !attachmentBatchId) {
                 throw serviceError('M365_RUN_INPUT_REQUIRED', 'Add the requested clarification before continuing.', 400);
             }
             const steps = await this.store.listRunSteps(runId);
@@ -268,7 +269,14 @@ class M365RunCoordinator {
                     reason: 'USER_RESUMED_AUTONOMOUS_PLAN',
                     stepId: latest?.id || null,
                 });
-                this._scheduleAutonomousContinuation(queuedRun.id, planEvent.payload.plan, input, 'user_resume');
+                this._scheduleAutonomousContinuation(
+                    queuedRun.id,
+                    planEvent.payload.plan,
+                    input || 'The user attached the requested files. Read them and continue the saved plan.',
+                    'user_resume',
+                    run.errorCode || '',
+                    ...(attachmentBatchId ? [{ attachmentBatchId }] : [])
+                );
                 return this.store.getRun(runId);
             }
             const queuedRun = await this.store.transitionRun(runId, 'QUEUED', {
@@ -515,11 +523,11 @@ class M365RunCoordinator {
         this.dispatchTimers.set(runId, timer);
     }
 
-    _scheduleAutonomousContinuation(runId, plan, userInput = '', reason = 'resume') {
+    _scheduleAutonomousContinuation(runId, plan, userInput = '', reason = 'resume', priorErrorCode = '', dispatchOptions = {}) {
         this._clearDispatchTimer(runId);
         const timer = setTimeout(() => {
             this.dispatchTimers.delete(runId);
-            this._beginAutonomousContinuation(runId, plan, userInput, reason).catch((error) => {
+            this._beginAutonomousContinuation(runId, plan, userInput, reason, priorErrorCode, dispatchOptions).catch((error) => {
                 console.error('[M365RunCoordinator] Failed to resume autonomous plan:', error);
             });
         }, 100);
@@ -580,7 +588,7 @@ class M365RunCoordinator {
         }
     }
 
-    async _beginAutonomousContinuation(runId, plan, userInput, reason) {
+    async _beginAutonomousContinuation(runId, plan, userInput, reason, priorErrorCode = '', dispatchOptions = {}) {
         await this.init();
         let dispatchInput = null;
         await this._withRunLock(runId, async () => {
@@ -603,6 +611,10 @@ class M365RunCoordinator {
                 'The previous response updated the plan but supplied no action and no concrete blocker. No new tool was executed. Lack of an observation for an unattempted step is not a blocker.',
                 'Using the existing goal and verified results, emit the next necessary GOLEM_ACTION with status=running. Do not repeat completed work. If genuinely blocked, specify the actual failure or missing input in question. Preserve approval and access boundaries.'
             );
+            if (priorErrorCode) lines.push(
+                `[HOST_PAUSE_REASON]${priorErrorCode}[/HOST_PAUSE_REASON]`,
+                'The host paused this run for the reason above. Use the newest user input and that reason to correct the next plan revision; do not merely repeat the previous response.'
+            );
             if (userInput) lines.push('[USER_CONTINUATION_INPUT]', userInput, '[/USER_CONTINUATION_INPUT]');
             lines.push('[/GOLEM_PLAN_CONTROL]');
             dispatchInput = {
@@ -618,6 +630,7 @@ class M365RunCoordinator {
                 toolRoutingQuery: run.objective,
                 goalMode: run.goalMode === true,
                 maxActionDepth: run.maxSteps,
+                attachmentBatchId: String(dispatchOptions.attachmentBatchId || '').trim() || undefined,
             };
         });
         if (!dispatchInput) return;
@@ -833,6 +846,41 @@ class M365RunCoordinator {
         if (!latest && !hasExecutionContract && !rejectedFirstPlan) return null;
         const nextRevision = Number(latest?.payload?.plan?.revision || 0) + 1;
         const hasPlan = Boolean(latest);
+        // One corrective turn is enough for ordinary format failures. A second
+        // turn is allowed only when the host recovered a genuinely visible
+        // result and needs to bind that result back to durable plan state.
+        // Each distinct contract problem gets its own bounded correction. A
+        // prior repair for (for example) missing completion evidence must not
+        // consume the only chance to repair a later revision-history mistake.
+        if (sameKindRepairs >= (recoverableVisibleResponse ? 2 : 1)) {
+            if (run.status === 'QUEUED') {
+                run = await this.store.transitionRun(run.id, 'RUNNING', {
+                    reason: 'PROTOCOL_REPAIR_EXHAUSTED_PREPARE_PAUSE',
+                });
+            }
+            if (run.status === 'RUNNING') {
+                run = await this.store.transitionRun(run.id, 'WAITING_USER', {
+                    reason: 'M365_PROTOCOL_REPAIR_EXHAUSTED',
+                    errorCode: 'M365_PROTOCOL_REPAIR_EXHAUSTED',
+                });
+            }
+            await this.store.appendRunEvent(run.id, 'autonomous_protocol_repair_exhausted', {
+                kind,
+                attempts: sameKindRepairs,
+            });
+            return {
+                accepted: false,
+                allowActions: false,
+                planMode: true,
+                runId: run.id,
+                planId: hasPlan ? run.id : null,
+                planRevision: hasPlan ? nextRevision - 1 : 0,
+                maxActionDepth: run.maxSteps,
+                code: 'M365_PROTOCOL_REPAIR_EXHAUSTED',
+                warning: '⚠️ 自主計畫已暫停：Copilot 未依執行格式提出可執行步驟，系統已停止自動補正，避免重複訊息。',
+                stopRepair: true,
+            };
+        }
         const preserveVisibleResult = recoverableVisibleResponse;
         const prompt = [
             '[GOLEM_EXECUTION_REPAIR]',
@@ -1113,6 +1161,33 @@ class M365RunCoordinator {
                     if (run.currentStep < run.maxSteps) {
                         const storedPlan = planForStorage(plan, run.id);
                         await this.store.appendRunEvent(run.id, 'autonomous_plan_received', { requestId, plan: storedPlan });
+                        if (repairs >= 1) {
+                            if (run.status === 'QUEUED') {
+                                run = await this.store.transitionRun(run.id, 'RUNNING', {
+                                    reason: 'MISSING_ACTION_REPAIR_EXHAUSTED_PREPARE_PAUSE',
+                                });
+                            }
+                            run = await this.store.transitionRun(run.id, 'WAITING_USER', {
+                                reason: 'M365_PROTOCOL_REPAIR_EXHAUSTED',
+                                errorCode: 'M365_PROTOCOL_REPAIR_EXHAUSTED',
+                            });
+                            await this.store.appendRunEvent(run.id, 'autonomous_plan_action_repair_exhausted', {
+                                revision: plan.revision,
+                                attempts: repairs,
+                            });
+                            return {
+                                accepted: false,
+                                allowActions: false,
+                                planMode: true,
+                                runId: run.id,
+                                planId: run.id,
+                                planRevision: plan.revision,
+                                maxActionDepth: run.maxSteps,
+                                code: 'M365_PROTOCOL_REPAIR_EXHAUSTED',
+                                warning: '⚠️ 自主計畫已暫停：Copilot 連續未提出可執行動作，已停止自動補正避免重複回合。',
+                                stopRepair: true,
+                            };
+                        }
                         await this.store.appendRunEvent(run.id, 'autonomous_plan_action_repair', { revision: plan.revision, attempt: repairs + 1 });
                         if (run.status === 'RUNNING') await this.store.transitionRun(run.id, 'QUEUED', { reason: 'MISSING_ACTION_REPAIR' });
                         this._scheduleAutonomousContinuation(run.id, storedPlan, '', 'MISSING_ACTION_REPAIR');

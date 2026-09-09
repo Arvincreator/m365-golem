@@ -179,14 +179,14 @@ class ConversationManager {
             if (options.waitForCompletion === true) {
                 const queueOptions = { ...options };
                 delete queueOptions.waitForCompletion;
-                return new Promise((resolve) => {
+                return new Promise((resolve, reject) => {
                     this._commitDirectly(
                         ctx,
                         text,
                         options.isPriority,
                         options.attachment,
                         queueOptions,
-                        { resolve, settled: false }
+                        { resolve, reject, settled: false }
                     );
                 });
             }
@@ -219,10 +219,11 @@ class ConversationManager {
         console.log(`[QueueState] queue=${this.queue.length} processing=${this.isProcessing ? 1 : 0} reason=${reason}`);
     }
 
-    _settleQueueCompletion(completion) {
+    _settleQueueCompletion(completion, value, error = null) {
         if (!completion || completion.settled) return;
         completion.settled = true;
-        completion.resolve();
+        if (error && typeof completion.reject === 'function') completion.reject(error);
+        else completion.resolve(value);
     }
 
     _commitDirectly(ctx, text, isPriority, attachment = null, options = {}, completion = null) {
@@ -314,7 +315,7 @@ class ConversationManager {
         if (this.isProcessing || this.queue.length === 0) return;
 
         const nextTask = this.queue[0];
-        if (nextTask?.options?.isSystemFeedback === true) {
+        if (nextTask?.options?.isSystemFeedback === true && nextTask?.options?.skipAutoTurnBudget !== true) {
             const budget = this._autoTurnBudget(nextTask);
             if (!budget.allowed) {
                 const deferredTask = this.queue.shift();
@@ -373,6 +374,8 @@ class ConversationManager {
             if (global.gc) global.gc();
         }
 
+        let completionValue;
+        let completionError = null;
         try {
             console.log(`🚀 [Dialogue Queue:${this.golemId}] 從隊列取出，開始處理對話...`);
             if (task.ctx && typeof task.ctx.onTransportStart === 'function') {
@@ -495,6 +498,11 @@ class ConversationManager {
                 }
             }
 
+            completionValue = brainResponse;
+            if (task.options?.batchIngestMode === true) {
+                return;
+            }
+
             let { text: raw, attachments: responseAttachments, status: extractorStatus } = brainResponse;
             if (!isSystemFeedback && memoryFirewall && memoryFirewall.isEnabled()) {
                 const inspected = memoryFirewall.inspectResponse(raw, { golemId: this.golemId });
@@ -528,6 +536,8 @@ class ConversationManager {
 
             await this.NeuroShunter.dispatch(task.ctx, brainResponse, this.brain, this.controller, {
                 suppressReply: shouldSuppressReply,
+                hardSuppressReply: task.options.hardSuppressReply === true,
+                backgroundMaintenance: task.options.backgroundMaintenance === true,
                 attachments: responseAttachments,
                 isSystemFeedback: task.options.isSystemFeedback === true,
                 allowActions: task.options.allowActions === true,
@@ -551,6 +561,7 @@ class ConversationManager {
                 goalMode: task.options.goalMode === true || task.ctx?.workspaceGoalMode === true,
             });
         } catch (e) {
+            completionError = e;
             console.error(`❌ [Dialogue Queue:${this.golemId}] 處理失敗:`, e);
             if (task.ctx && typeof task.ctx.onTransportError === 'function') {
                 await task.ctx.onTransportError(e, transportMeta).catch((hookError) => {
@@ -558,13 +569,16 @@ class ConversationManager {
                 });
             }
             // ✅ [M-4 Fix] 對外只顯示友善錯誤，避免洩露路徑/Selector 等內部資訊
-            if (/^M365_|^BROWSER_PROFILE_IN_USE$/.test(String(e && e.code || ''))) {
+            if (task.options?.suppressTransportErrorReply === true) {
+                // Internal attachment-ingest turns surface their error through one
+                // batch progress card and one plan Observation, not a chat message.
+            } else if (/^M365_|^BROWSER_PROFILE_IN_USE$/.test(String(e && e.code || ''))) {
                 await task.ctx.reply(`⚠️ ${e.message}`);
             } else {
                 await task.ctx.reply(`⚠️ 系統暫時無法回應，請稍後再試。`);
             }
         } finally {
-            this._settleQueueCompletion(task.completion);
+            this._settleQueueCompletion(task.completion, completionValue, completionError);
             this.isProcessing = false;
             this._logQueueState('process_done');
             

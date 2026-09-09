@@ -55,7 +55,7 @@ describe('M365 durable run coordinator', () => {
         fs.rmSync(tempDir, { recursive: true, force: true });
     });
 
-    test.each(['running', 'blocked'])('keeps repairing a %s plan that has no action or concrete blocker', async status => {
+    test.each(['running', 'blocked'])('repairs a %s plan without an action once, then pauses instead of looping', async status => {
         const plan = {
             schemaVersion: 'golem_plan/1', planId: null, revision: 1,
             goal: 'List workspace files', status, currentStepId: 'step_1',
@@ -78,15 +78,76 @@ describe('M365 durable run coordinator', () => {
         await coordinator._beginAutonomousContinuation(first.runId, { ...plan, revision: 1 }, '', 'MISSING_ACTION_REPAIR');
         expect(server.dispatchM365WorkspaceMessage.mock.calls[0][0].message).toContain('No new tool was executed');
         expect(coordinator.getRunLocalFolders(first.runId)).toEqual(localFolders);
-        for (const revision of [2, 3]) {
-            await coordinator.handleAutonomousPlan({ conversationId: conversation.id, existingRunId: first.runId,
-                plan: { ...plan, planId: first.runId, revision }, actions: [], actionCount: 0 });
-            coordinator._clearDispatchTimer(first.runId);
-        }
-        expect((await store.getRun(first.runId)).status).toBe('QUEUED');
+        const exhausted = await coordinator.handleAutonomousPlan({ conversationId: conversation.id, existingRunId: first.runId,
+            plan: { ...plan, planId: first.runId, revision: 2 }, actions: [], actionCount: 0 });
+        expect(exhausted).toEqual(expect.objectContaining({
+            accepted: false,
+            stopRepair: true,
+            code: 'M365_PROTOCOL_REPAIR_EXHAUSTED',
+        }));
+        expect((await store.getRun(first.runId))).toEqual(expect.objectContaining({
+            status: 'WAITING_USER',
+            errorCode: 'M365_PROTOCOL_REPAIR_EXHAUSTED',
+        }));
         expect(await store.listRunSteps(first.runId)).toHaveLength(0);
         expect((await store.listRunEvents(first.runId))
-            .filter((event) => event.eventType === 'autonomous_plan_action_repair')).toHaveLength(3);
+            .filter((event) => event.eventType === 'autonomous_plan_action_repair')).toHaveLength(1);
+        expect((await store.listRunEvents(first.runId))
+            .filter((event) => event.eventType === 'autonomous_plan_action_repair_exhausted')).toHaveLength(1);
+
+        const scheduleSpy = jest.spyOn(coordinator, '_scheduleAutonomousContinuation');
+        await coordinator.resumeRun(first.runId, '請改用附件上傳並讀取第一張圖片');
+        expect(scheduleSpy).toHaveBeenLastCalledWith(
+            first.runId,
+            expect.objectContaining({ revision: 2 }),
+            '請改用附件上傳並讀取第一張圖片',
+            'user_resume',
+            'M365_PROTOCOL_REPAIR_EXHAUSTED'
+        );
+        coordinator._clearDispatchTimer(first.runId);
+        await coordinator._beginAutonomousContinuation(
+            first.runId,
+            { ...plan, planId: first.runId, revision: 2 },
+            '請改用附件上傳並讀取第一張圖片',
+            'user_resume',
+            'M365_PROTOCOL_REPAIR_EXHAUSTED'
+        );
+        const resumedMessage = server.dispatchM365WorkspaceMessage.mock.calls.at(-1)[0].message;
+        expect(resumedMessage).toContain('[HOST_PAUSE_REASON]M365_PROTOCOL_REPAIR_EXHAUSTED[/HOST_PAUSE_REASON]');
+        expect(resumedMessage).toContain('[USER_CONTINUATION_INPUT]\n請改用附件上傳並讀取第一張圖片\n[/USER_CONTINUATION_INPUT]');
+    });
+
+    test('allows one bounded repair for each distinct protocol failure kind', async () => {
+        const run = await store.createRun(conversation.id, {
+            objective: 'Compare two attached files',
+            verification: 'Comparison is grounded in both attachments.',
+            maxSteps: 12,
+            startImmediately: true,
+        });
+        await store.appendRunEvent(run.id, 'autonomous_plan_received', {
+            plan: {
+                schemaVersion: 'golem_plan/1', planId: run.id, revision: 1,
+                goal: 'Compare two attached files', status: 'running', currentStepId: 'step_1',
+                completionCriteria: 'Comparison is grounded in both attachments.',
+                steps: [{ id: 'step_1', title: 'Read attachments', status: 'in_progress', doneWhen: 'Both read' }],
+                question: '', approvalRequest: '', completionSummary: '',
+            },
+        });
+        await store.appendRunEvent(run.id, 'autonomous_protocol_repair', {
+            kind: 'completion_evidence_missing', attempt: 1,
+        });
+
+        const result = await coordinator.requestProtocolRepair({
+            runId: run.id,
+            kind: 'completed_evidence_not_preserved',
+            issues: ['completed_step_not_preserved:step_1'],
+        });
+
+        expect(result).toEqual(expect.objectContaining({
+            accepted: false,
+            protocolRepair: expect.objectContaining({ status: 'retry' }),
+        }));
+        expect((await store.getRun(run.id)).status).toBe('RUNNING');
     });
 
     test('does not replace scoped folder references when a run belongs to another conversation', async () => {
@@ -269,18 +330,21 @@ describe('M365 durable run coordinator', () => {
         expect(repair.protocolRepair.message).toBe('正在確認可用資源並準備執行…');
 
         const second = await coordinator.requestProtocolRepair({ runId: repair.runId, kind: 'missing_initial_execution' });
-        expect(second.protocolRepair).toEqual(expect.objectContaining({ status: 'retry', attempt: 2 }));
-        const third = await coordinator.requestProtocolRepair({ runId: repair.runId, kind: 'missing_initial_execution' });
-        expect(third.protocolRepair).toEqual(expect.objectContaining({ status: 'retry', attempt: 3 }));
-        expect((await store.getRun(repair.runId)).status).toBe('RUNNING');
+        expect(second).toEqual(expect.objectContaining({
+            code: 'M365_PROTOCOL_REPAIR_EXHAUSTED',
+            stopRepair: true,
+        }));
+        expect(second.protocolRepair).toBeUndefined();
+        expect(await store.getRun(repair.runId)).toEqual(expect.objectContaining({
+            status: 'WAITING_USER',
+            errorCode: 'M365_PROTOCOL_REPAIR_EXHAUSTED',
+        }));
 
         const envelopeRepair = await coordinator.requestProtocolRepair({
             runId: repair.runId,
             kind: 'unwrapped_visible_response',
         });
-        expect(envelopeRepair.protocolRepair.prompt).toContain('visible user-facing result has already been delivered');
-        expect(envelopeRepair.protocolRepair.prompt).toContain('Do not recreate the document');
-        expect(envelopeRepair.protocolRepair.prompt).toContain('plan_checkpoint');
+        expect(envelopeRepair).toBeNull();
     });
 
     test('recovers a visible file result from reconciliation and repairs only the missing plan state', async () => {

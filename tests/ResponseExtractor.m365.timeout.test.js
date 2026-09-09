@@ -153,8 +153,8 @@ describe('ResponseExtractor bounded M365 waits', () => {
         });
         const candidate = new FakeHTMLElement();
         Object.assign(candidate, {
-            innerText: 'Word 檔已生成，可直接下載。',
-            textContent: 'Word 檔已生成，可直接下載。',
+            innerText: 'Word 檔已生成，可直接下載。第006期_數位轉型週報摘要.docx',
+            textContent: 'Word 檔已生成，可直接下載。第006期_數位轉型週報摘要.docx',
             parentElement: null,
             closest: jest.fn((value) => value === selector ? candidate : null),
             querySelectorAll: jest.fn(() => []),
@@ -190,7 +190,7 @@ describe('ResponseExtractor bounded M365 waits', () => {
             found: true,
             busy: false,
             status: 'FALLBACK_RECOVERED',
-            text: 'Word 檔已生成，可直接下載。',
+            text: 'Word 檔已生成，可直接下載。第006期_數位轉型週報摘要.docx',
         }));
         expect(result.attachments).toEqual([
             expect.objectContaining({
@@ -247,6 +247,69 @@ describe('ResponseExtractor bounded M365 waits', () => {
                 kind: 'download',
                 name: '第006期_數位轉型週報摘要.docx',
                 url: expect.stringContaining('Doc.aspx'),
+            }),
+        ]);
+    });
+
+    test('captures a generated Word preview button outside the completed response article', async () => {
+        const selector = '[role="article"].fai-CopilotMessage';
+        const previewButton = {
+            id: 'https://contoso-my.sharepoint.com/Documents/Copilot/Created/plan.docx?web=1',
+            innerText: 'ECOVIS_客戶SharePoint電子收件與AI辨識導入計畫書.docx',
+            textContent: 'ECOVIS_客戶SharePoint電子收件與AI辨識導入計畫書.docx',
+            getAttribute: jest.fn(() => ''),
+            getBoundingClientRect: () => ({ width: 280, height: 36 }),
+        };
+        const unrelatedPreviewButton = {
+            id: 'https://contoso-my.sharepoint.com/Documents/Copilot/Created/old-report.docx?web=1',
+            innerText: '舊報告.docx',
+            textContent: '舊報告.docx',
+            getAttribute: jest.fn(() => ''),
+            getBoundingClientRect: () => ({ width: 180, height: 36 }),
+        };
+        const candidate = {
+            tagName: 'DIV',
+            innerText: '[[BEGIN:test]][GOLEM_REPLY]已完成 13 頁 Word 計畫書。ECOVIS_客戶SharePoint電子收件與AI辨識導入計畫書.docx[/GOLEM_REPLY][[END:test]]',
+            textContent: '',
+            isContentEditable: false,
+            parentElement: null,
+            getAttribute: jest.fn(() => ''),
+            matches: jest.fn((value) => value === selector),
+            closest: jest.fn((value) => value === selector ? candidate : null),
+            querySelectorAll: jest.fn(() => []),
+        };
+        global.window = {
+            location: { href: 'https://m365.cloud.microsoft/chat/conversation/test' },
+            getComputedStyle: () => ({ display: 'block', visibility: 'visible' }),
+        };
+        global.document = {
+            querySelectorAll: jest.fn((value) => {
+                if (value === selector) return [candidate];
+                if (value === 'button[id^="https://"], [role="button"][id^="https://"]') return [unrelatedPreviewButton, previewButton];
+                return [];
+            }),
+        };
+        const page = { evaluate: jest.fn((callback, args) => callback(args)) };
+
+        const result = await ResponseExtractor.waitForResponse(
+            page,
+            selector,
+            '[[BEGIN:test]]',
+            '[[END:test]]',
+            '',
+            {
+                timeoutMs: 1000,
+                responseContainerSelectors: [selector],
+                stopSelectors: ['.never-busy'],
+            }
+        );
+
+        expect(result.status).toBe('ENVELOPE_COMPLETE');
+        expect(result.attachments).toEqual([
+            expect.objectContaining({
+                kind: 'download',
+                name: 'ECOVIS_客戶SharePoint電子收件與AI辨識導入計畫書.docx',
+                url: expect.stringContaining('/Copilot/Created/plan.docx'),
             }),
         ]);
     });

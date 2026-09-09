@@ -3,6 +3,7 @@ const { getMemoryFirewallService } = require('../../src/services/MemoryFirewallS
 const MultiAgentHandler = require('../../src/core/action_handlers/MultiAgentHandler');
 const SkillHandler = require('../../src/core/action_handlers/SkillHandler');
 const CommandHandler = require('../../src/core/action_handlers/CommandHandler');
+const AttachmentBatchHandler = require('../../src/core/action_handlers/AttachmentBatchHandler');
 const ActionExecutionGate = require('../../src/managers/ActionExecutionGate');
 const { toolsetManager } = require('../../src/managers/ToolsetManager');
 const { CONFIG } = require('../../src/config');
@@ -321,7 +322,9 @@ class NeuroShunter {
         }
 
         const parsed = ResponseParser.parse(textToParse);
-        let shouldSuppressReply = options.suppressReply === true;
+        const backgroundMaintenance = options.backgroundMaintenance === true;
+        const hardSuppressReply = options.hardSuppressReply === true || backgroundMaintenance;
+        let shouldSuppressReply = options.suppressReply === true || hardSuppressReply;
         const localContextEnabled = !brain || typeof brain.isLocalContextEnabled !== 'function'
             ? true
             : brain.isLocalContextEnabled();
@@ -351,6 +354,7 @@ class NeuroShunter {
                     actionCount: parsed.actions.length,
                     downloadAttachmentCount: attachments.filter((item) => item && item.kind === 'download').length,
                     isSystemFeedback: options.isSystemFeedback === true,
+                    backgroundMaintenance,
                     toolRoute: options.m365ToolRoute || null,
                     responseStatus,
                 });
@@ -444,13 +448,13 @@ class NeuroShunter {
                         '[GOLEM_PROJECT_MEMORY_REPAIR]',
                         'The prior response did not persist project memory required by this turn. A prose promise is not a write.',
                         repairReason ? `Host validation: ${repairReason}` : '',
-                        'Return exactly one non-empty [GOLEM_PROJECT_MEMORY] JSON array using the allowed schema, plus one concise [GOLEM_REPLY] that says what project state was recorded.',
+                        'Return exactly one non-empty [GOLEM_PROJECT_MEMORY] JSON array using the allowed schema.',
                         'Record the project-scoped work record, rule, decision, current status, preference or habit, or reusable experience/lesson/pitfall established by the turn. Do not mark unverified work complete and do not include a GOLEM_PLAN or GOLEM_ACTION.',
+                        'This is silent background maintenance. Do not include GOLEM_REPLY or any user-facing prose.',
                         '[/GOLEM_PROJECT_MEMORY_REPAIR]',
                     ].filter(Boolean).join('\n'),
                     attempt: projectMemoryRepairAttempt + 1,
                 };
-                shouldSuppressReply = true;
                 return 'queued';
             }
             parsed.reply = `${parsed.reply || ''}\n\n⚠️ 本輪應更新專案記憶，但模型沒有提供可寫入的專案紀錄。`.trim();
@@ -510,7 +514,8 @@ class NeuroShunter {
             && brain.webBackend
             && brain.webBackend.id === 'm365-web'
             && brain.webBackend.safeMode
-            && !mayAutoApproveM365Actions(parsed.actions)
+            && (!mayAutoApproveM365Actions(parsed.actions)
+                || parsed.actions.some((action) => String(action?.action || '').toLowerCase().replace(/_/g, '-') === 'attach-local-files'))
             && options.m365ActionApproved !== true
             && !hostCheckpointOnly;
 
@@ -561,13 +566,13 @@ class NeuroShunter {
         }
 
         // 🎯 [v9.1.13] 靜默模式自癒：如果沒有後續動作 (Action)，代表任務結束，強制解除靜默以顯示最終回覆
-        if (shouldSuppressReply && parsed.actions.length === 0 && !projectMemoryRepair) {
+        if (shouldSuppressReply && !hardSuppressReply && parsed.actions.length === 0 && !projectMemoryRepair) {
             console.log(`📢 [NeuroShunter] 偵測到任務結束或無後續動作，自動解除靜默模式。`);
             shouldSuppressReply = false;
         }
 
         // 核心：偵測 [INTERVENE] 標籤以實現觀察者模式自主介入
-        if (textToParse.includes('[INTERVENE]')) {
+        if (!hardSuppressReply && textToParse.includes('[INTERVENE]')) {
             console.log(`🚀 [NeuroShunter] 偵測到 AI 自主介入請求 [INTERVENE]！`);
             shouldSuppressReply = false;
         }
@@ -608,6 +613,17 @@ class NeuroShunter {
                 const memoryResults = Array.isArray(result?.results) ? result.results : [];
                 projectMemoryUpdateCount = memoryResults.filter((item) => item.changed).length;
                 console.log(`[GOLEM_PROJECT_MEMORY] updated=${projectMemoryUpdateCount} project=${ctx.workspaceProjectId}`);
+                if (projectMemoryUpdateCount > 0 && typeof ctx.onProjectMemoryUpdated === 'function') {
+                    try {
+                        await ctx.onProjectMemoryUpdated({
+                            projectId: ctx.workspaceProjectId,
+                            conversationId: ctx.workspaceConversationId || null,
+                            updatedCount: projectMemoryUpdateCount,
+                        });
+                    } catch (notificationError) {
+                        console.warn('[GOLEM_PROJECT_MEMORY] UI refresh notification skipped:', notificationError.message);
+                    }
+                }
                 if (projectMemoryRequired && projectMemoryUpdateCount === 0) {
                     requestProjectMemoryRepair('The project-memory block produced no stored change.');
                 }
@@ -748,6 +764,10 @@ class NeuroShunter {
                 isSystemFeedback: true,
                 allowActions: false,
                 planMode: false,
+                suppressReply: true,
+                hardSuppressReply: true,
+                backgroundMaintenance: true,
+                skipAutoTurnBudget: true,
                 m365ProjectMemoryRequired: true,
                 projectMemoryRepairAttempt: projectMemoryRepair.attempt,
                 workspaceConversationId: ctx.workspaceConversationId || null,
@@ -886,6 +906,22 @@ class NeuroShunter {
                         break;
                     case 'multi_agent':
                         await MultiAgentHandler.execute(ctx, act, controller, brain);
+                        break;
+                    case 'attach_local_files':
+                        if (!await AttachmentBatchHandler.execute(ctx, act, brain, controller, {
+                            actionDepth,
+                            maxActionDepth,
+                            planMode: options.planMode === true,
+                            workspaceRunId: options.workspaceRunId || null,
+                            workspaceStepId: options.workspaceStepId || null,
+                            workspacePlanId: options.workspacePlanId || null,
+                            workspacePlanRevision: Number(options.workspacePlanRevision || 0),
+                            workspacePlanStepId: options.workspacePlanStepId || null,
+                            workspaceActionId: options.workspaceActionId || null,
+                            actionQueueManaged: options.actionQueueManaged === true,
+                        })) {
+                            rejectedActions.push({ action: act, code: 'ACTION_HANDLER_UNAVAILABLE', error: 'The local attachment batching runtime is unavailable.' });
+                        }
                         break;
                     case 'command':
                     case 'sys-admin':

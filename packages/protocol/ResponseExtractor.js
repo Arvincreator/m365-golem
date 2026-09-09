@@ -233,12 +233,22 @@ class ResponseExtractor {
                         elementType: 'image',
                     };
                 }).filter(Boolean);
+                const containerText = String(container.innerText || container.textContent || '');
                 const previewFiles = Array.from(document.querySelectorAll('button[id^="https://"], [role="button"][id^="https://"]'))
                     .filter(visible)
                     .map((button) => ({
+                        button,
                         url: String(button.id || ''),
                         name: String(button.innerText || button.textContent || button.getAttribute('aria-label') || 'M365 文件')
                             .replace(/\s+/g, ' ').trim().slice(0, 240),
+                    }))
+                    .filter(({ button, name }) => {
+                        const insideResponse = typeof container.contains === 'function' && container.contains(button);
+                        return insideResponse || (name && containerText.includes(name));
+                    })
+                    .map(({ url, name }) => ({
+                        url,
+                        name,
                         hasDownload: true,
                         elementType: 'link',
                     }));
@@ -559,6 +569,34 @@ class ResponseExtractor {
                                     });
                                 }
                             });
+
+                            // Copilot document creation renders the generated
+                            // Office file as a visible preview button outside
+                            // the assistant article. Its id is the trusted
+                            // HTTPS file URL, so capture it just like the
+                            // recovery path does after a bounded timeout.
+                            try {
+                                Array.from(document.querySelectorAll('button[id^="https://"], [role="button"][id^="https://"]'))
+                                    .filter((button) => {
+                                        const style = window.getComputedStyle(button);
+                                        const rect = button.getBoundingClientRect();
+                                        return rect.width > 0 && rect.height > 0
+                                            && style.display !== 'none'
+                                            && style.visibility !== 'hidden';
+                                    })
+                                    .forEach((button) => {
+                                        const name = String(button.innerText || button.textContent || button.getAttribute('aria-label') || 'M365 文件')
+                                            .replace(/\s+/g, ' ').trim().slice(0, 240);
+                                        const insideResponse = typeof container.contains === 'function' && container.contains(button);
+                                        if (!insideResponse && (!name || !rawText.includes(name))) return;
+                                        attachments.push({
+                                            url: String(button.id || ''),
+                                            name,
+                                            hasDownload: true,
+                                            elementType: 'link',
+                                        });
+                                    });
+                            } catch (_) { }
                         }
                         lastAttachments = attachments;
 

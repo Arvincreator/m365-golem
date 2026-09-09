@@ -1,7 +1,8 @@
 const ReferenceFileService = require('../../../services/ReferenceFileService');
 
 const PROMPT = `【已載入技能：REFERENCE_FILES】
-用途：查詢全域「代理人參考文件」庫。當使用者提到參考文件、指定檔名/路徑，或你需要更多背景資料時，請主動使用此技能。
+用途：查詢全域「代理人參考文件」庫。只有已登記並具有 ref_xxx ID 的文件可由此技能讀取。
+邊界：本輪直接附加到 Microsoft 365 Copilot 的附件已由 Copilot 原生讀取，不要用此技能讀取；使用者選取的本機資料夾也使用其專用的 golem-folder 指令，不要用此技能。
 Action 格式：
 - 列出文件：{"action":"reference-files","args":{"task":"list"}}
 - 搜尋文件：{"action":"reference-files","args":{"task":"search","query":"關鍵字或問題","limit":5}}
@@ -31,7 +32,7 @@ async function run(ctx) {
 
     if (task === 'search') {
         const query = String(args.query || args.q || '').trim();
-        if (!query) return '請提供 query 參數，例如 {"action":"reference-files","args":{"task":"search","query":"合約條款"}}';
+        if (!query) return '錯誤：缺少 query 參數。例如 {"action":"reference-files","args":{"task":"search","query":"合約條款"}}';
         const results = ReferenceFileService.search(query, { limit: Number(args.limit || 5) });
         if (results.length === 0) return `找不到與「${query}」相關的參考文件片段。`;
         return results.map((result, index) => [
@@ -45,7 +46,7 @@ async function run(ctx) {
 
     if (task === 'read') {
         const id = String(args.id || args.fileId || args.file_id || '').trim();
-        if (!id) return '請提供 id 參數，例如 {"action":"reference-files","args":{"task":"read","id":"ref_xxx"}}';
+        if (!id) return '錯誤：缺少 id 參數。例如 {"action":"reference-files","args":{"task":"read","id":"ref_xxx"}}';
         const file = ReferenceFileService.read(id, { maxChars: Number(args.maxChars || args.max_chars || 12000) });
         if (!file) return `找不到參考文件：${id}`;
         return [
@@ -59,12 +60,12 @@ async function run(ctx) {
 
     if (task === 'reindex') {
         const id = String(args.id || args.fileId || args.file_id || '').trim();
-        if (!id) return '請提供 id 參數。';
+        if (!id) return '錯誤：缺少 id 參數。';
         const file = ReferenceFileService.indexFile(id);
         return `已重新索引：\n${formatFile(file)}`;
     }
 
-    return '未知 task。可用：list / search / read / reindex。';
+    return '錯誤：未知 task。可用：list / search / read / reindex。';
 }
 
 module.exports = {

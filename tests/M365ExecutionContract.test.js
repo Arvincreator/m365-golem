@@ -74,6 +74,32 @@ describe('M365 execution contract', () => {
             .toEqual(expect.objectContaining({ required: false, reason: 'optional_or_non_execution' }));
     });
 
+    test('accepts native attachment analysis without manufacturing a local command observation', () => {
+        const route = {
+            commandLane: { recommended: true, reason: 'local_inspection' },
+            skills: [],
+            mcpTools: [],
+        };
+
+        expect(classifyExecutionExpectation(
+            '請閱讀兩份附件，比較內容並提出三項改善建議',
+            route,
+            '分析如下',
+            { nativeAttachmentCount: 2 }
+        )).toEqual({ required: false, reason: 'native_attachment_analysis', local: false });
+    });
+
+    test('still requires execution when the attached file itself must be changed', () => {
+        const route = { commandLane: { recommended: true, reason: 'local_authoring' }, skills: [], mcpTools: [] };
+
+        expect(classifyExecutionExpectation(
+            '請修改附件並產生新的 Word 文件',
+            route,
+            '',
+            { nativeAttachmentCount: 1 }
+        )).toEqual(expect.objectContaining({ required: true, local: true }));
+    });
+
     test('does not turn explanations into an execution obligation', () => {
         const route = { commandLane: { recommended: true }, skills: [], mcpTools: [] };
         expect(classifyExecutionExpectation('請解釋 Word 文件是怎麼產生的', route, '說明')).toEqual(expect.objectContaining({ required: false }));

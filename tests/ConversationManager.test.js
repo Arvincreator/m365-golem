@@ -108,6 +108,31 @@ describe('ConversationManager', () => {
         expect(settled).toBe(true);
     });
 
+    test('returns an internal attachment receipt without dispatching it or consuming an automatic turn', async () => {
+        const receipt = {
+            text: '[GOLEM_BATCH_RECEIPT]{"schema_version":"golem_attachment_batch/1"}[/GOLEM_BATCH_RECEIPT]',
+            attachments: [],
+            status: 'ENVELOPE_COMPLETE',
+        };
+        mockBrain.sendMessage.mockResolvedValue(receipt);
+        cm = new ConversationManager(mockBrain, mockShunter, mockController);
+        const budgetSpy = jest.spyOn(cm, '_autoTurnBudget');
+
+        const result = await cm.enqueue(mockCtx, 'internal batch', {
+            bypassDebounce: true,
+            isPriority: true,
+            isSystemFeedback: true,
+            skipAutoTurnBudget: true,
+            batchIngestMode: true,
+            waitForCompletion: true,
+            attachment: { validatedByM365Harness: true, files: [{ name: 'brief.pdf' }] },
+        });
+
+        expect(result).toBe(receipt);
+        expect(budgetSpy).not.toHaveBeenCalled();
+        expect(mockShunter.dispatch).not.toHaveBeenCalled();
+    });
+
     test('should request queue approval when busy', () => {
         cm = new ConversationManager(mockBrain, mockShunter, mockController);
         jest.spyOn(cm, '_processQueue').mockImplementation(() => {});
@@ -192,6 +217,38 @@ describe('ConversationManager', () => {
             expect.objectContaining({
                 isSystemFeedback: true,
                 allowActions: false
+            })
+        );
+    });
+
+    test('keeps background maintenance hard-silent through the queue and shunter', async () => {
+        cm = new ConversationManager(mockBrain, mockShunter, mockController);
+        const budgetSpy = jest.spyOn(cm, '_autoTurnBudget');
+        cm.queue.push({
+            ctx: mockCtx,
+            text: '[GOLEM_PROJECT_MEMORY_REPAIR]\nrepair silently',
+            attachment: null,
+            options: {
+                isSystemFeedback: true,
+                suppressReply: true,
+                hardSuppressReply: true,
+                backgroundMaintenance: true,
+                skipAutoTurnBudget: true,
+            },
+        });
+
+        await cm._processQueue();
+
+        expect(budgetSpy).not.toHaveBeenCalled();
+        expect(mockShunter.dispatch).toHaveBeenCalledWith(
+            mockCtx,
+            expect.any(Object),
+            mockBrain,
+            mockController,
+            expect.objectContaining({
+                suppressReply: true,
+                hardSuppressReply: true,
+                backgroundMaintenance: true,
             })
         );
     });
